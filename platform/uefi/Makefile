@@ -25,6 +25,33 @@ STAGE_OBJS := $(addprefix $(OUT)/stage/,main.obj entry.obj q1n1-proxy.obj proxy-
     qcom-dwc3.obj usb-ports.obj gicv3.obj console.obj sysinfo.obj fbcon.obj xhci.obj ncm.obj ncm-proxy.obj preload.obj sha256.obj \
     battery.obj smem.obj glink-smem.obj pmic-router.obj live-battery.obj gpu-el2.obj call-service.obj)
 
+# Surface Pro 11 build (default off): SP11=1 SP11_USB_TABLE_C=<file written by Snapintosh tools/sp11_usb_ports.py
+# emit-c>. The table is build input generated from the board descriptor; nothing here supplies a default for it.
+# Without SP11=1 none of this is read and every command line above is unchanged.
+SP11 ?= 0
+SP11_OBJS :=
+ifeq ($(SP11),1)
+ifeq ($(strip $(SP11_USB_TABLE_C)),)
+$(error SP11=1 needs SP11_USB_TABLE_C=<C file from sp11_usb_ports.py emit-c>)
+endif
+CFLAGS += -DSNAP_PLATFORM_SP11=1
+STAGE_CFLAGS += -DSNAP_PLATFORM_SP11=1
+SP11_OBJS := $(OUT)/sp11-usb-ports.obj $(OUT)/sp11-usb-table.obj
+STAGE_OBJS += $(OUT)/stage/sp11-usb-ports.obj $(OUT)/stage/sp11-usb-table.obj
+
+$(OUT)/sp11-usb-ports.obj: platform/uefi/sp11-usb-ports.c platform/uefi/sp11-usb-ports.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT)/sp11-usb-table.obj: $(SP11_USB_TABLE_C) platform/uefi/sp11-usb-ports.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -Iplatform/uefi -c $< -o $@
+
+$(OUT)/stage/sp11-usb-table.obj: $(SP11_USB_TABLE_C) platform/uefi/sp11-usb-ports.h
+	@mkdir -p $(OUT)/stage
+	$(CC) $(STAGE_CFLAGS) -c $< -o $@
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -321,7 +348,7 @@ $(OUT)/q1n1.efi: $(OUT)/main.obj $(OUT)/entry-frame.obj $(OUT)/boot-window.obj $
     $(OUT)/q1n1-proxy.obj $(OUT)/proxy-asm.obj $(OUT)/qcom-dwc3.obj $(OUT)/usb-ports.obj $(OUT)/gicv3.obj \
     $(OUT)/console.obj $(OUT)/sysinfo.obj $(OUT)/fbcon.obj $(OUT)/xhci.obj $(OUT)/ncm.obj $(OUT)/ncm-proxy.obj \
     $(OUT)/preload.obj $(OUT)/gpt-survey.obj $(OUT)/sha256.obj $(OUT)/smem.obj $(OUT)/glink-smem.obj $(OUT)/pmic-router.obj \
-    $(OUT)/live-battery.obj $(OUT)/gpu-el2.obj $(OUT)/call-service.obj
+    $(OUT)/live-battery.obj $(OUT)/gpu-el2.obj $(OUT)/call-service.obj $(SP11_OBJS)
 	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \
 	    /dynamicbase /out:$@ $^
 

@@ -4,10 +4,18 @@
  * clock/PHY power guesses are needed: alternate bounded host/device attempts
  * while idle, and never disturb another port or a configured connection. */
 #include "usb-ports.h"
+#if SNAP_PLATFORM_SP11
+#include "sp11-usb-ports.h"
+#endif
 void *memset(void *dest, int value, size_t n);
 
 #define PORTS_MAGIC UINT64_C(0x325354524f505355)
+#if SNAP_PLATFORM_SP11
+/* Version 1 is the A16 layout with hard-coded bases. A stage built for the other platform must not adopt this state. */
+#define PORTS_VERSION 2
+#else
 #define PORTS_VERSION 1
+#endif
 #define GCTL 0xc110
 #define GSNPSID 0xc120
 #define DCTL 0xc704
@@ -48,6 +56,18 @@ _Static_assert(HOST_BATCH_OFFSET + NCM_BATCH_BYTES <= HOST_SLOT_BYTES,
                "USB port DMA regions do not overlap");
 _Static_assert(HOST_SIDE_OFFSET + NCM_SIDE_BYTES <= HOST_SLOT_BYTES,
                "USB port side buffer fits its slot");
+
+#if SNAP_PLATFORM_SP11
+_Static_assert(Q1N1_USB_PORTS == Q1N1_SP11_USB_MAX_PORTS, "the SP11 table covers exactly the ports this manager owns");
+
+/* A host-only controller never takes the device role: the Denali device tree is host-only on both enabled controllers,
+ * and a device takeover forces a VBUS override the Type-C firmware did not request (INFERRED; the table decides). */
+static int sp11_host_only(const struct q1n1_usb_port *p)
+{
+    const struct q1n1_sp11_usb_port *t = q1n1_sp11_usb_port_for_base(q1n1_sp11_usb_table_get(), p->base);
+    return t && (t->flags & Q1N1_SP11_USB_PORT_HOST_ONLY);
+}
+#endif
 
 static int host_present(const struct q1n1_usb_port *p)
 {
@@ -105,9 +125,16 @@ static int stop_port(struct q1n1_usb_ports *s, unsigned i, int graceful)
 
 static int snapshot(struct q1n1_usb_port *p)
 {
+#if SNAP_PLATFORM_SP11
+    /* The A16 equality checks below are not evidence about this SoC: judge the core by IP family and xHCI limits. */
+    if (q1n1_sp11_usb_controller_ok(q1n1_sp11_usb_port_for_base(q1n1_sp11_usb_table_get(), p->base),
+                                    qdwc3_rd(p->base + GSNPSID), qdwc3_rd(p->base), qdwc3_rd(p->base + 4)))
+        return -1;
+#else
     if (qdwc3_rd(p->base + GSNPSID) != 0x33313130 ||
         (qdwc3_rd(p->base) & 0xff) != 0x30 ||
         (qdwc3_rd(p->base + 4) >> 24) != 2) return -1;
+#endif
     p->saved = (struct qdwc3_saved){
         .gsbuscfg0 = qdwc3_rd(p->base + 0xc100), .gsbuscfg1 = qdwc3_rd(p->base + 0xc104),
         .gctl = qdwc3_rd(p->base + GCTL), .guctl = qdwc3_rd(p->base + 0xc12c),
@@ -196,6 +223,9 @@ static void maintain_port(struct q1n1_usb_ports *s, unsigned i)
     if (st->role == Q1N1_USB_OFF) {
         if (now < p->retry_at) return;
         unsigned role = p->next_role;
+#if SNAP_PLATFORM_SP11
+        if (sp11_host_only(p)) role = Q1N1_USB_HOST;
+#endif
         p->next_role = role == Q1N1_USB_HOST ? Q1N1_USB_DEVICE : Q1N1_USB_HOST;
         int result = start_port(s, i, role);
         if (result) failed(s, i, result);
@@ -262,6 +292,10 @@ static void maintain_port(struct q1n1_usb_ports *s, unsigned i)
         st->connected = 1;
         p->failures = 0;
     } else if (now >= p->deadline) {
+#if SNAP_PLATFORM_SP11
+        /* Keep waiting for a cable with the controller running: no reset, no device attempt. */
+        if (sp11_host_only(p)) { p->deadline = now + HOST_DWELL_US; return; }
+#endif
         if (stop_port(s, i, 0)) { failed(s, i, -14); return; }
         p->next_role = Q1N1_USB_DEVICE;
         p->retry_at = now + 100000u;
@@ -353,6 +387,11 @@ static int *io_checksum_state(void *ctx)
 struct q1n1_usb_ports *q1n1_usb_ports_init(uint8_t *arena, uint64_t size, int adopt)
 {
     if (!arena || ((uintptr_t)arena & 0xffff) || size < Q1N1_USB_ARENA_SIZE) return NULL;
+#if SNAP_PLATFORM_SP11
+    /* Nothing is read, adopted or cleared on a table that fails its own rules. */
+    const struct q1n1_sp11_usb_table *table = q1n1_sp11_usb_table_get();
+    if (q1n1_sp11_usb_table_validate(table)) return NULL;
+#endif
     struct q1n1_usb_ports *s = (void *)arena;
     int valid = adopt && s->magic == PORTS_MAGIC && s->version == PORTS_VERSION && s->size == sizeof(*s);
     if (!valid) memset(s, 0, sizeof(*s));
@@ -364,7 +403,22 @@ struct q1n1_usb_ports *q1n1_usb_ports_init(uint8_t *arena, uint64_t size, int ad
     for (unsigned i = 0; i < Q1N1_USB_PORTS; i++) {
         struct q1n1_usb_port *p = &s->port[i];
         struct q1n1_usb_port_status *st = &s->status[i];
+#if SNAP_PLATFORM_SP11
+        if (i >= table->count) {
+            /* A slot the table does not use owns nothing and must not be adopted. */
+            if (valid && p->base && st->role != Q1N1_USB_UNSUPPORTED && stop_port(s, i, 0)) {
+                st->role = Q1N1_USB_UNSUPPORTED;
+                continue;
+            }
+            memset(p, 0, sizeof(*p));
+            memset(st, 0, sizeof(*st));
+            st->role = Q1N1_USB_UNSUPPORTED;
+            continue;
+        }
+        uintptr_t base = (uintptr_t)table->port[i].dwc3_base;
+#else
         uintptr_t base = i ? 0x0a800000u : 0x0a600000u;
+#endif
         /* Shared pointers are valid only for this exact arena and layout. */
         int keep = valid && p->base == base && p->host.base == base &&
                    p->ncm.x == &p->host && st->role == Q1N1_USB_HOST &&
@@ -372,14 +426,23 @@ struct q1n1_usb_ports *q1n1_usb_ports_init(uint8_t *arena, uint64_t size, int ad
                    ((qdwc3_rd(base + GCTL) >> 12) & 3) == 1 &&
                    xhci_running(&p->host) && host_present(p);
         if (!keep) {
+#if SNAP_PLATFORM_SP11
+            /* The table can differ between stages: stop the controller the old state owns, wherever it was. */
+            if (valid && p->base && st->role != Q1N1_USB_UNSUPPORTED && stop_port(s, i, 0)) {
+#else
             if (valid && p->base == base && st->role != Q1N1_USB_UNSUPPORTED && stop_port(s, i, 0)) {
+#endif
                 st->role = Q1N1_USB_UNSUPPORTED;
                 continue;
             }
             memset(p, 0, sizeof(*p));
             memset(st, 0, sizeof(*st));
             p->base = base;
+#if SNAP_PLATFORM_SP11
+            p->qscratch = base + table->port[i].qscratch_offset;
+#else
             p->qscratch = base + 0xf8800;
+#endif
             p->device_dma = arena + i * HOST_SLOT_BYTES + 0x10000;
             p->host_dma = p->device_dma + QDWC3_ARENA_SIZE;
             if (snapshot(p)) { st->role = Q1N1_USB_UNSUPPORTED; continue; }
