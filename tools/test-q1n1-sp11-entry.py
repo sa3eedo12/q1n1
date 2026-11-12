@@ -130,6 +130,50 @@ class ModelMatchesSource(unittest.TestCase):
         self.assertIn('info.image_base = (uintptr_t)image->image_base;', main_c)
 
 
+class El2StateReport(unittest.TestCase):
+    """The post-ExitBootServices page reads EL2 registers. Those reads are the one thing on it that can
+    take the exception path or wedge the core, so what they are, where they run and how they are
+    spelled is pinned here."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main_c = (ROOT / 'platform/uefi/main.c').read_text(encoding='utf-8')
+        start = cls.main_c.index('static void sp11_report_el2_state(void)')
+        cls.body = cls.main_c[start:cls.main_c.index('static void sp11_draw_uptime', start)]
+
+    def test_the_call_is_guarded_by_the_current_el(self):
+        # At EL1 an EL2 register read is UNDEFINED; the page must say so instead of reading.
+        self.assertIn('if (el == 2) sp11_report_el2_state();', self.main_c)
+        self.assertIn('EL2 STATE NOT READ (NOT AT EL2)', self.main_c)
+
+    def test_the_suspect_timer_offset_registers_are_never_read(self):
+        # T03 touched CNTVOFF_EL2 and CNTPOFF_EL2 when the X2 image stalled and the board reset;
+        # Linux treats CNTVOFF_EL2 as broken on Oryon X1. Nothing on the page may wedge the core.
+        for banned in ('cntvoff', 'cntpoff', 's3_4_c14_c0_3', 's3_4_c14_c0_6'):
+            self.assertNotIn(banned, self.body.lower())
+
+    def test_ttbr1_is_read_only_with_e2h_set(self):
+        self.assertIn('if ((hcr >> 34) & 1) field("TTBR1_EL2 ", SP11_SYSREG(S3_4_C2_C0_1));', self.body)
+
+    @unittest.skipUnless(have('clang') and have('llvm-objcopy'), 'clang or llvm-objcopy not installed')
+    def test_the_raw_ttbr1_encoding_is_the_named_register(self):
+        # The name is accepted only with FEAT_VHE in the target, so the page spells it by encoding;
+        # QEMU cannot exercise the E2H branch, so the spelling is checked against the named form here.
+        BUILD.mkdir(parents=True, exist_ok=True)
+        code = {}
+        for label, text, flags in (('named', 'mrs x0, ttbr1_el2', ['-march=armv8.1-a']),
+                                   ('raw', 'mrs x0, S3_4_C2_C0_1', [])):
+            source, obj, binary = (BUILD / f'ttbr1-{label}.{ext}' for ext in ('s', 'o', 'bin'))
+            source.write_text(f'.text\n{text}\n', encoding='utf-8')
+            done = run(['clang', '--target=aarch64-none-elf'] + flags + ['-c', str(source), '-o', str(obj)])
+            self.assertEqual(done.returncode, 0, done.stderr)
+            done = run(['llvm-objcopy', '-O', 'binary', '--only-section=.text', str(obj), str(binary)])
+            self.assertEqual(done.returncode, 0, done.stderr)
+            code[label] = binary.read_bytes()
+        self.assertEqual(len(code['raw']), 4)
+        self.assertEqual(code['raw'], code['named'])
+
+
 class SharedHeader(unittest.TestCase):
     """sp11-ebs-ranges.h is the one ABI this patch has to keep identical across both repositories
     (q1n1's platform/uefi/ and the paired slbounce fork's src/); see that header's own comment."""

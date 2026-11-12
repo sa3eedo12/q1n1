@@ -61,9 +61,12 @@ extern void q1n1_enter(void) __attribute__((noreturn));
 #define EFI_ALLOCATE_ADDRESS 2
 #if SNAP_PLATFORM_SP11
 /* A fixed, human-readable identity for whichever photograph has to answer "which code ran"
- * (docs/SP11-Q1N1-BOOT-STUDY.md section 5.5): this patch's own branch/workstream label, not a
- * numeric build counter q1n1 has no existing convention for. */
-#define SP11_BUILD_ID "sa3eedo12-sp11-boot (WS-B B1)"
+ * (docs/SP11-Q1N1-BOOT-STUDY.md section 5.5): this patch's own branch/workstream label plus the
+ * commit the Makefile stamped (SP11_BUILD_STAMP; UNSTAMPED when built outside a checkout). */
+#ifndef SP11_BUILD_STAMP
+#define SP11_BUILD_STAMP "UNSTAMPED"
+#endif
+#define SP11_BUILD_ID "sa3eedo12-sp11-boot (WS-B B1) " SP11_BUILD_STAMP
 #endif
 
 /* Written for an unhandled exception and passed as the REQ_BOOT info pointer. */
@@ -586,6 +589,65 @@ static void txt_dec(struct sp11_text *t, uint64_t v)
 /* sp11_report_ebs's text. Kept, not just printed: the ExitBootServices failure page and the --el2
  * success page both repaint the whole screen, and each shows it again. */
 static struct sp11_text sp11_ebs_text;
+
+/* Reads one system register. Only ever expanded for a register this code reads at EL2 after
+ * checking CurrentEL: at EL1 an EL2 register read is UNDEFINED and would take q1n1's exception
+ * path instead of drawing the page. */
+#define SP11_SYSREG(name) ({ uint64_t value_; __asm__ volatile("mrs %0, " #name : "=r"(value_)); value_; })
+static const char *bit_text(uint64_t value, unsigned bit) { return (value >> bit) & 1 ? "1" : "0"; }
+
+/* The EL2 state slbounce's return left the CPU in, read-only, for the post-ExitBootServices page. Until
+ * this ran, the VHE host state (E2H and TGE set, stage 2 off) was INFERRED from the X2 test image's
+ * T01 read, not seen from q1n1's own entry. The register set is the one the de-VHE decision and any
+ * monitor entry depend on. Deliberately absent: CNTVOFF_EL2 and CNTPOFF_EL2, whose accesses the
+ * stalled X2 timer test (T03) touched and Linux treats as broken on Oryon X1 (SURFACE-PRO-11.md
+ * E17): nothing here is allowed to wedge the core. TTBR1_EL2 is read only when E2H is set, the one
+ * case where it is part of the translation regime; it is spelled by encoding because the assembler
+ * accepts the name only with FEAT_VHE enabled in the target.
+ *
+ * The page font has capital letters, digits and : - . / = ? ( ) _ only, so flags are key=value. */
+static void sp11_report_el2_state(void)
+{
+    uint64_t hcr = SP11_SYSREG(hcr_el2), sctlr = SP11_SYSREG(sctlr_el2);
+    out("EL2 STATE (READ ONLY)\n");
+    out("HCR_EL2 "); hex(hcr);
+    out(" E2H="); out(bit_text(hcr, 34)); out(" TGE="); out(bit_text(hcr, 27));
+    out(" VM="); out(bit_text(hcr, 0)); out(" RW="); out(bit_text(hcr, 31)); out("\n");
+    out("SCTLR_EL2 "); hex(sctlr);
+    out(" M="); out(bit_text(sctlr, 0)); out(" C="); out(bit_text(sctlr, 2));
+    out(" I="); out(bit_text(sctlr, 12)); out(" WXN="); out(bit_text(sctlr, 19));
+    out(" EE="); out(bit_text(sctlr, 25)); out("\n");
+    field("TCR_EL2 ", SP11_SYSREG(tcr_el2));
+    field("TTBR0_EL2 ", SP11_SYSREG(ttbr0_el2));
+    if ((hcr >> 34) & 1) field("TTBR1_EL2 ", SP11_SYSREG(S3_4_C2_C0_1));
+    field("MAIR_EL2 ", SP11_SYSREG(mair_el2));
+    field("VBAR_EL2 ", SP11_SYSREG(vbar_el2));
+    field("CPTR_EL2 ", SP11_SYSREG(cptr_el2));
+    field("CNTHCTL_EL2 ", SP11_SYSREG(cnthctl_el2));
+    field("CNTFRQ_EL0 ", SP11_SYSREG(cntfrq_el0));
+    field("MPIDR_EL1 ", SP11_SYSREG(mpidr_el1));
+    field("DAIF ", SP11_SYSREG(daif));
+    field("SPSEL ", SP11_SYSREG(spsel));
+}
+
+/* Redraws "UPTIME n S" on a fixed row once per heartbeat, so a single photograph taken long after
+ * the page appeared shows how long the core has been running (a blinking block alone shows only
+ * that it is). Drawn straight to the screen, never through out(): a once-a-second line must not be
+ * mirrored to the UART. The cursor is restored so nothing printed later moves. */
+static void sp11_draw_uptime(uint32_t row, uint64_t seconds)
+{
+    char digits[21];
+    unsigned i = sizeof digits - 1;
+    digits[i] = 0;
+    do { digits[--i] = (char)('0' + seconds % 10); seconds /= 10; } while (seconds);
+    uint32_t saved_row = fb.row, saved_col = fb.col;
+    rect(20, 20 + row * 9 * fb.scale, 32 * 6 * fb.scale, 9 * fb.scale, 0x080b10);
+    fb.row = row; fb.col = 0;
+    for (const char *s = "UPTIME "; *s; s++) screen_char(*s);
+    for (const char *s = digits + i; *s; s++) screen_char(*s);
+    screen_char(' '); screen_char('S');
+    fb.row = saved_row; fb.col = saved_col;
+}
 /* The facts find_framebuffer acted on, on the plain text console (no framebuffer needed). Printed
  * whether or not a GOP was accepted: on a unit with no serial console, one photograph of a refusal
  * has to distinguish "no map", "map too short", "wrong candidate" and "type rejected" by itself. */
@@ -1339,7 +1401,16 @@ void q1n1_main(void)
     rect(0,0,fb.width,fb.height,0x080b10);
     rect(0,0,fb.width,8,el == 2 ? 0x35e38b : 0xffb347);
     draw_logo();
+#if SNAP_PLATFORM_SP11 && !defined(Q1N1_STAGE)
+    out("Q1N1 / SNAPDRAGON BRINGUP\n");
+    out("BUILD " SP11_BUILD_STAMP "\n");
+    /* The uptime line lives here, directly under the build stamp, so it stays on screen however
+     * long the page below it grows (a small display clips the bottom rows). */
+    uint32_t uptime_row = fb.row;
+    out("\n\n");
+#else
     out("Q1N1 / SNAPDRAGON BRINGUP\n\n");
+#endif
     out(el == 2 ? "EL2 CONFIRMED AFTER EXITBOOTSERVICES\n" : "EL2 NOT REACHED - STILL IN EL1\n");
     field("ENTRY EL ",before_el); field("CURRENT EL ",el); field("MIDR ",midr);
     field("FRAMEBUFFER ",(uint64_t)(uintptr_t)fb.pixels);
@@ -1352,18 +1423,33 @@ void q1n1_main(void)
     /* What the scoped sweep was asked to accept and the map it was checked against: this page
      * replaced the console text that showed them just before ExitBootServices. */
     out(sp11_ebs_text.buf);
+    /* Only at EL2: an EL2 register read at EL1 is UNDEFINED. */
+    if (el == 2) sp11_report_el2_state();
+    else out("EL2 STATE NOT READ (NOT AT EL2)\n");
 #endif
 #endif
     out("USB PROXY: RUN Q1N1.EFI --BOOT\n\n");
     out("BOOT FOOTHOLD ONLY - NO GUEST OR SMP YET\n");
     out("POWER CYCLE TO RETURN TO FIRMWARE\n");
     if (fault_test) __asm__ volatile("brk #0");
+#if SNAP_PLATFORM_SP11 && !defined(Q1N1_STAGE)
+    uint64_t start = counter(), last = start, ticks = frequency();
+#else
     uint64_t last = counter(), ticks = frequency();
+#endif
     unsigned beat = 0;
+#if SNAP_PLATFORM_SP11 && !defined(Q1N1_STAGE)
+    sp11_draw_uptime(uptime_row, 0);
+#endif
     for (;;) {
         if (counter() - last >= ticks) {
             last = counter(); beat++;
             if (fb.height >= 20) rect(20,fb.height-16,32,8,beat & 1 ? 0x35e38b : 0x173023);
+#if SNAP_PLATFORM_SP11 && !defined(Q1N1_STAGE)
+            /* From the counter, not the beat count: each beat restarts the interval, so the count
+             * runs slow by however long the redraw took. A zero CNTFRQ_EL0 falls back to the beats. */
+            sp11_draw_uptime(uptime_row, ticks ? (counter() - start) / ticks : beat);
+#endif
         }
         __asm__ volatile("yield");
     }

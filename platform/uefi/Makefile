@@ -45,6 +45,14 @@ $(error SP11=1 needs SP11_STAGE_TABLE_C=<C file defining q1n1_sp11_stage_table_g
 endif
 CFLAGS += -DSNAP_PLATFORM_SP11=1
 STAGE_CFLAGS += -DSNAP_PLATFORM_SP11=1
+# SP11_BUILD_STAMP is drawn on the post-ExitBootServices page so a photograph says which commit ran. The page font
+# has capital letters, digits and '-' only, so the stamp is folded to those. `git describe --dirty` marks a tree
+# whose tracked files differ from the commit and `--exclude='*'` keeps tags out of it (the bare commit is what a
+# photograph needs); outside a git checkout it falls back to UNSTAMPED. Override with
+# SP11_BUILD_STAMP=... for a build that is not from a checkout. Inside this SP11 block, so the default build's
+# command lines are unchanged.
+SP11_BUILD_STAMP ?= $(or $(shell git describe --always --dirty --abbrev=12 --exclude='*' 2>/dev/null | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9\n-' '-'),UNSTAMPED)
+CFLAGS += -DSP11_BUILD_STAMP=\"$(SP11_BUILD_STAMP)\"
 SP11_OBJS := $(OUT)/sp11-usb-ports.obj $(OUT)/sp11-usb-table.obj $(OUT)/sp11-fbgop.obj \
     $(OUT)/sp11-stage-table.obj $(OUT)/sp11-stage-candidates.obj
 STAGE_OBJS += $(OUT)/stage/sp11-usb-ports.obj $(OUT)/stage/sp11-usb-table.obj
