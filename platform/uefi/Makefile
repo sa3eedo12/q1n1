@@ -28,15 +28,25 @@ STAGE_OBJS := $(addprefix $(OUT)/stage/,main.obj entry.obj q1n1-proxy.obj proxy-
 # Surface Pro 11 build (default off): SP11=1 SP11_USB_TABLE_C=<file written by Snapintosh tools/sp11_usb_ports.py
 # emit-c>. The table is build input generated from the board descriptor; nothing here supplies a default for it.
 # Without SP11=1 none of this is read and every command line above is unchanged.
+#
+# SP11_STAGE_TABLE_C=<C file defining q1n1_sp11_stage_table_get()> (platform/uefi/sp11-stage-table.h): the
+# board-config-supplied chainload candidate list (docs/SP11-Q1N1-BOOT-STUDY.md section 9.1). No generator tool
+# exists yet for this one (section 12 item 3 is still an open question this patch's REPORT.md records); a real build
+# needs this file from whatever carrier is eventually chosen, same fail-closed posture as SP11_USB_TABLE_C --
+# tools/testdata/sp11-stage-table-fixture.c is a test-only example, not a default.
 SP11 ?= 0
 SP11_OBJS :=
 ifeq ($(SP11),1)
 ifeq ($(strip $(SP11_USB_TABLE_C)),)
 $(error SP11=1 needs SP11_USB_TABLE_C=<C file from sp11_usb_ports.py emit-c>)
 endif
+ifeq ($(strip $(SP11_STAGE_TABLE_C)),)
+$(error SP11=1 needs SP11_STAGE_TABLE_C=<C file defining q1n1_sp11_stage_table_get(), see sp11-stage-table.h>)
+endif
 CFLAGS += -DSNAP_PLATFORM_SP11=1
 STAGE_CFLAGS += -DSNAP_PLATFORM_SP11=1
-SP11_OBJS := $(OUT)/sp11-usb-ports.obj $(OUT)/sp11-usb-table.obj
+SP11_OBJS := $(OUT)/sp11-usb-ports.obj $(OUT)/sp11-usb-table.obj $(OUT)/sp11-fbgop.obj \
+    $(OUT)/sp11-stage-table.obj $(OUT)/sp11-stage-candidates.obj
 STAGE_OBJS += $(OUT)/stage/sp11-usb-ports.obj $(OUT)/stage/sp11-usb-table.obj
 
 $(OUT)/sp11-usb-ports.obj: platform/uefi/sp11-usb-ports.c platform/uefi/sp11-usb-ports.h
@@ -50,6 +60,22 @@ $(OUT)/sp11-usb-table.obj: $(SP11_USB_TABLE_C) platform/uefi/sp11-usb-ports.h
 $(OUT)/stage/sp11-usb-table.obj: $(SP11_USB_TABLE_C) platform/uefi/sp11-usb-ports.h
 	@mkdir -p $(OUT)/stage
 	$(CC) $(STAGE_CFLAGS) -c $< -o $@
+
+# EFI-image-only (docs/SP11-Q1N1-BOOT-STUDY.md sections 8/9.1): the GOP two-tier selection and the
+# chainload candidate table are both pre-EBS logic inside main.c's own #ifndef Q1N1_STAGE block, and
+# neither is needed by a chainloaded stage (F15: a stage inherits bootinfo; it does not itself pick
+# where to load), so unlike the USB port driver above, these are not added to STAGE_OBJS.
+$(OUT)/sp11-fbgop.obj: platform/uefi/sp11-fbgop.c platform/uefi/sp11-fbgop.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT)/sp11-stage-table.obj: platform/uefi/sp11-stage-table.c platform/uefi/sp11-stage-table.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT)/sp11-stage-candidates.obj: $(SP11_STAGE_TABLE_C) platform/uefi/sp11-stage-table.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -Iplatform/uefi -c $< -o $@
 endif
 
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
@@ -241,7 +267,8 @@ $(OUT)/main.obj: platform/uefi/main.c platform/uefi/efi.h platform/uefi/fbcon.h 
     platform/uefi/usb-ebs.h platform/uefi/qcom-dwc3.h platform/uefi/q1n1-proxy.h platform/uefi/gicv3.h \
     platform/uefi/q1n1-bootinfo.h platform/uefi/live-battery.h platform/uefi/glink-smem.h \
     platform/uefi/pmic-router.h platform/uefi/smem.h platform/uefi/battery.h platform/uefi/gpu-el2.h \
-    platform/uefi/call-service.h platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h
+    platform/uefi/call-service.h platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h \
+    platform/uefi/sp11-ebs-ranges.h platform/uefi/sp11-fbgop.h platform/uefi/sp11-stage-table.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c $< -o $@
 

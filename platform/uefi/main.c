@@ -26,6 +26,15 @@
 #include "gpu-el2.h"
 #include "call-service.h"
 
+#ifndef SNAP_PLATFORM_SP11
+#define SNAP_PLATFORM_SP11 0
+#endif
+#if SNAP_PLATFORM_SP11
+#include "sp11-ebs-ranges.h"
+#include "sp11-fbgop.h"
+#include "sp11-stage-table.h"
+#endif
+
 static struct {
     volatile uint32_t *pixels;
     uint32_t width, height, stride, format, red, green, blue;
@@ -50,6 +59,12 @@ extern void q1n1_enter(void) __attribute__((noreturn));
 #define MAP_BYTES (256u * 1024)
 #define STAGE_BYTES (16u << 20)
 #define EFI_ALLOCATE_ADDRESS 2
+#if SNAP_PLATFORM_SP11
+/* A fixed, human-readable identity for whichever photograph has to answer "which code ran"
+ * (docs/SP11-Q1N1-BOOT-STUDY.md section 5.5): this patch's own branch/workstream label, not a
+ * numeric build counter q1n1 has no existing convention for. */
+#define SP11_BUILD_ID "sa3eedo12-sp11-boot (WS-B B1)"
+#endif
 
 /* Written for an unhandled exception and passed as the REQ_BOOT info pointer. */
 struct q1n1_exception {
@@ -384,6 +399,75 @@ static void find_smbios(struct efi_system_table *st)
     for (uint64_t i = 0; i < st->table_count; i++)
         if (same(&st->tables[i].guid, &smbios3, sizeof(smbios3))) info.smbios3 = (uintptr_t)st->tables[i].table;
 }
+#if SNAP_PLATFORM_SP11
+static int sp11_gop_status = Q1N1_SP11_GOP_ABSENT, sp11_gop_rule = Q1N1_SP11_GOP_RULE_NONE;
+#define SP11_GOP_MAX_MAP_ENTRIES 512u
+/* Replaces the single, unvalidated locate_protocol() call below with the two-tier,
+ * memory-map-validated selection proven under the UEFI Shell on this unit (docs/
+ * SP11-Q1N1-BOOT-STUDY.md section 8.2): every GOP the firmware offers is examined, the
+ * console's own GOP wins if it passes validation (SEL=CONSOLE), otherwise every candidate is
+ * judged as if it were the console and a single agreeing framebuffer wins (SEL=SAME) -- never a
+ * guess among disagreeing candidates (AMBIGUOUS GOP, nothing drawn). sp11_gop_status/
+ * sp11_gop_rule are read back by proxy_main's own early diagnostic line (section 5.5). */
+static void find_framebuffer(struct efi_system_table *st)
+{
+    efi_guid guid = {0x9042a9de,0x23dc,0x4a38,{0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a}};
+    uint64_t handle_count = 0;
+    efi_handle *handles = NULL;
+    if (st->boot->locate_handle_buffer(EFI_BY_PROTOCOL, &guid, NULL, &handle_count, &handles) || !handles) {
+        sp11_gop_status = Q1N1_SP11_GOP_ABSENT;
+        return;
+    }
+    static uint8_t map_buf[SP11_GOP_MAX_MAP_ENTRIES * 48]; /* oversized stride-safe; see below */
+    uint64_t map_size = sizeof map_buf, map_key = 0, map_stride = 0;
+    uint32_t map_version = 0;
+    static struct q1n1_sp11_gop_map_entry map_entries[SP11_GOP_MAX_MAP_ENTRIES];
+    uint32_t map_count = 0;
+    if (!st->boot->get_memory_map(&map_size, map_buf, &map_key, &map_stride, &map_version) &&
+        map_stride >= 40 && map_stride && !(map_size % map_stride)) {
+        uint64_t entries = map_size / map_stride;
+        if (entries > SP11_GOP_MAX_MAP_ENTRIES) entries = SP11_GOP_MAX_MAP_ENTRIES;
+        for (uint64_t n = 0; n < entries; n++) {
+            const uint8_t *e = map_buf + n * map_stride;
+            map_entries[n].type = get32(e);
+            map_entries[n].base = get64(e + 8);
+            map_entries[n].pages = get64(e + 24);
+        }
+        map_count = (uint32_t)entries;
+    }
+
+    static struct q1n1_sp11_gop_candidate cand[Q1N1_SP11_GOP_MAX_CANDIDATES];
+    uint32_t count = 0;
+    for (uint64_t i = 0; i < handle_count && count < Q1N1_SP11_GOP_MAX_CANDIDATES; i++) {
+        struct efi_gop *gop = NULL;
+        if (st->boot->handle_protocol(handles[i], &guid, (void **)&gop) || !gop || !gop->mode || !gop->mode->info)
+            continue;
+        struct efi_gop_info *gi = gop->mode->info;
+        cand[count].is_console = handles[i] == st->console_out_handle;
+        cand[count].base = gop->mode->framebuffer;
+        cand[count].size_bytes = gop->mode->framebuffer_size;
+        cand[count].width = gi->width; cand[count].height = gi->height;
+        cand[count].pixels_per_scanline = gi->stride; cand[count].pixel_format = gi->format;
+        count++;
+    }
+    st->boot->free_pool(handles);
+
+    struct q1n1_sp11_gop_result result;
+    q1n1_sp11_gop_select(map_entries, map_count, cand, count, &result);
+    sp11_gop_status = result.status;
+    sp11_gop_rule = result.rule;
+    if (result.status != Q1N1_SP11_GOP_OK) return;
+
+    const struct q1n1_sp11_gop_candidate *c = &cand[result.index];
+    fb.pixels = (void *)(uintptr_t)c->base;
+    fb.bytes = c->size_bytes;
+    fb.width = c->width; fb.height = c->height; fb.stride = c->pixels_per_scanline; fb.format = c->pixel_format;
+    fb.red = c->pixel_format == 0 ? 0xff : 0xff0000;
+    fb.green = 0xff00;
+    fb.blue = c->pixel_format == 0 ? 0xff0000 : 0xff;
+    fb.scale = fb.width >= 1600 ? 3 : 2;
+}
+#else
 static void find_framebuffer(struct efi_system_table *st)
 {
     efi_guid guid = {0x9042a9de,0x23dc,0x4a38,{0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a}};
@@ -403,6 +487,7 @@ static void find_framebuffer(struct efi_system_table *st)
     if (info->format == 2) { fb.red = info->red; fb.green = info->green; fb.blue = info->blue; }
     fb.scale = fb.width >= 1600 ? 3 : 2;
 }
+#endif /* SNAP_PLATFORM_SP11 */
 static int option(struct efi_loaded_image *image, const char *word)
 {
     if (!image || !image->options || image->options_size > 65536) return 0;
@@ -945,6 +1030,35 @@ static void proxy_main(void)
         break;
     }
 
+#if SNAP_PLATFORM_SP11
+#ifndef Q1N1_STAGE
+    /* docs/SP11-Q1N1-BOOT-STUDY.md section 5.5 point 3: the framebuffer console comes up and shows
+     * something durable -- a build id, the entry/current EL -- before GIC bring-up or any USB-link
+     * attempt, so that if the unexplained post-bounce reset (constraint 5) recurs, whatever got
+     * drawn survives as a photographable record. con_init/the logo switch above are already the
+     * earliest point the console is usable; this block is placed before even the pre-existing
+     * "q1n1 payload @ ..."/EL-confirmed line below, so it is first on screen before
+     * sysinfo_acpi/sysinfo_cpu/sysinfo_uefi/sysinfo_smbios/sysinfo_memory parse ACPI/SMBIOS/the
+     * memory map -- new, unfamiliar data on this platform that this design does not want to spend
+     * part of the unexplained reset budget on before the two facts a photograph most needs exist.
+     *
+     * !Q1N1_STAGE: sp11_gop_status/sp11_gop_rule are set only by find_framebuffer (the #ifndef
+     * Q1N1_STAGE block above), which a chainloaded stage never calls -- it inherits an already-
+     * drawn framebuffer through bootinfo instead of re-selecting a GOP (F15). This diagnostic is
+     * about what *this image itself* discovered bringing its own console up, so it is specific to
+     * the original EFI image, not every stage after it; carrying the GOP outcome across a
+     * chainload would need a new bootinfo field, out of this patch's scope (see REPORT.md). */
+    con_at(0, 0);
+    con_puts("q1n1: SP11 build " SP11_BUILD_ID "\n");
+    con_puts("q1n1: entry EL "); con_dec(info.entry_el); con_puts(", current EL "); con_dec(el);
+    con_puts("\n");
+    con_puts(sp11_gop_status == Q1N1_SP11_GOP_OK ? "q1n1: GOP SEL=" : "q1n1: GOP REFUSED=");
+    con_puts(sp11_gop_status == Q1N1_SP11_GOP_OK ? q1n1_sp11_gop_rule_name(sp11_gop_rule)
+                                                 : q1n1_sp11_gop_status_name(sp11_gop_status));
+    con_puts("\n");
+#endif /* !Q1N1_STAGE */
+#endif /* SNAP_PLATFORM_SP11 */
+
     /* An m1n1-shaped boot log: subsystem, colon, what it found. */
     con_at(0, 0);
     con_puts("q1n1 ");
@@ -1071,6 +1185,31 @@ static void proxy_main(void)
 void q1n1_main(void) __attribute__((noreturn));
 void q1n1_main(void)
 {
+#if SNAP_PLATFORM_SP11
+    /* Fail-closed EL2 check (docs/SP11-Q1N1-BOOT-STUDY.md section 5.3): the first instruction run
+     * after leave_firmware's exit_boot_services call returns, before proxy_main (F09's existing
+     * gap: a cosmetic warning, then an unconditional 55-line walk into q1n1_gic_init's EL2-only
+     * register writes). Read CurrentEL fresh -- never before this line -- and refuse outright if
+     * it is not 2, rather than only warn and continue. Does not apply to the --el2 diagnostic
+     * (MODE_FOOTHOLD): showing "EL2 NOT REACHED" without refusing is that tool's entire purpose.
+     *
+     * Reuses G03's own drawing primitives (rect/out/field, q1n1_fault's own building blocks) for
+     * the same visual convention, but not q1n1_fault() itself: that function resets after 30 s for
+     * mode != MODE_FOOTHOLD (q1n1_fault, above), which is the opposite of what constraint 4/section
+     * 5.3 requires here (no ResetSystem, no automatic PSCI reset -- an automatic retry into the
+     * same failing bounce is not obviously safer than a diagnosable halt). This patch's REPORT.md
+     * records this as the one place "reuse G03, do not build a new one" could not mean "call the
+     * existing function unchanged" and says so rather than silently choosing either reading. */
+    if (mode != MODE_FOOTHOLD && current_el() != 2) {
+        uart.enabled = 0;
+        rect(0,0,fb.width,fb.height,0x080b10);
+        rect(0,0,fb.width,8,0xff3040);
+        out("Q1N1 SP11: EL2 NOT REACHED AFTER EXITBOOTSERVICES\n");
+        field("ENTRY EL ",before_el); field("CURRENT EL ",current_el());
+        out("HALTED - NO RESET - SLBOUNCE DID NOT REACH EL2\n");
+        for (;;) __asm__ volatile("wfe");
+    }
+#endif
     if (mode != MODE_FOOTHOLD) proxy_main();
     uint64_t el = current_el(), midr;
     __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
@@ -1101,6 +1240,45 @@ void q1n1_main(void)
 }
 
 #ifndef Q1N1_STAGE
+#if SNAP_PLATFORM_SP11
+/* Builds and writes the declared-ranges table (docs/SP11-Q1N1-BOOT-STUDY.md section 4.4/7.2): the
+ * same seven ranges gpu_setup() already excludes from its own GPU DMA claim (F14, gpu_setup()
+ * below) for an unrelated reason. Not shared directly with that array: gpu_setup() runs from
+ * proxy_main(), after ExitBootServices, and this must run before it -- this patch's REPORT.md
+ * explains the duplication and the "keep both lists in sync" note this leaves. The memory-map-
+ * buffer range is this function's own `map`/MAP_BYTES, the full allocation, not the live map_size
+ * a retried get_memory_map call can shrink to; MAP_BYTES is fixed before the retry loop starts, so
+ * writing this once here, before that loop, is correct for every attempt inside it. A write
+ * failure is not itself treated as fatal here: the paired slbounce fork, if built with
+ * SLBOUNCE_SCOPED_SWEEP, refuses ExitBootServices on its own when the variable is absent or
+ * malformed (q1n1 need not duplicate that policy, only supply the data this function can). */
+static void sp11_declare_ranges(uint64_t map_base, uint64_t map_bytes)
+{
+    if (!rt) return;
+    struct sp11_ebs_ranges_table t = {0};
+    t.magic = SP11_EBS_RANGES_MAGIC;
+    t.version = SP11_EBS_RANGES_VERSION;
+    /* 1 MiB: this project's own existing GPU-submission chunk cap (AGENTS.md: "never submit a
+     * single CP_MEMCPY larger than 1 MiB"), reused here for the same reason
+     * tools/sp11_ebs_sweep_model.py's DEFAULT_CHUNK_CAP is -- an unmeasured but bounded unit of
+     * work, not a measurement of any real hang's cause. */
+    t.chunk_cap = 1u << 20;
+    struct sp11_ebs_range ranges[7] = {
+        {info.heap_base, info.heap_size}, {info.dma_base, info.dma_size},
+        {info.stage_base, info.stage_size}, {info.image_base, info.image_size},
+        {map_base, map_bytes}, {info.preload_table, info.preload_size},
+        {info.fb_base, info.fb_size},
+    };
+    for (unsigned i = 0; i < 7 && t.count < SP11_EBS_MAX_RANGES; i++)
+        if (ranges[i].size) t.range[t.count++] = ranges[i]; /* skip an unpopulated optional range */
+    if (t.count == 0) return; /* nothing to declare; never write an empty table */
+    t.checksum = sp11_ebs_ranges_fnv((const uint8_t *)&t, offsetof(struct sp11_ebs_ranges_table, checksum));
+    efi_guid guid = SP11_EBS_RANGES_GUID_INIT;
+    static const char16 name[] = SP11_EBS_RANGES_VARIABLE_NAME_U16;
+    rt->set_variable(name, &guid, 2 /* EFI_VARIABLE_BOOTSERVICE_ACCESS */, sizeof t, &t);
+}
+#endif
+
 static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st, const char *message)
 {
     efi_status status = st->boot->set_watchdog(0,0,0,NULL);
@@ -1111,6 +1289,14 @@ static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st,
     uint32_t version = 0;
     status = st->boot->allocate_pages(0,EFI_LOADER_DATA,MAP_BYTES / 4096,&map);
     if (status) return status;
+#if SNAP_PLATFORM_SP11
+    /* Only for the real --boot/--uart-proxy path (mode != MODE_FOOTHOLD): the --el2 diagnostic
+     * never populates info.heap_base et al. at all, and declaring an all-zero table would be
+     * worse than declaring none (section 4.4's own "fail closed", not "declare nothing and
+     * proceed as if that were fine", governs an EBS this function's own caller does not expect to
+     * fail just because it chose the diagnostic path). */
+    if (mode != MODE_FOOTHOLD) sp11_declare_ranges(map, MAP_BYTES);
+#endif
     firmware_out(st,message);
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         map_size = MAP_BYTES;
@@ -1202,6 +1388,27 @@ static efi_status proxy_efi_main(efi_handle handle, struct efi_system_table *st,
     /* A fixed region for chainloaded stages: they are linked for one of these
      * addresses, so no relocation is needed. The host picks the matching
      * binary by reading stage_base back out of bootinfo. */
+#if SNAP_PLATFORM_SP11
+    /* docs/SP11-Q1N1-BOOT-STUDY.md section 9.1: a board-config-supplied candidate list, refusing
+     * to fall back to the A16 addresses -- the SP11 DRAM map is UNKNOWN until X2 item 8 measures
+     * it, the same fail-closed posture SP11-HOST-LINK-STUDY.md already uses for the USB table
+     * ("nothing here supplies a default... unknown values fail closed"). An invalid or missing
+     * table (no generator has been built for this one yet, section 12 item 3) leaves stage_base/
+     * stage_size at 0: no chainload target exists, but the SP11 flow still reaches a framebuffer
+     * console (constraint 5/section 5.5), which does not itself require a stage slot. */
+    const struct q1n1_sp11_stage_table *stage_table = q1n1_sp11_stage_table_get();
+    if (q1n1_sp11_stage_table_validate(stage_table) == Q1N1_SP11_STAGE_OK) {
+        for (uint32_t n = 0; n < stage_table->count; n++) {
+            uint64_t address = stage_table->candidate[n];
+            if (!st->boot->allocate_pages(EFI_ALLOCATE_ADDRESS, 1 /* EfiLoaderCode */,
+                                          Q1N1_SP11_STAGE_BYTES / 4096, &address)) {
+                info.stage_base = address;
+                info.stage_size = Q1N1_SP11_STAGE_BYTES;
+                break;
+            }
+        }
+    }
+#else
     static const uint64_t stage_candidates[] = {0xb0000000, 0x4c000000, 0xa0000000};
     for (unsigned n = 0; n < sizeof(stage_candidates) / sizeof(stage_candidates[0]); n++) {
         uint64_t address = stage_candidates[n];
@@ -1212,6 +1419,7 @@ static efi_status proxy_efi_main(efi_handle handle, struct efi_system_table *st,
             break;
         }
     }
+#endif
     /* The Adreno GPU arena (gpu-el2.h), reserved while firmware can still say
      * no: the final map then calls it LoaderData and nothing reuses it.
      * Optional -- without it a stage claims one from Conventional memory.

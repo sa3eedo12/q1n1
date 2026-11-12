@@ -164,8 +164,14 @@ class DefaultOff(unittest.TestCase):
     def test_sp11_wiring_compiles_and_links_with_a_fixture_table(self):
         out = BUILD / 'link-check'
         shutil.rmtree(out, ignore_errors=True)
+        # SP11_STAGE_TABLE_C: this patch's own build now also gates on the chainload
+        # candidate table (sp11-stage-table.h, docs/SP11-Q1N1-BOOT-STUDY.md section 9.1,
+        # tools/test-q1n1-sp11-entry.py), added on top of this USB-table gate by a later
+        # SP11=1 consumer; both are required together now, so this pre-existing test supplies
+        # both fixtures, same fail-closed posture, not a relaxation of either gate.
         done = run(['make', '-f', 'platform/uefi/Makefile', f'OUT={out.relative_to(ROOT)}', '-j2', 'all', 'SP11=1',
-                    'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixture.c'])
+                    'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixture.c',
+                    'SP11_STAGE_TABLE_C=tools/testdata/sp11-stage-table-fixture.c'])
         self.assertEqual(done.returncode, 0, done.stdout[-1500:] + done.stderr[-1500:])
         for artefact in ('q1n1.efi', 'q1n1-stage.bin', 'stage/sp11-usb-ports.obj', 'stage/sp11-usb-table.obj'):
             self.assertTrue((out / artefact).is_file(), artefact)
