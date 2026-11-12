@@ -37,7 +37,9 @@ struct efi_boot_services {
     void *signal_event, *close_event, *check_event;
     void *install_protocol, *reinstall_protocol, *uninstall_protocol;
     efi_status (*handle_protocol)(efi_handle, efi_guid *, void **);
-    void *reserved, *register_notify, *locate_handle, *locate_device_path;
+    void *reserved, *register_notify;
+    efi_status (*locate_handle)(uint32_t, efi_guid *, void *, uint64_t *, efi_handle *);
+    void *locate_device_path;
     void *install_config, *load_image, *start_image, *exit, *unload_image;
     efi_status (*exit_boot_services)(efi_handle, uint64_t);
     void *get_next_monotonic_count, *stall;
@@ -109,5 +111,6 @@ _Static_assert(offsetof(struct efi_boot_services, free_pool) == 72, "UEFI FreePo
 _Static_assert(offsetof(struct efi_boot_services, connect_controller) == 264, "UEFI ConnectController ABI");
 _Static_assert(offsetof(struct efi_boot_services, locate_handle_buffer) == 312, "UEFI LocateHandleBuffer ABI");
 _Static_assert(offsetof(struct efi_boot_services, locate_protocol) == 320, "UEFI LocateProtocol ABI");
+_Static_assert(offsetof(struct efi_boot_services, locate_handle) == 176, "UEFI LocateHandle ABI");
 _Static_assert(offsetof(struct efi_system_table, boot) == 96, "UEFI system ABI");
 _Static_assert(offsetof(struct efi_loaded_image, options) == 56, "UEFI image ABI");

@@ -402,22 +402,39 @@ static void find_smbios(struct efi_system_table *st)
 #if SNAP_PLATFORM_SP11
 static int sp11_gop_status = Q1N1_SP11_GOP_ABSENT, sp11_gop_rule = Q1N1_SP11_GOP_RULE_NONE;
 #define SP11_GOP_MAX_MAP_ENTRIES 512u
+/* The handle-enumeration buffer, pre-sized and caller-owned, not grown: a count this image
+ * cannot represent is refused (count capped below), never silently truncated without saying so.
+ * 32 matches probes/uefi/probe_main.c's own PROBE_MAX_GOP_HANDLES -- the same bound, for the same
+ * reason (ample headroom over any GOP handle count a real system publishes). */
+#define SP11_GOP_MAX_RAW_HANDLES 32u
 /* Replaces the single, unvalidated locate_protocol() call below with the two-tier,
  * memory-map-validated selection proven under the UEFI Shell on this unit (docs/
  * SP11-Q1N1-BOOT-STUDY.md section 8.2): every GOP the firmware offers is examined, the
  * console's own GOP wins if it passes validation (SEL=CONSOLE), otherwise every candidate is
  * judged as if it were the console and a single agreeing framebuffer wins (SEL=SAME) -- never a
  * guess among disagreeing candidates (AMBIGUOUS GOP, nothing drawn). sp11_gop_status/
- * sp11_gop_rule are read back by proxy_main's own early diagnostic line (section 5.5). */
+ * sp11_gop_rule are read back by proxy_main's own early diagnostic line (section 5.5).
+ *
+ * Enumeration uses LocateHandle with a caller-supplied, pre-sized buffer (the exact call style
+ * probes/uefi/probe_main.c's gather_gop already uses and that is OBSERVED to find this unit's GOP
+ * handles under the UEFI Shell, 2026-11-11/12), not LocateHandleBuffer (a different boot service
+ * that internally allocates its own buffer via AllocatePool): a first hardware attempt with
+ * LocateHandleBuffer found it returning no handles at all for this exact protocol GUID on this
+ * unit, while the probe's LocateHandle call succeeds for the same GUID in the same shell session.
+ * Nothing here explains that difference (both are standard UEFI boot services; this unit's own
+ * firmware is not public), so the safer engineering choice is the mechanism already proven on
+ * this hardware, not a further, unverified theory about why the other one failed. */
 static void find_framebuffer(struct efi_system_table *st)
 {
     efi_guid guid = {0x9042a9de,0x23dc,0x4a38,{0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a}};
-    uint64_t handle_count = 0;
-    efi_handle *handles = NULL;
-    if (st->boot->locate_handle_buffer(EFI_BY_PROTOCOL, &guid, NULL, &handle_count, &handles) || !handles) {
+    efi_handle handles[SP11_GOP_MAX_RAW_HANDLES];
+    uint64_t size = sizeof handles;
+    if (st->boot->locate_handle(EFI_BY_PROTOCOL, &guid, NULL, &size, handles)) {
         sp11_gop_status = Q1N1_SP11_GOP_ABSENT;
         return;
     }
+    uint64_t handle_count = size / sizeof(efi_handle);
+    if (handle_count > SP11_GOP_MAX_RAW_HANDLES) handle_count = SP11_GOP_MAX_RAW_HANDLES;
     static uint8_t map_buf[SP11_GOP_MAX_MAP_ENTRIES * 48]; /* oversized stride-safe; see below */
     uint64_t map_size = sizeof map_buf, map_key = 0, map_stride = 0;
     uint32_t map_version = 0;
@@ -450,7 +467,6 @@ static void find_framebuffer(struct efi_system_table *st)
         cand[count].pixels_per_scanline = gi->stride; cand[count].pixel_format = gi->format;
         count++;
     }
-    st->boot->free_pool(handles);
 
     struct q1n1_sp11_gop_result result;
     q1n1_sp11_gop_select(map_entries, map_count, cand, count, &result);
@@ -1324,10 +1340,45 @@ static efi_status proxy_efi_main(efi_handle handle, struct efi_system_table *st,
     efi_status refused = usb_mode ? 0 : EFI_UNSUPPORTED;
     rt = st->runtime_services;
     hz = frequency();
+#if SNAP_PLATFORM_SP11
+    /* Named, one condition at a time, so a refusal can be diagnosed on the plain text console
+     * (unlike fbcon, it needs no GOP framebuffer, so it is the one channel every one of these
+     * six failure modes can still reach) without collapsing them into one message -- on a
+     * platform with no serial console and no way to re-run interactively (this unit, so far),
+     * that costs a whole physical test cycle to tell two causes apart. fbcon_init(st) is called
+     * under the exact same guard the original expression used (ok_image && ok_rt && ok_hz &&
+     * ok_fb): never before those four hold, and exactly once, so this changes no observable
+     * behaviour, only what can be read back about it. */
+    int ok_image = image != NULL;
+    int ok_rt = rt != NULL;
+    int ok_hz = hz != 0;
+    int ok_fb = fb.pixels != NULL;
+    int ok_fbcon = ok_image && ok_rt && ok_hz && ok_fb && fbcon_init(st);
+    int ok_el = before_el == 1 || before_el == 2;
+    if (!ok_image || !ok_rt || !ok_hz || !ok_fb || !ok_fbcon || !ok_el) {
+        firmware_out(st, ok_image ? "SP11: LoadedImage ok.\n" : "SP11: LoadedImage MISSING.\n");
+        firmware_out(st, ok_rt ? "SP11: RuntimeServices ok.\n" : "SP11: RuntimeServices MISSING.\n");
+        firmware_out(st, ok_hz ? "SP11: timer frequency ok.\n" : "SP11: timer frequency ZERO.\n");
+        firmware_out(st, ok_fb ? "SP11: framebuffer ok.\n" : "SP11: framebuffer ABSENT.\n");
+        if (!ok_fb) {
+            firmware_out(st, "SP11: GOP status=");
+            firmware_out(st, q1n1_sp11_gop_status_name(sp11_gop_status));
+            firmware_out(st, "\n");
+        } else if (ok_image && ok_rt && ok_hz) {
+            /* fbcon_init was actually attempted (the same guard as above): say whether it, not
+             * an earlier precondition, is what failed. */
+            firmware_out(st, ok_fbcon ? "SP11: fbcon_init ok.\n" : "SP11: fbcon_init FAILED.\n");
+        }
+        firmware_out(st, ok_el ? "SP11: entry EL ok.\n" : "SP11: entry EL UNEXPECTED.\n");
+        firmware_out(st, "REFUSED: LoadedImage, runtime services, timer, or framebuffer unavailable.\n");
+        return refused;
+    }
+#else
     if (!image || !rt || !hz || !fb.pixels || !fbcon_init(st) || (before_el != 1 && before_el != 2)) {
         firmware_out(st, "REFUSED: LoadedImage, runtime services, timer, or framebuffer unavailable.\n");
         return refused;
     }
+#endif /* SNAP_PLATFORM_SP11 */
     info.magic = Q1N1_BOOTINFO_MAGIC; info.version = 1; info.size = sizeof(info);
     info.image_base = (uintptr_t)image->image_base; info.image_size = image->image_size;
     info.entry_el = before_el; info.timer_hz = hz;
