@@ -52,12 +52,52 @@ struct q1n1_sp11_gop_candidate {
     uint32_t width, height, pixels_per_scanline, pixel_format;
 };
 
-/* One EFI_MEMORY_DESCRIPTOR, reduced to what containment needs (q1n1's own get32/get64 convention,
- * main.c, already extracts exactly these three fields for sysinfo_memory). */
+/* One EFI_MEMORY_DESCRIPTOR, reduced to what containment and range facts need (q1n1's own
+ * get32/get64 convention, main.c, already extracts type/base/pages for sysinfo_memory). attribute
+ * is the descriptor's capability bits (EFI_MEMORY_WB is bit 3), not how the range is mapped. */
 struct q1n1_sp11_gop_map_entry {
     uint32_t type;
     uint64_t base, pages;
+    uint64_t attribute;
 };
+
+/* How one address range sits in the memory map, as facts for whoever reads a photograph of them.
+ * No verdict: which types a consumer accepts (slbounce's scoped sweep takes only some) stays with
+ * that consumer, so this cannot drift from its policy. `overlapping` counts the descriptors that
+ * overlap [base, base + size); type and attribute are those of the first one in array order;
+ * `contained` is set only when exactly one descriptor overlaps and it holds the whole range. A
+ * zero-size range overlaps nothing. */
+struct q1n1_sp11_range_facts {
+    uint32_t overlapping;
+    uint32_t type;
+    uint64_t attribute;
+    int contained;
+};
+void q1n1_sp11_range_facts(const struct q1n1_sp11_gop_map_entry *map, uint32_t map_count, uint64_t base,
+                           uint64_t size, struct q1n1_sp11_range_facts *out);
+
+/* Why the firmware's raw GetMemoryMap buffer did not become an entry array. */
+enum {
+    Q1N1_SP11_MAP_OK = 0,
+    Q1N1_SP11_MAP_EMPTY,       /* map_size is 0 */
+    Q1N1_SP11_MAP_BAD_STRIDE,  /* descriptor size below the 40 bytes UEFI defines (includes 0) */
+    Q1N1_SP11_MAP_BAD_SIZE,    /* map_size is not a whole number of descriptors */
+    Q1N1_SP11_MAP_TOO_MANY,    /* more descriptors than the caller's array holds */
+};
+const char *q1n1_sp11_map_status_name(int status);
+
+/* Decodes the descriptors firmware wrote (type at +0, physical start at +8, page count at +24,
+ * attribute at +32, all little-endian; the virtual start is not needed and any bytes past the 40
+ * defined ones, which firmware may add, are skipped via `stride`). On any
+ * status other than Q1N1_SP11_MAP_OK, *count is 0 and `out` is untouched.
+ *
+ * A map that does not fit `capacity` is refused, never truncated: a truncated copy loses the end of
+ * the array, and OBSERVED for this unit the framebuffer's descriptor is the 225th of 226 (the last
+ * ranges the firmware lists are its RESERVED ones; the array is two ascending runs, not one, so
+ * nothing here may assume address order). A truncated copy would turn a valid framebuffer into a
+ * spurious Q1N1_SP11_GOP_NOT_IN_MAP with nothing to say why. */
+int q1n1_sp11_gop_map_parse(const uint8_t *raw, uint64_t map_size, uint64_t stride,
+                            struct q1n1_sp11_gop_map_entry *out, uint32_t capacity, uint32_t *count);
 
 struct q1n1_sp11_gop_result {
     int status;   /* Q1N1_SP11_GOP_OK when a framebuffer was chosen */

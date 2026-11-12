@@ -401,12 +401,34 @@ static void find_smbios(struct efi_system_table *st)
 }
 #if SNAP_PLATFORM_SP11
 static int sp11_gop_status = Q1N1_SP11_GOP_ABSENT, sp11_gop_rule = Q1N1_SP11_GOP_RULE_NONE;
-#define SP11_GOP_MAX_MAP_ENTRIES 512u
+/* 128 KiB, 16-byte aligned: the size and alignment of probes/uefi/probe_main.c's own memory-map
+ * buffer (Snapintosh repository), which holds this unit's 226-descriptor, 10848-byte map with
+ * more than ten times to spare. The entry array holds as many descriptors as the buffer can (40
+ * bytes is the smallest UEFI defines), so any map GetMemoryMap accepts into the buffer also fits
+ * the array and q1n1_sp11_gop_map_parse's TOO_MANY refusal is a backstop, not an expected path.
+ * An earlier 24 KiB buffer capped at 512 entries and dropped the end of a longer map silently. */
+#define SP11_GOP_MAP_BUF_BYTES (128u * 1024u)
+#define SP11_GOP_MAX_MAP_ENTRIES (SP11_GOP_MAP_BUF_BYTES / 40u)
+/* Shared by find_framebuffer (before any allocation) and sp11_report_ebs (just before
+ * ExitBootServices): each fully rewrites it, so neither sees the other's entries. */
+static struct q1n1_sp11_gop_map_entry sp11_map_entries[SP11_GOP_MAX_MAP_ENTRIES];
 /* The handle-enumeration buffer, pre-sized and caller-owned, not grown: a count this image
  * cannot represent is refused (count capped below), never silently truncated without saying so.
  * 32 matches probes/uefi/probe_main.c's own PROBE_MAX_GOP_HANDLES -- the same bound, for the same
  * reason (ample headroom over any GOP handle count a real system publishes). */
 #define SP11_GOP_MAX_RAW_HANDLES 32u
+/* Everything find_framebuffer saw, kept for sp11_report_gop: a refusal on a unit with no serial
+ * console and no way to re-run interactively has to say why on the one photograph a hardware
+ * attempt yields, and the plain text console it prints on needs no framebuffer. */
+static struct {
+    efi_status locate_status, map_status;
+    uint64_t handle_bytes, map_bytes, map_stride;
+    uint32_t map_count, count;
+    int map_parse, check[Q1N1_SP11_GOP_MAX_CANDIDATES];
+    struct q1n1_sp11_gop_candidate cand[Q1N1_SP11_GOP_MAX_CANDIDATES];
+    uint32_t overlaps[Q1N1_SP11_GOP_MAX_CANDIDATES];
+    struct q1n1_sp11_gop_map_entry first_overlap[Q1N1_SP11_GOP_MAX_CANDIDATES];
+} sp11_gop_diag;
 /* Replaces the single, unvalidated locate_protocol() call below with the two-tier,
  * memory-map-validated selection proven under the UEFI Shell on this unit (docs/
  * SP11-Q1N1-BOOT-STUDY.md section 8.2): every GOP the firmware offers is examined, the
@@ -429,31 +451,28 @@ static void find_framebuffer(struct efi_system_table *st)
     efi_guid guid = {0x9042a9de,0x23dc,0x4a38,{0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a}};
     efi_handle handles[SP11_GOP_MAX_RAW_HANDLES];
     uint64_t size = sizeof handles;
-    if (st->boot->locate_handle(EFI_BY_PROTOCOL, &guid, NULL, &size, handles)) {
+    sp11_gop_diag.locate_status = st->boot->locate_handle(EFI_BY_PROTOCOL, &guid, NULL, &size, handles);
+    sp11_gop_diag.handle_bytes = size;
+    if (sp11_gop_diag.locate_status) {
         sp11_gop_status = Q1N1_SP11_GOP_ABSENT;
         return;
     }
     uint64_t handle_count = size / sizeof(efi_handle);
     if (handle_count > SP11_GOP_MAX_RAW_HANDLES) handle_count = SP11_GOP_MAX_RAW_HANDLES;
-    static uint8_t map_buf[SP11_GOP_MAX_MAP_ENTRIES * 48]; /* oversized stride-safe; see below */
+    static uint8_t map_buf[SP11_GOP_MAP_BUF_BYTES] __attribute__((aligned(16)));
+    struct q1n1_sp11_gop_map_entry *map_entries = sp11_map_entries;
     uint64_t map_size = sizeof map_buf, map_key = 0, map_stride = 0;
-    uint32_t map_version = 0;
-    static struct q1n1_sp11_gop_map_entry map_entries[SP11_GOP_MAX_MAP_ENTRIES];
-    uint32_t map_count = 0;
-    if (!st->boot->get_memory_map(&map_size, map_buf, &map_key, &map_stride, &map_version) &&
-        map_stride >= 40 && map_stride && !(map_size % map_stride)) {
-        uint64_t entries = map_size / map_stride;
-        if (entries > SP11_GOP_MAX_MAP_ENTRIES) entries = SP11_GOP_MAX_MAP_ENTRIES;
-        for (uint64_t n = 0; n < entries; n++) {
-            const uint8_t *e = map_buf + n * map_stride;
-            map_entries[n].type = get32(e);
-            map_entries[n].base = get64(e + 8);
-            map_entries[n].pages = get64(e + 24);
-        }
-        map_count = (uint32_t)entries;
-    }
+    uint32_t map_version = 0, map_count = 0;
+    sp11_gop_diag.map_status = st->boot->get_memory_map(&map_size, map_buf, &map_key, &map_stride, &map_version);
+    sp11_gop_diag.map_parse = Q1N1_SP11_MAP_EMPTY;
+    if (!sp11_gop_diag.map_status)
+        sp11_gop_diag.map_parse = q1n1_sp11_gop_map_parse(map_buf, map_size, map_stride, map_entries,
+                                                          SP11_GOP_MAX_MAP_ENTRIES, &map_count);
+    sp11_gop_diag.map_bytes = map_size;
+    sp11_gop_diag.map_stride = map_stride;
+    sp11_gop_diag.map_count = map_count;
 
-    static struct q1n1_sp11_gop_candidate cand[Q1N1_SP11_GOP_MAX_CANDIDATES];
+    struct q1n1_sp11_gop_candidate *cand = sp11_gop_diag.cand;
     uint32_t count = 0;
     for (uint64_t i = 0; i < handle_count && count < Q1N1_SP11_GOP_MAX_CANDIDATES; i++) {
         struct efi_gop *gop = NULL;
@@ -466,6 +485,17 @@ static void find_framebuffer(struct efi_system_table *st)
         cand[count].width = gi->width; cand[count].height = gi->height;
         cand[count].pixels_per_scanline = gi->stride; cand[count].pixel_format = gi->format;
         count++;
+    }
+    sp11_gop_diag.count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        sp11_gop_diag.check[i] = q1n1_sp11_gop_check(map_entries, map_count, &cand[i]);
+        uint64_t end = cand[i].base + (cand[i].size_bytes ? cand[i].size_bytes : 4);
+        for (uint32_t m = 0; m < map_count; m++) {
+            uint64_t m_end = map_entries[m].base + map_entries[m].pages * 4096u;
+            if (map_entries[m].base >= end || m_end <= cand[i].base) continue;
+            if (!sp11_gop_diag.overlaps[i]) sp11_gop_diag.first_overlap[i] = map_entries[m];
+            sp11_gop_diag.overlaps[i]++;
+        }
     }
 
     struct q1n1_sp11_gop_result result;
@@ -526,6 +556,83 @@ static void firmware_out(struct efi_system_table *st, const char *s)
         if (st->console_out) st->console_out->output(st->console_out, chunk);
     }
 }
+#if SNAP_PLATFORM_SP11
+/* Report text is built into a buffer (never printed piecemeal) so the same bytes can go to the
+ * firmware console now and be drawn again on the ExitBootServices failure page, which repaints the
+ * whole screen and would otherwise erase them. Append-only and truncating: it cannot overrun. */
+struct sp11_text { char buf[2048]; unsigned len; };
+static void txt_str(struct sp11_text *t, const char *s)
+{
+    while (*s && t->len < sizeof t->buf - 1) t->buf[t->len++] = *s++;
+    t->buf[t->len] = 0;
+}
+static void txt_hex(struct sp11_text *t, uint64_t v)
+{
+    char s[19] = "0x";
+    unsigned digits = 1;
+    for (uint64_t rest = v >> 4; rest; rest >>= 4) digits++;
+    for (unsigned i = 0; i < digits; i++) s[2 + digits - 1 - i] = "0123456789ABCDEF"[(v >> (4 * i)) & 15];
+    s[2 + digits] = 0;
+    txt_str(t, s);
+}
+static void txt_dec(struct sp11_text *t, uint64_t v)
+{
+    char s[21];
+    unsigned i = sizeof s - 1;
+    s[i] = 0;
+    do { s[--i] = (char)('0' + v % 10); v /= 10; } while (v);
+    txt_str(t, s + i);
+}
+/* sp11_report_ebs's text. Kept, not just printed: the ExitBootServices failure page and the --el2
+ * success page both repaint the whole screen, and each shows it again. */
+static struct sp11_text sp11_ebs_text;
+/* The facts find_framebuffer acted on, on the plain text console (no framebuffer needed). Printed
+ * whether or not a GOP was accepted: on a unit with no serial console, one photograph of a refusal
+ * has to distinguish "no map", "map too short", "wrong candidate" and "type rejected" by itself. */
+static void sp11_report_gop(struct efi_system_table *st)
+{
+    static struct sp11_text text;
+    struct sp11_text *t = &text;
+    t->len = 0;
+    txt_str(t, "SP11 GOP: locate_handle status "); txt_hex(t, sp11_gop_diag.locate_status);
+    if (sp11_gop_diag.locate_status) {
+        txt_str(t, ", size "); txt_dec(t, sp11_gop_diag.handle_bytes); txt_str(t, "\n");
+        firmware_out(st, t->buf);
+        return;
+    }
+    txt_str(t, ", "); txt_dec(t, sp11_gop_diag.handle_bytes / sizeof(efi_handle));
+    txt_str(t, " handles, "); txt_dec(t, sp11_gop_diag.count); txt_str(t, " with a mode\n");
+    txt_str(t, "SP11 GOP: map status "); txt_hex(t, sp11_gop_diag.map_status);
+    txt_str(t, ", "); txt_str(t, q1n1_sp11_map_status_name(sp11_gop_diag.map_parse));
+    txt_str(t, ", "); txt_dec(t, sp11_gop_diag.map_bytes);
+    txt_str(t, " bytes, stride "); txt_dec(t, sp11_gop_diag.map_stride);
+    txt_str(t, ", "); txt_dec(t, sp11_gop_diag.map_count); txt_str(t, " entries\n");
+    for (uint32_t i = 0; i < sp11_gop_diag.count && i < 4; i++) {
+        const struct q1n1_sp11_gop_candidate *c = &sp11_gop_diag.cand[i];
+        txt_str(t, "SP11 GOP: #"); txt_dec(t, i);
+        txt_str(t, c->is_console ? " console " : " other ");
+        txt_dec(t, c->width); txt_str(t, "x"); txt_dec(t, c->height);
+        txt_str(t, " stride "); txt_dec(t, c->pixels_per_scanline);
+        txt_str(t, " fmt "); txt_dec(t, c->pixel_format); txt_str(t, "\n");
+        txt_str(t, "SP11 GOP: #"); txt_dec(t, i);
+        txt_str(t, " base "); txt_hex(t, c->base);
+        txt_str(t, " bytes "); txt_hex(t, c->size_bytes);
+        txt_str(t, " -> "); txt_str(t, q1n1_sp11_gop_status_name(sp11_gop_diag.check[i]));
+        txt_str(t, "\nSP11 GOP: #"); txt_dec(t, i);
+        txt_str(t, " map overlaps "); txt_dec(t, sp11_gop_diag.overlaps[i]);
+        if (sp11_gop_diag.overlaps[i]) {
+            txt_str(t, ", first: type "); txt_dec(t, sp11_gop_diag.first_overlap[i].type);
+            txt_str(t, " attr "); txt_hex(t, sp11_gop_diag.first_overlap[i].attribute);
+            txt_str(t, " base "); txt_hex(t, sp11_gop_diag.first_overlap[i].base);
+            txt_str(t, " pages "); txt_hex(t, sp11_gop_diag.first_overlap[i].pages);
+        }
+        txt_str(t, "\n");
+    }
+    txt_str(t, "SP11 GOP: select "); txt_str(t, q1n1_sp11_gop_status_name(sp11_gop_status));
+    txt_str(t, ", rule "); txt_str(t, q1n1_sp11_gop_rule_name(sp11_gop_rule)); txt_str(t, "\n");
+    firmware_out(st, t->buf);
+}
+#endif /* SNAP_PLATFORM_SP11 */
 #endif /* !Q1N1_STAGE */
 
 /* ---- Post-EBS services shared by the proxy modes ---- */
@@ -1240,6 +1347,13 @@ void q1n1_main(void)
     field("SPCR GSI ",uart.irq); field("SPCR BAUD CODE ",uart.baud);
     field("MEMORY DESCRIPTORS ",map_stride ? map_size / map_stride : 0);
     out(uart.enabled ? "POLLED UART TX ACTIVE\n" : "UART TX DISABLED OR UNAVAILABLE\n");
+#if SNAP_PLATFORM_SP11
+#ifndef Q1N1_STAGE
+    /* What the scoped sweep was asked to accept and the map it was checked against: this page
+     * replaced the console text that showed them just before ExitBootServices. */
+    out(sp11_ebs_text.buf);
+#endif
+#endif
     out("USB PROXY: RUN Q1N1.EFI --BOOT\n\n");
     out("BOOT FOOTHOLD ONLY - NO GUEST OR SMP YET\n");
     out("POWER CYCLE TO RETURN TO FIRMWARE\n");
@@ -1257,20 +1371,38 @@ void q1n1_main(void)
 
 #ifndef Q1N1_STAGE
 #if SNAP_PLATFORM_SP11
-/* Builds and writes the declared-ranges table (docs/SP11-Q1N1-BOOT-STUDY.md section 4.4/7.2): the
- * same seven ranges gpu_setup() already excludes from its own GPU DMA claim (F14, gpu_setup()
- * below) for an unrelated reason. Not shared directly with that array: gpu_setup() runs from
- * proxy_main(), after ExitBootServices, and this must run before it -- this patch's REPORT.md
- * explains the duplication and the "keep both lists in sync" note this leaves. The memory-map-
- * buffer range is this function's own `map`/MAP_BYTES, the full allocation, not the live map_size
- * a retried get_memory_map call can shrink to; MAP_BYTES is fixed before the retry loop starts, so
- * writing this once here, before that loop, is correct for every attempt inside it. A write
- * failure is not itself treated as fatal here: the paired slbounce fork, if built with
+/* The table last handed to sp11_declare_ranges, the label of each range in it, and what the write
+ * returned: kept so sp11_report_ebs can show exactly what the sweep will be asked to accept.
+ * sp11_declared.count stays 0 until something is written. */
+static struct sp11_ebs_ranges_table sp11_declared;
+static const char *sp11_declared_label[SP11_EBS_MAX_RANGES];
+static efi_status sp11_declared_status;
+
+/* Builds and writes the declared-ranges table (docs/SP11-Q1N1-BOOT-STUDY.md section 4.4/7.2): what
+ * q1n1 dirtied through the cache and still reads after ExitBootServices. Only populated ranges are
+ * listed, so the --el2 diagnostic (no heap, DMA arena, stage slot or preload table) declares just
+ * its image and its map buffer, and the full --boot flow declares up to six. The image range is
+ * the whole PE image including its .bss, and q1n1_enter's stack lives inside it (entry.S). The
+ * memory-map-buffer range is this function's own `map`/MAP_BYTES, the full allocation, not the
+ * live map_size a retried get_memory_map call can shrink to; MAP_BYTES is fixed before the retry
+ * loop starts, so writing this once here, before that loop, is correct for every attempt inside it.
+ *
+ * The framebuffer is deliberately not declared. On this unit it is wholly inside a RESERVED
+ * (type 0) descriptor (OBSERVED, probe dumps x1-run01..03), a type the scoped sweep refuses by
+ * design (it takes only the seven types upstream's blanket sweep took, which never included 0), so
+ * declaring it would make ExitBootServices fail on every attempt; nothing reads it afterwards, and
+ * a stale dirty pixel line is cosmetic (INFERRED, not yet exercised on hardware).
+ *
+ * A write failure is not itself fatal here: the paired slbounce fork, if built with
  * SLBOUNCE_SCOPED_SWEEP, refuses ExitBootServices on its own when the variable is absent or
- * malformed (q1n1 need not duplicate that policy, only supply the data this function can). */
-static void sp11_declare_ranges(uint64_t map_base, uint64_t map_bytes)
+ * malformed (q1n1 need not duplicate that policy, only supply the data this function can); the
+ * status is kept for sp11_report_ebs. */
+static void sp11_declare_ranges(struct efi_system_table *st, uint64_t map_base, uint64_t map_bytes)
 {
-    if (!rt) return;
+    /* Not the global `rt`: only proxy_efi_main sets that, and the --el2 diagnostic never does, so
+     * relying on it declared nothing there (found by running --el2 end to end under QEMU). */
+    struct efi_runtime_services *runtime = st->runtime_services;
+    if (!runtime) return;
     struct sp11_ebs_ranges_table t = {0};
     t.magic = SP11_EBS_RANGES_MAGIC;
     t.version = SP11_EBS_RANGES_VERSION;
@@ -1279,19 +1411,70 @@ static void sp11_declare_ranges(uint64_t map_base, uint64_t map_bytes)
      * tools/sp11_ebs_sweep_model.py's DEFAULT_CHUNK_CAP is -- an unmeasured but bounded unit of
      * work, not a measurement of any real hang's cause. */
     t.chunk_cap = 1u << 20;
-    struct sp11_ebs_range ranges[7] = {
+    struct sp11_ebs_range ranges[6] = {
         {info.heap_base, info.heap_size}, {info.dma_base, info.dma_size},
         {info.stage_base, info.stage_size}, {info.image_base, info.image_size},
         {map_base, map_bytes}, {info.preload_table, info.preload_size},
-        {info.fb_base, info.fb_size},
     };
-    for (unsigned i = 0; i < 7 && t.count < SP11_EBS_MAX_RANGES; i++)
-        if (ranges[i].size) t.range[t.count++] = ranges[i]; /* skip an unpopulated optional range */
+    static const char *const labels[6] = {"heap", "dma", "stage", "image", "map", "preload"};
+    for (unsigned i = 0; i < 6 && t.count < SP11_EBS_MAX_RANGES; i++) {
+        if (!ranges[i].size) continue; /* skip an unpopulated optional range */
+        sp11_declared_label[t.count] = labels[i];
+        t.range[t.count++] = ranges[i];
+    }
     if (t.count == 0) return; /* nothing to declare; never write an empty table */
     t.checksum = sp11_ebs_ranges_fnv((const uint8_t *)&t, offsetof(struct sp11_ebs_ranges_table, checksum));
     efi_guid guid = SP11_EBS_RANGES_GUID_INIT;
     static const char16 name[] = SP11_EBS_RANGES_VARIABLE_NAME_U16;
-    rt->set_variable(name, &guid, 2 /* EFI_VARIABLE_BOOTSERVICE_ACCESS */, sizeof t, &t);
+    sp11_declared = t;
+    sp11_declared_status = runtime->set_variable(name, &guid, 2 /* EFI_VARIABLE_BOOTSERVICE_ACCESS */, sizeof t, &t);
+}
+
+/* Each declared range against the memory map about to be handed to the sweep: shown on the firmware
+ * console just before the ExitBootServices attempt and, kept in sp11_ebs_text, again on the failure
+ * page and the --el2 success page, both of which repaint the screen with a font that has only
+ * A-Z 0-9 and : - . / = ? ( ) _ -- hence key=value, no commas or plus signs. slbounce's scoped
+ * sweep refuses with a bare EFI_ABORTED and prints nothing, so these facts are what tells a
+ * refusal's causes apart (it sweeps types 1-6 and 9 only, wants EFI_MEMORY_WB, attribute bit 3,
+ * and the range inside exactly one descriptor, and holds at most 512 descriptors). Facts, not a
+ * verdict: the policy stays in slbounce, where it cannot drift from this copy of it.
+ *
+ * The map is read into the caller's own `map` buffer, still unused at this point, and everything
+ * here happens before the retry loop's first get_memory_map, so no allocation this causes can make
+ * the loop's key stale. */
+static void sp11_report_ebs(struct efi_system_table *st, uint64_t map)
+{
+    struct sp11_text *t = &sp11_ebs_text;
+    uint64_t size = MAP_BYTES, key = 0, stride = 0;
+    uint32_t version = 0, count = 0;
+    efi_status status = st->boot->get_memory_map(&size, (void *)(uintptr_t)map, &key, &stride, &version);
+    int parse = Q1N1_SP11_MAP_EMPTY;
+    if (!status)
+        parse = q1n1_sp11_gop_map_parse((const uint8_t *)(uintptr_t)map, size, stride, sp11_map_entries,
+                                        SP11_GOP_MAX_MAP_ENTRIES, &count);
+    t->len = 0;
+    if (sp11_declared.count) {
+        txt_str(t, "SP11 EBS: set_variable="); txt_hex(t, sp11_declared_status);
+        txt_str(t, " ranges="); txt_dec(t, sp11_declared.count);
+        txt_str(t, " chunk="); txt_hex(t, sp11_declared.chunk_cap); txt_str(t, "\n");
+    } else {
+        txt_str(t, "SP11 EBS: no ranges declared\n");
+    }
+    txt_str(t, "SP11 EBS: map status="); txt_hex(t, status);
+    txt_str(t, " parse="); txt_str(t, q1n1_sp11_map_status_name(parse));
+    txt_str(t, " entries="); txt_dec(t, count); txt_str(t, "\n");
+    for (uint32_t r = 0; r < sp11_declared.count; r++) {
+        struct q1n1_sp11_range_facts f;
+        q1n1_sp11_range_facts(sp11_map_entries, count, sp11_declared.range[r].base,
+                              sp11_declared.range[r].size, &f);
+        txt_str(t, "SP11 EBS: r"); txt_dec(t, r); txt_str(t, " "); txt_str(t, sp11_declared_label[r]);
+        txt_str(t, " base="); txt_hex(t, sp11_declared.range[r].base);
+        txt_str(t, " size="); txt_hex(t, sp11_declared.range[r].size);
+        txt_str(t, " desc="); txt_dec(t, f.overlapping); txt_str(t, " type="); txt_dec(t, f.type);
+        txt_str(t, " attr="); txt_hex(t, f.attribute);
+        txt_str(t, f.contained ? " contained=yes\n" : " contained=NO\n");
+    }
+    firmware_out(st, t->buf);
 }
 #endif
 
@@ -1306,12 +1489,12 @@ static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st,
     status = st->boot->allocate_pages(0,EFI_LOADER_DATA,MAP_BYTES / 4096,&map);
     if (status) return status;
 #if SNAP_PLATFORM_SP11
-    /* Only for the real --boot/--uart-proxy path (mode != MODE_FOOTHOLD): the --el2 diagnostic
-     * never populates info.heap_base et al. at all, and declaring an all-zero table would be
-     * worse than declaring none (section 4.4's own "fail closed", not "declare nothing and
-     * proceed as if that were fine", governs an EBS this function's own caller does not expect to
-     * fail just because it chose the diagnostic path). */
-    if (mode != MODE_FOOTHOLD) sp11_declare_ranges(map, MAP_BYTES);
+    /* Declared for every entry point, --el2 included: the scoped sweep refuses ExitBootServices
+     * outright when no table exists, so declaring nothing would make every --el2 attempt fail
+     * closed before it reaches the point it exists to test. The table lists only populated ranges:
+     * the diagnostic's is its image and this map buffer. */
+    sp11_declare_ranges(st, map, MAP_BYTES);
+    sp11_report_ebs(st, map);
 #endif
     firmware_out(st,message);
     for (unsigned attempt = 0; attempt < 3; attempt++) {
@@ -1329,6 +1512,9 @@ static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st,
     uart.enabled = 0;
     rect(0,0,fb.width,fb.height,0x080b10);
     out("EXITBOOTSERVICES FAILED\n"); field("STATUS ",status);
+#if SNAP_PLATFORM_SP11
+    out(sp11_ebs_text.buf);
+#endif
     for (;;) __asm__ volatile("wfe");
 }
 
@@ -1522,6 +1708,9 @@ efi_status efi_main(efi_handle handle, struct efi_system_table *st)
     firmware_out(st,"q1n1 AArch64 UEFI entry.\n");
     firmware_out(st,before_el == 2 ? "Entry EL: 2\n" : "Entry EL: 1\n");
     firmware_out(st,fb.pixels ? "GOP framebuffer captured.\n" : "No usable GOP framebuffer.\n");
+#if SNAP_PLATFORM_SP11
+    sp11_report_gop(st);
+#endif
     firmware_out(st,uart.base ? "ACPI SPCR UART found.\n" : "No usable ACPI SPCR UART.\n");
     if (option(image,"--boot") || option(image,"--uart-proxy")) return proxy_efi_main(handle, st, image);
     if (!option(image,"--el2")) {
@@ -1538,6 +1727,14 @@ efi_status efi_main(efi_handle handle, struct efi_system_table *st)
     if (!fb.pixels || (before_el != 1 && before_el != 2)) return EFI_UNSUPPORTED;
     uart.enabled = option(image,"--uart") && uart.base && (uart.type == 3 || uart.type == 0x13);
     fault_test = option(image,"--fault-test");
+#if SNAP_PLATFORM_SP11
+    /* The scoped sweep needs this image's range (code, data, bss and the stack inside it) to
+     * declare it: info is otherwise filled only on the --boot/--uart-proxy path. Without a loaded
+     * image there is nothing to declare, so refuse here rather than reach a refused ExitBootServices. */
+    if (!image) return EFI_UNSUPPORTED;
+    info.image_base = (uintptr_t)image->image_base;
+    info.image_size = image->image_size;
+#endif
     return leave_firmware(handle, st, "Leaving firmware now. Green bar = EL2; amber = EL1.\n");
 }
 #else /* Q1N1_STAGE: a flat payload chainloaded over the proxy */

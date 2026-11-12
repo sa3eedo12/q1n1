@@ -29,6 +29,75 @@ const char *q1n1_sp11_gop_rule_name(int rule)
     }
 }
 
+const char *q1n1_sp11_map_status_name(int status)
+{
+    switch (status) {
+    case Q1N1_SP11_MAP_OK: return "OK";
+    case Q1N1_SP11_MAP_EMPTY: return "EMPTY";
+    case Q1N1_SP11_MAP_BAD_STRIDE: return "BAD DESCRIPTOR SIZE";
+    case Q1N1_SP11_MAP_BAD_SIZE: return "BAD MAP SIZE";
+    case Q1N1_SP11_MAP_TOO_MANY: return "TOO MANY ENTRIES";
+    default: return "UNKNOWN";
+    }
+}
+
+static uint32_t le32(const uint8_t *p)
+{
+    return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+static uint64_t le64(const uint8_t *p) { return le32(p) | (uint64_t)le32(p + 4) << 32; }
+
+int q1n1_sp11_gop_map_parse(const uint8_t *raw, uint64_t map_size, uint64_t stride,
+                            struct q1n1_sp11_gop_map_entry *out, uint32_t capacity, uint32_t *count)
+{
+    *count = 0;
+    if (!map_size) return Q1N1_SP11_MAP_EMPTY;
+    if (stride < 40) return Q1N1_SP11_MAP_BAD_STRIDE;
+    if (map_size % stride) return Q1N1_SP11_MAP_BAD_SIZE;
+    uint64_t entries = map_size / stride;
+    if (entries > capacity) return Q1N1_SP11_MAP_TOO_MANY;
+    for (uint64_t n = 0; n < entries; n++) {
+        const uint8_t *e = raw + n * stride;
+        out[n].type = le32(e);
+        out[n].base = le64(e + 8);
+        out[n].pages = le64(e + 24);
+        out[n].attribute = le64(e + 32);
+    }
+    *count = (uint32_t)entries;
+    return Q1N1_SP11_MAP_OK;
+}
+
+/* Page count times 4096, saturating at the top of the address space rather than wrapping: a
+ * wrapped end would make a huge descriptor look empty. */
+static uint64_t descriptor_end(const struct q1n1_sp11_gop_map_entry *d)
+{
+    uint64_t room = ~UINT64_C(0) - d->base;
+    return d->pages > room / 4096u ? ~UINT64_C(0) : d->base + d->pages * 4096u;
+}
+
+void q1n1_sp11_range_facts(const struct q1n1_sp11_gop_map_entry *map, uint32_t map_count, uint64_t base,
+                           uint64_t size, struct q1n1_sp11_range_facts *out)
+{
+    out->overlapping = 0;
+    out->type = 0;
+    out->attribute = 0;
+    out->contained = 0;
+    if (!size) return;
+    uint64_t end = base + size;
+    if (end < base) end = ~UINT64_C(0);
+    int first_holds_all = 0;
+    for (uint32_t i = 0; i < map_count; i++) {
+        uint64_t d_end = descriptor_end(&map[i]);
+        if (map[i].base >= end || d_end <= base) continue;
+        if (!out->overlapping++) {
+            out->type = map[i].type;
+            out->attribute = map[i].attribute;
+            first_holds_all = map[i].base <= base && end <= d_end;
+        }
+    }
+    out->contained = out->overlapping == 1 && first_holds_all;
+}
+
 /* type >= 32 cannot be tested against a 32-bit mask at all; treating it as "disallowed" (never
  * matching any bit) is correct here, not merely convenient -- masking the shift amount instead
  * (`type & 31`) would alias e.g. type 32 onto bit 0 (EfiReservedMemoryType, which IS allowed),

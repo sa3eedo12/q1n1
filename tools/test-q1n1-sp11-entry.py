@@ -8,15 +8,17 @@ docs/BOARD-INFO.md).
     python3 tools/test-q1n1-sp11-entry.py
 
 Runs, under ASan and UBSan:
-  * Native: tools/test-q1n1-sp11-entry.c's own gop/stage/ranges/entry checks (64 total);
+  * Native: tools/test-q1n1-sp11-entry.c's own gop/stage/ranges/entry checks (102 total);
   * ModelMatchesSource: the entry-model's quoted conditional literally still appears in
     platform/uefi/main.c, so the host model (which cannot read a real CurrentEL) cannot silently
     drift from the function it mirrors;
   * SharedHeader: platform/uefi/sp11-ebs-ranges.h is byte-identical to the Snapintosh SP11 fork of
     slbounce's own copy (src/sp11-ebs-ranges.h) -- the one piece of this patch that has to agree
     across both repositories (SKIP without SLBOUNCE_SP11_DIR);
-  * Mutations: one seeded bug each in sp11-fbgop.c (the GOP tier-2 "SAME" agreement check) and
-    sp11-stage-table.c (the A16-address refusal) is confirmed to break the Native self-tests;
+  * Mutations: seeded bugs in sp11-fbgop.c (the GOP tier-2 "SAME" agreement check, the memory-map
+    parser's refusal of a map it cannot hold, its page-count and attribute offsets, and the "exactly
+    one descriptor" rule of range facts) and sp11-stage-table.c (the A16-address refusal) are each
+    confirmed to break the Native self-tests;
   * DefaultOff: with SNAP_PLATFORM_SP11 unset (or 0), platform/uefi/main.c preprocesses
     identically either way; the whole q1n1.efi/stage build is byte-identical to
     Q1N1_HOSTLINK_BASE_DIR's own (the sa3eedo12-sp11-host-link branch tip, not the A16 pinned
@@ -100,6 +102,33 @@ class ModelMatchesSource(unittest.TestCase):
         self.assertIn('#define MODE_USB_PROXY 1', main_c)
         self.assertIn('#define MODE_UART_PROXY 2', main_c)
 
+    def test_find_framebuffer_uses_the_tested_parser_and_a_full_size_buffer(self):
+        """The host tests cover q1n1_sp11_gop_map_parse, not the call site: a copy of the parsing
+        written back into main.c, or the buffer shrunk back below this unit's map, would pass them
+        all. Hardware attempt 3 (2026-11-12) is the reason this is pinned."""
+        main_c = (ROOT / 'platform/uefi/main.c').read_text(encoding='utf-8')
+        self.assertIn('q1n1_sp11_gop_map_parse(map_buf, map_size, map_stride, map_entries,', main_c)
+        self.assertIn('#define SP11_GOP_MAP_BUF_BYTES (128u * 1024u)', main_c)
+        self.assertIn('#define SP11_GOP_MAX_MAP_ENTRIES (SP11_GOP_MAP_BUF_BYTES / 40u)', main_c)
+        self.assertIn('static uint8_t map_buf[SP11_GOP_MAP_BUF_BYTES] __attribute__((aligned(16)));', main_c)
+        # The old in-line decoder (silently capped at 512) must not come back.
+        self.assertNotIn('if (entries > SP11_GOP_MAX_MAP_ENTRIES) entries = SP11_GOP_MAX_MAP_ENTRIES;', main_c)
+
+    def test_the_diagnostic_declares_its_ranges_and_never_the_framebuffer(self):
+        """Three defects hardware attempt 3's follow-up work found: --el2 declared nothing (it read
+        a global only --boot sets), the framebuffer is RESERVED memory the scoped sweep refuses, and
+        the declaration was conditional on a mode the diagnostic never has."""
+        main_c = (ROOT / 'platform/uefi/main.c').read_text(encoding='utf-8')
+        start = main_c.index('static void sp11_declare_ranges')
+        declare = main_c[start:main_c.index('static void sp11_report_ebs', start)]
+        self.assertIn('struct efi_runtime_services *runtime = st->runtime_services;', declare)
+        self.assertNotIn('rt->', declare)
+        self.assertIn('struct sp11_ebs_range ranges[6]', declare)
+        self.assertNotIn('info.fb_base', declare)
+        self.assertIn('    sp11_declare_ranges(st, map, MAP_BYTES);', main_c)
+        self.assertNotIn('if (mode != MODE_FOOTHOLD) sp11_declare_ranges', main_c)
+        self.assertIn('info.image_base = (uintptr_t)image->image_base;', main_c)
+
 
 class SharedHeader(unittest.TestCase):
     """sp11-ebs-ranges.h is the one ABI this patch has to keep identical across both repositories
@@ -152,6 +181,40 @@ class Mutations(unittest.TestCase):
         mutated = src.replace(needle, 'else if (!same_framebuffer(&cand[first], &cand[i]) && 0) differ = 1;', 1)
         done = self._build_and_run(BUILD / 'mutant-gop-same', 'sp11-fbgop.c', mutated, 'gop')
         self.assertNotEqual(done.returncode, 0, 'mutation did not break anything: still refused disagreeing GOPs')
+
+    def test_truncating_an_oversized_map_instead_of_refusing_it_is_caught(self):
+        src = (ROOT / 'platform/uefi/sp11-fbgop.c').read_text(encoding='utf-8')
+        needle = 'if (entries > capacity) return Q1N1_SP11_MAP_TOO_MANY;'
+        self.assertIn(needle, src, 'mutation target not found (source changed?)')
+        # The exact defect hardware attempt 3 exposed: a copy cut short silently loses the
+        # descriptors at the end of the array, the framebuffer's among them.
+        mutated = src.replace(needle, 'if (entries > capacity) entries = capacity;', 1)
+        done = self._build_and_run(BUILD / 'mutant-map-truncate', 'sp11-fbgop.c', mutated, 'gop')
+        self.assertNotEqual(done.returncode, 0, 'mutation did not break anything: a long map was silently truncated')
+
+    def test_reading_the_page_count_from_the_wrong_offset_is_caught(self):
+        src = (ROOT / 'platform/uefi/sp11-fbgop.c').read_text(encoding='utf-8')
+        needle = 'out[n].pages = le64(e + 24);'
+        self.assertIn(needle, src, 'mutation target not found (source changed?)')
+        mutated = src.replace(needle, 'out[n].pages = le64(e + 32);', 1)  # the attribute field
+        done = self._build_and_run(BUILD / 'mutant-map-pages', 'sp11-fbgop.c', mutated, 'gop')
+        self.assertNotEqual(done.returncode, 0, 'mutation did not break anything: pages read from the wrong field')
+
+    def test_reading_the_attribute_from_the_wrong_offset_is_caught(self):
+        src = (ROOT / 'platform/uefi/sp11-fbgop.c').read_text(encoding='utf-8')
+        needle = 'out[n].attribute = le64(e + 32);'
+        self.assertIn(needle, src, 'mutation target not found (source changed?)')
+        mutated = src.replace(needle, 'out[n].attribute = le64(e + 24);', 1)  # the page count
+        done = self._build_and_run(BUILD / 'mutant-map-attribute', 'sp11-fbgop.c', mutated, 'gop')
+        self.assertNotEqual(done.returncode, 0, 'mutation did not break anything: attribute read from the wrong field')
+
+    def test_calling_a_range_contained_without_exactly_one_descriptor_is_caught(self):
+        src = (ROOT / 'platform/uefi/sp11-fbgop.c').read_text(encoding='utf-8')
+        needle = 'out->contained = out->overlapping == 1 && first_holds_all;'
+        self.assertIn(needle, src, 'mutation target not found (source changed?)')
+        mutated = src.replace(needle, 'out->contained = first_holds_all;', 1)
+        done = self._build_and_run(BUILD / 'mutant-range-contained', 'sp11-fbgop.c', mutated, 'gop')
+        self.assertNotEqual(done.returncode, 0, 'mutation did not break anything: an overlapped range was "contained"')
 
     def test_dropping_the_a16_base_refusal_is_caught(self):
         src = (ROOT / 'platform/uefi/sp11-stage-table.c').read_text(encoding='utf-8')

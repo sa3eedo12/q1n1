@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* Host tests for q1n1's SP11 entry/chainload/console flow (docs/SP11-Q1N1-BOOT-STUDY.md, sections
  * 5.3-5.5, 8, 9): the fail-closed post-EBS EL2 check and its ordering relative to any EL2-only
- * call (section 5.3/9.2), the GOP two-tier selection (sp11-fbgop.c, section 8), the chainload
- * candidate table (sp11-stage-table.c, section 9.1), and the declared-ranges contract shared with
+ * call (section 5.3/9.2), the GOP two-tier selection and the memory-map parser that feeds it
+ * (sp11-fbgop.c, section 8), the chainload candidate table (sp11-stage-table.c, section 9.1), and
+ * the declared-ranges contract shared with
  * the paired slbounce patch (sp11-ebs-ranges.h, section 4.4/7.2). Driven by
  * tools/test-q1n1-sp11-entry.py, in the same style as tools/test-q1n1-sp11-table.c.
  *
@@ -49,11 +50,26 @@ static struct q1n1_sp11_gop_candidate cand(int is_console, uint64_t base, uint64
 #define FB_STRIDE 1920u
 #define FB_BYTES ((uint64_t)FB_STRIDE * FB_H * 4u)
 
+/* One EFI_MEMORY_DESCRIPTOR as firmware lays it out: type at +0, physical start at +8, virtual start
+ * at +16, page count at +24, attribute at +32, then whatever padding `stride` adds. Every byte the
+ * parser must not read holds 0xa5 junk. */
+static void put_desc(uint8_t *p, uint64_t stride, uint32_t type, uint64_t base, uint64_t pages,
+                     uint64_t attribute)
+{
+    memset(p, 0xa5, stride);
+    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(type >> (8 * i));
+    for (unsigned i = 0; i < 8; i++) {
+        p[8 + i] = (uint8_t)(base >> (8 * i));
+        p[24 + i] = (uint8_t)(pages >> (8 * i));
+        p[32 + i] = (uint8_t)(attribute >> (8 * i));
+    }
+}
+
 static int gop_tests(void)
 {
-    struct q1n1_sp11_gop_map_entry map_ok[] = {{4 /* BootServicesData */, FB_BASE, (FB_BYTES + 0xfff) / 4096}};
+    struct q1n1_sp11_gop_map_entry map_ok[] = {{4 /* BootServicesData */, FB_BASE, (FB_BYTES + 0xfff) / 4096, 0xf}};
     struct q1n1_sp11_gop_map_entry map_disallowed[] = {{2 /* LoaderData: not in the mask */, FB_BASE,
-                                                        (FB_BYTES + 0xfff) / 4096}};
+                                                        (FB_BYTES + 0xfff) / 4096, 0xf}};
 
     /* Tier 1 (CONSOLE): the console's own GOP passes -> chosen immediately, never reaching tier 2. */
     {
@@ -86,8 +102,8 @@ static int gop_tests(void)
     }
     /* Tier 2, disagreeing candidates: AMBIGUOUS, nothing drawn (not a guess at either one). */
     {
-        struct q1n1_sp11_gop_map_entry map2[] = {{4, FB_BASE, (FB_BYTES + 0xfff) / 4096},
-                                                  {4, FB_BASE + 0x10000000, (FB_BYTES + 0xfff) / 4096}};
+        struct q1n1_sp11_gop_map_entry map2[] = {{4, FB_BASE, (FB_BYTES + 0xfff) / 4096, 0xf},
+                                                  {4, FB_BASE + 0x10000000, (FB_BYTES + 0xfff) / 4096, 0xf}};
         struct q1n1_sp11_gop_candidate c[] = {
             cand(0, FB_BASE, FB_BYTES, FB_W, FB_H, FB_STRIDE, 1),
             cand(0, FB_BASE + 0x10000000, FB_BYTES, FB_W, FB_H, FB_STRIDE, 1),
@@ -119,13 +135,128 @@ static int gop_tests(void)
      * ported from probes/uefi/logic.c probe_memmap_overlaps_other). */
     {
         struct q1n1_sp11_gop_map_entry map_both[] = {
-            {4 /* BootServicesData: allowed */, FB_BASE, (FB_BYTES + 0xfff) / 4096},
-            {2 /* LoaderData: not allowed, overlapping the same range */, FB_BASE, (FB_BYTES + 0xfff) / 4096},
+            {4 /* BootServicesData: allowed */, FB_BASE, (FB_BYTES + 0xfff) / 4096, 0xf},
+            {2 /* LoaderData: not allowed, overlapping the same range */, FB_BASE, (FB_BYTES + 0xfff) / 4096, 0xf},
         };
         struct q1n1_sp11_gop_result r;
         struct q1n1_sp11_gop_candidate c[] = {cand(1, FB_BASE, FB_BYTES, FB_W, FB_H, FB_STRIDE, 1)};
         q1n1_sp11_gop_select(map_both, 2, c, 1, &r);
         CHECK(r.status == Q1N1_SP11_GOP_NOT_IN_MAP);
+    }
+    /* ---- q1n1_sp11_gop_map_parse: raw GetMemoryMap bytes -> entries ---- */
+    {
+        static uint8_t raw[1100 * 64];
+        static struct q1n1_sp11_gop_map_entry out[1100];
+        uint32_t n = 99;
+
+        /* Only type (+0), physical start (+8), page count (+24) and attribute (+32) are read, for any
+         * descriptor size UEFI allows (40 defined bytes; firmware may pad to more). put_desc fills
+         * every other byte with junk, so a read from the wrong offset or the wrong width cannot
+         * pass by luck, and a base above 4 GiB and an attribute with bit 63 set prove the upper
+         * half of the 64-bit fields is decoded too. */
+        const uint64_t strides[] = {40, 48, 64};
+        for (unsigned s = 0; s < 3; s++) {
+            uint64_t sz = strides[s];
+            put_desc(raw, sz, 7, UINT64_C(0x80000000), 0x100, UINT64_C(0xf));
+            put_desc(raw + sz, sz, 0, UINT64_C(0x123456000), 0x21c0, UINT64_C(0x100f));
+            put_desc(raw + 2 * sz, sz, 11, UINT64_C(0xfffff000), 1, UINT64_C(0x8000000000000001));
+            CHECK(q1n1_sp11_gop_map_parse(raw, 3 * sz, sz, out, 3, &n) == Q1N1_SP11_MAP_OK && n == 3);
+            CHECK(out[0].type == 7 && out[0].base == UINT64_C(0x80000000) && out[0].pages == 0x100 &&
+                  out[0].attribute == 0xf);
+            CHECK(out[1].type == 0 && out[1].base == UINT64_C(0x123456000) && out[1].pages == 0x21c0 &&
+                  out[1].attribute == 0x100f);
+            CHECK(out[2].type == 11 && out[2].base == UINT64_C(0xfffff000) && out[2].pages == 1 &&
+                  out[2].attribute == UINT64_C(0x8000000000000001));
+        }
+
+        /* Every refusal reports zero entries and never divides by a bad stride. */
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 0, 48, out, 8, &n) == Q1N1_SP11_MAP_EMPTY && n == 0);
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 96, 0, out, 8, &n) == Q1N1_SP11_MAP_BAD_STRIDE && n == 0);
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 96, 39, out, 8, &n) == Q1N1_SP11_MAP_BAD_STRIDE && n == 0);
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 97, 48, out, 8, &n) == Q1N1_SP11_MAP_BAD_SIZE && n == 0);
+
+        /* A map that does not fit is refused with the output untouched, never cut short: the exact
+         * fit is accepted and one entry fewer is not. */
+        for (unsigned i = 0; i < 3; i++) put_desc(raw + i * 48, 48, 7, UINT64_C(0x80000000) + i * 0x10000, 1, 0xf);
+        memset(out, 0x5a, sizeof out);
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 3 * 48, 48, out, 2, &n) == Q1N1_SP11_MAP_TOO_MANY && n == 0);
+        CHECK(out[0].type == 0x5a5a5a5au && out[0].base == UINT64_C(0x5a5a5a5a5a5a5a5a));
+        n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 3 * 48, 48, out, 3, &n) == Q1N1_SP11_MAP_OK && n == 3);
+
+        /* The observed failure shape (hardware attempt 3, 2026-11-12): a map longer than the 512
+         * entries an earlier copy kept, with the framebuffer's RESERVED descriptor near the end of
+         * the array. Cutting the copy at 512 dropped it and the only GOP read "NOT IN MEMORY MAP". */
+        struct q1n1_sp11_gop_candidate unit_gop = cand(0, FB_BASE, UINT64_C(0x1518000), 2880, 1920, 2880, 1);
+        for (unsigned i = 0; i < 599; i++)
+            put_desc(raw + i * 48, 48, 7, UINT64_C(0x40000000) + (uint64_t)i * 0x10000, 1, 0xf);
+        put_desc(raw + 599 * 48, 48, 0, FB_BASE, 0x21c0, 0x100f); /* larger than the framebuffer, as on the unit */
+        {
+            struct q1n1_sp11_gop_result r;
+            CHECK(q1n1_sp11_gop_map_parse(raw, 600 * 48, 48, out, 1024, &n) == Q1N1_SP11_MAP_OK && n == 600);
+            q1n1_sp11_gop_select(out, n, &unit_gop, 1, &r);
+            CHECK(r.status == Q1N1_SP11_GOP_OK && r.rule == Q1N1_SP11_GOP_RULE_SAME);
+            n = 99; CHECK(q1n1_sp11_gop_map_parse(raw, 600 * 48, 48, out, 512, &n) == Q1N1_SP11_MAP_TOO_MANY && n == 0);
+            q1n1_sp11_gop_select(out, n, &unit_gop, 1, &r); /* what a refused map leaves behind */
+            CHECK(r.status == Q1N1_SP11_GOP_NOT_IN_MAP);
+        }
+
+        /* The unit's own map is two ascending runs, not one: nothing may assume address order. The
+         * framebuffer's descriptor comes after a lower-addressed MMIO one and a higher RAM one. */
+        put_desc(raw, 48, 7, UINT64_C(0x880000000), 0x100, 0xf);
+        put_desc(raw + 48, 48, 7, UINT64_C(0xcea57000), 0x100, 0xf);
+        put_desc(raw + 2 * 48, 48, 11, UINT64_C(0x0c264000), 1, UINT64_C(0x8000000000000001));
+        put_desc(raw + 3 * 48, 48, 0, FB_BASE, 0x21c0, 0x100f);
+        put_desc(raw + 4 * 48, 48, 0, UINT64_C(0xff800000), 0x800, 0x1);
+        {
+            struct q1n1_sp11_gop_result r;
+            CHECK(q1n1_sp11_gop_map_parse(raw, 5 * 48, 48, out, 8, &n) == Q1N1_SP11_MAP_OK && n == 5);
+            unit_gop.is_console = 1;
+            q1n1_sp11_gop_select(out, n, &unit_gop, 1, &r);
+            CHECK(r.status == Q1N1_SP11_GOP_OK && r.rule == Q1N1_SP11_GOP_RULE_CONSOLE);
+
+            /* range_facts on that same map. The framebuffer is wholly inside one descriptor whose
+             * type is 0 (EfiReservedMemoryType): the scoped sweep in the paired slbounce fork
+             * accepts only types 1-6 and 9, so declaring the framebuffer to it would be refused
+             * (WRONG_TYPE) on a map shaped like this unit's. The facts report the type; the
+             * consumer judges it. */
+            struct q1n1_sp11_range_facts f;
+            q1n1_sp11_range_facts(out, n, FB_BASE, UINT64_C(0x1518000), &f);
+            CHECK(f.overlapping == 1 && f.contained && f.type == 0 && f.attribute == 0x100f);
+            q1n1_sp11_range_facts(out, n, FB_BASE + 0x21c0 * 4096 - 0x1000, 0x1000, &f); /* the last page */
+            CHECK(f.overlapping == 1 && f.contained);
+            q1n1_sp11_range_facts(out, n, FB_BASE + 0x21c0 * 4096 - 0x1000, 0x2000, &f); /* runs past the end */
+            CHECK(f.overlapping == 1 && !f.contained && f.type == 0);
+            q1n1_sp11_range_facts(out, n, UINT64_C(0x880000000) - 0x1000, 0x2000, &f); /* starts in a hole */
+            CHECK(f.overlapping == 1 && !f.contained && f.type == 7);
+            q1n1_sp11_range_facts(out, n, UINT64_C(0x300000000), 0x1000, &f); /* nowhere in the map */
+            CHECK(f.overlapping == 0 && !f.contained && f.type == 0 && f.attribute == 0);
+            q1n1_sp11_range_facts(out, n, FB_BASE, 0, &f); /* zero size overlaps nothing */
+            CHECK(f.overlapping == 0 && !f.contained);
+            q1n1_sp11_range_facts(out, 0, FB_BASE, 0x1000, &f); /* empty map */
+            CHECK(f.overlapping == 0 && !f.contained);
+            q1n1_sp11_range_facts(out, n, ~UINT64_C(0) - 0xfff, 0x2000, &f); /* wraps the address space */
+            CHECK(f.overlapping == 0 && !f.contained);
+        }
+        {
+            /* Two descriptors both overlapping the range: reported as 2, never "contained", and the
+             * type/attribute are the first one's in array order. */
+            struct q1n1_sp11_gop_map_entry split[] = {{4, 0x1000, 1, 0xf}, {2, 0x2000, 1, 0x7}};
+            struct q1n1_sp11_range_facts f;
+            q1n1_sp11_range_facts(split, 2, 0x1800, 0x1000, &f);
+            CHECK(f.overlapping == 2 && !f.contained && f.type == 4 && f.attribute == 0xf);
+            /* The first descriptor holds the whole range but a second overlaps it too (a hostile
+             * map): "exactly one descriptor" is the sweep's own rule, so this is not contained. */
+            struct q1n1_sp11_gop_map_entry overlap[] = {{4, 0x1000, 4, 0xf}, {2, 0x2000, 1, 0x7}};
+            q1n1_sp11_range_facts(overlap, 2, 0x2000, 0x1000, &f);
+            CHECK(f.overlapping == 2 && !f.contained && f.type == 4);
+            /* An absurd page count saturates at the top of the address space instead of wrapping to
+             * an apparently empty descriptor. */
+            struct q1n1_sp11_gop_map_entry huge[] = {{4, 0x1000, ~UINT64_C(0), 0xf}};
+            q1n1_sp11_range_facts(huge, 1, 0x2000, 0x1000, &f);
+            CHECK(f.overlapping == 1 && f.contained);
+        }
+        CHECK(!strcmp(q1n1_sp11_map_status_name(Q1N1_SP11_MAP_TOO_MANY), "TOO MANY ENTRIES"));
+        CHECK(!strcmp(q1n1_sp11_map_status_name(99), "UNKNOWN"));
     }
     CHECK(!strcmp(q1n1_sp11_gop_status_name(Q1N1_SP11_GOP_AMBIGUOUS), "AMBIGUOUS GOP"));
     CHECK(!strcmp(q1n1_sp11_gop_rule_name(Q1N1_SP11_GOP_RULE_SAME), "SAME"));
