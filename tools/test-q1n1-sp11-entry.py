@@ -104,8 +104,9 @@ class ModelMatchesSource(unittest.TestCase):
 
     def test_find_framebuffer_uses_the_tested_parser_and_a_full_size_buffer(self):
         """The host tests cover q1n1_sp11_gop_map_parse, not the call site: a copy of the parsing
-        written back into main.c, or the buffer shrunk back below this unit's map, would pass them
-        all. Hardware attempt 3 (2026-11-12) is the reason this is pinned."""
+        written back into main.c, or the buffer shrunk back below what this unit's firmware demands
+        (the next test), would pass them all. Hardware attempt 3 (2026-11-12) is the reason this is
+        pinned."""
         main_c = (ROOT / 'platform/uefi/main.c').read_text(encoding='utf-8')
         self.assertIn('q1n1_sp11_gop_map_parse(map_buf, map_size, map_stride, map_entries,', main_c)
         self.assertIn('#define SP11_GOP_MAP_BUF_BYTES (128u * 1024u)', main_c)
@@ -113,6 +114,19 @@ class ModelMatchesSource(unittest.TestCase):
         self.assertIn('static uint8_t map_buf[SP11_GOP_MAP_BUF_BYTES] __attribute__((aligned(16)));', main_c)
         # The old in-line decoder (silently capped at 512) must not come back.
         self.assertNotIn('if (entries > SP11_GOP_MAX_MAP_ENTRIES) entries = SP11_GOP_MAX_MAP_ENTRIES;', main_c)
+
+    def test_the_gop_map_buffer_keeps_headroom_over_the_firmwares_demand(self):
+        """OBSERVED on the unit (2026-11-13, attempt 6): given a 24,576-byte buffer, GetMemoryMap returns
+        EFI_BUFFER_TOO_SMALL and asks for 33,504 bytes (698 descriptors), although the map it returns to
+        a larger buffer is 10,848 to 11,136 bytes (226 to 232 descriptors). The firmware checks the
+        buffer against that larger figure, not against the map it would return. That is why commit
+        bdff824's 512 x 48-byte buffer made the GOP selection refuse (attempt 3) while the unit's map
+        itself fit. The buffer must stay at least twice the demand; the figure varies with what has
+        been allocated, and slbounce adds entries before q1n1 runs."""
+        main_c = (ROOT / 'platform/uefi/main.c').read_text(encoding='utf-8')
+        found = re.search(r'#define SP11_GOP_MAP_BUF_BYTES \((\d+)u \* (\d+)u\)', main_c)
+        self.assertIsNotNone(found, 'SP11_GOP_MAP_BUF_BYTES is no longer a literal product of two numbers')
+        self.assertGreaterEqual(int(found.group(1)) * int(found.group(2)), 2 * 33504)
 
     def test_the_diagnostic_declares_its_ranges_and_never_the_framebuffer(self):
         """Three defects hardware attempt 3's follow-up work found: --el2 declared nothing (it read
