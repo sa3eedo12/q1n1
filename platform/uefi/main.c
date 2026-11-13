@@ -34,6 +34,21 @@
 #include "sp11-fbgop.h"
 #include "sp11-stage-table.h"
 #endif
+/* The read-only stick-log survey (docs/SP11-STK-SURVEY.md): default off, the survey image is its own
+ * build target (platform/uefi/Makefile, STK_SURVEY=1). With the gate at 0 nothing below the #if lines
+ * that mention it reaches the compiler, so every other build is unchanged. */
+#ifndef Q1N1_SP11_STK_SURVEY
+#define Q1N1_SP11_STK_SURVEY 0
+#endif
+#if Q1N1_SP11_STK_SURVEY
+#if !SNAP_PLATFORM_SP11
+#error "Q1N1_SP11_STK_SURVEY=1 needs SNAP_PLATFORM_SP11=1: the survey reads the Surface Pro 11's windows"
+#endif
+#ifdef Q1N1_STAGE
+#error "the stick-log survey is part of the EFI image, not of a chainloaded stage"
+#endif
+#include "sp11-stk-efi.h"
+#endif
 
 static struct {
     volatile uint32_t *pixels;
@@ -1367,6 +1382,97 @@ static void proxy_main(void)
     }
 }
 
+#if Q1N1_SP11_STK_SURVEY
+/* ---- Stick-log survey (sp11-stk-survey.h): the platform side ----
+ * P2 runs inside leave_firmware, before the last GetMemoryMap, and keeps its lines here for the
+ * EL2 page. At EL2 the survey reads through live_guarded (the recoverable-fault copy the proxy
+ * uses): an abort comes back as an error instead of a dead core. This layer only forwards loads; the
+ * policy (windows, memory map, mapping attribute, the gate) is in sp11-stk-el2.c, where the native
+ * tests drive it. */
+static struct stk_p2 stk_p2_saved;
+static int stk_requested;           /* set by the --el2 flow only: --boot and --uart-proxy never run it */
+
+static void stk_p2_console(void *ctx, const char *line)
+{
+    firmware_out((struct efi_system_table *)ctx, line);
+    firmware_out((struct efi_system_table *)ctx, "\n");
+}
+
+static int stk_guarded(void *ctx, int kind, uint64_t dst, uint64_t src, uint64_t size)
+{
+    (void)ctx;
+    /* Loads only. sp11-stk-el2.c never asks for another kind; a store kind is refused here too, so
+     * that a mistake there is an error and not a write to a device register. */
+    if (kind != STK_G_COPY32) return 1;
+    return live_guarded(0, dst, src, size);
+}
+
+static int stk_attr(void *ctx, uint64_t phys)
+{
+    uint32_t attr = 0;
+    int status = live_attr(ctx, phys, &attr);
+    if (status == -3) return STK_ATTR_NONE;      /* q1n1_mmu_attr: no valid descriptor */
+    if (status) return STK_ATTR_UNKNOWN;
+    return q1n1_mmu_attr_device(attr) ? STK_ATTR_DEVICE : STK_ATTR_NORMAL;
+}
+
+/* The survey draws with the page's own screen_char at its own origin and scale (stk_layout), and
+ * restores the page cursor, so nothing the existing page prints is moved or redrawn. */
+static struct stk_layout stk_page;
+static uint32_t stk_next_row;
+
+static void stk_draw(uint32_t row, const char *text)
+{
+    uint32_t scale = fb.scale, saved_row = fb.row, saved_col = fb.col;
+    fb.scale = stk_page.scale;
+    fb.row = row;
+    fb.col = stk_page.col0;
+    for (const char *s = text; *s; s++) screen_char(*s);
+    fb.scale = scale; fb.row = saved_row; fb.col = saved_col;
+}
+
+/* A line goes to the UART like out() and to the panel in the survey's region; past the region's last
+ * row it is still mirrored but not drawn. */
+static void stk_emit(void *ctx, const char *line)
+{
+    (void)ctx;
+    for (const char *s = line; *s; s++) uart_byte((uint8_t)*s);
+    uart_byte('\r');
+    uart_byte('\n');
+    if (stk_next_row < stk_page.row0 + stk_page.rows) stk_draw(stk_next_row, line);
+    stk_next_row++;
+}
+
+/* The in-place marker on the row above the lines: where the survey is about to read. Screen only. */
+static void stk_at(void *ctx, const char *where)
+{
+    char text[40] = "STK AT ";
+    unsigned n = 7;
+    (void)ctx;
+    while (*where && n < sizeof text - 1) text[n++] = *where++;
+    text[n] = 0;
+    rect(20 + stk_page.col0 * 6 * stk_page.scale, 20 + stk_page.row0 * 9 * stk_page.scale,
+         (STK_LINE_MAX + 1) * 6 * stk_page.scale, 9 * stk_page.scale, 0x080b10);
+    stk_draw(stk_page.row0, text);
+}
+
+/* Reads the saved memory map, places the survey on the panel and runs it. Called once, at EL2. */
+static void sp11_stk_el2_survey(void)
+{
+    uint32_t count = 0;
+    int parse = q1n1_sp11_gop_map_parse((const uint8_t *)(uintptr_t)info.memory_map, info.memory_map_size,
+                                        info.memory_map_stride, sp11_map_entries, SP11_GOP_MAX_MAP_ENTRIES, &count);
+    struct stk_ops ops = {stk_guarded, stk_attr, 0};
+    struct stk_sink sink = {stk_emit, stk_at, 0, 0, 0};
+    struct stk_el2_args args = {&ops, stk_requested ? &stk_p2_saved : 0, sp11_map_entries, count,
+                                parse == Q1N1_SP11_MAP_OK, info.memory_map, &sink};
+    struct stk_result result;
+    stk_layout(fb.width, fb.height, fb.scale, fb.row, &stk_page);
+    stk_next_row = stk_page.row0 + 1;
+    stk_el2_run(&args, &result);
+}
+#endif /* Q1N1_SP11_STK_SURVEY */
+
 void q1n1_main(void) __attribute__((noreturn));
 void q1n1_main(void)
 {
@@ -1440,6 +1546,11 @@ void q1n1_main(void)
     unsigned beat = 0;
 #if SNAP_PLATFORM_SP11 && !defined(Q1N1_STAGE)
     sp11_draw_uptime(uptime_row, 0);
+#if Q1N1_SP11_STK_SURVEY
+    /* After the existing page is complete: the survey adds lines, it replaces none. */
+    if (el == 2) sp11_stk_el2_survey();
+    else out("STK P3 SKIPPED=NOT_AT_EL2\n");
+#endif
 #endif
     for (;;) {
         if (counter() - last >= ticks) {
@@ -1581,6 +1692,13 @@ static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st,
      * the diagnostic's is its image and this map buffer. */
     sp11_declare_ranges(st, map, MAP_BYTES);
     sp11_report_ebs(st, map);
+#if Q1N1_SP11_STK_SURVEY
+    /* The survey's P2 queries use firmware protocols, so they run here: after the allocations above
+     * and before the retry loop below, whose first call is the GetMemoryMap whose key ExitBootServices
+     * needs. Nothing between that call and ExitBootServices may allocate, so nothing of the survey
+     * runs there. Only the --el2 flow asks for it. */
+    if (stk_requested) stk_p2_collect(st, handle, SP11_BUILD_STAMP, &stk_p2_saved, stk_p2_console, st);
+#endif
 #endif
     firmware_out(st,message);
     for (unsigned attempt = 0; attempt < 3; attempt++) {
@@ -1820,6 +1938,9 @@ efi_status efi_main(efi_handle handle, struct efi_system_table *st)
     if (!image) return EFI_UNSUPPORTED;
     info.image_base = (uintptr_t)image->image_base;
     info.image_size = image->image_size;
+#endif
+#if Q1N1_SP11_STK_SURVEY
+    stk_requested = 1;      /* this is the --el2 flow: --boot and --uart-proxy returned above */
 #endif
     return leave_firmware(handle, st, "Leaving firmware now. Green bar = EL2; amber = EL1.\n");
 }

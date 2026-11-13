@@ -86,6 +86,20 @@ $(OUT)/sp11-stage-candidates.obj: $(SP11_STAGE_TABLE_C) platform/uefi/sp11-stage
 	$(CC) $(CFLAGS) -Iplatform/uefi -c $< -o $@
 endif
 
+# Surface Pro 11 stick-log survey (default off), stage S0 of docs/SP11-STICK-LOG.md in the Snapintosh
+# repository: a read-only look at the USB controller the boot stick sits on, printed as STK lines. It is a second
+# image, $(OUT)/q1n1-stk.efi (Q1N1-STK.EFI on the stick, beside the normal Q1N1.EFI), run with the same --el2
+# argument, built from its own main-stk.obj and sp11-stk-*.obj with -DQ1N1_SP11_STK_SURVEY=1. Nothing else is
+# compiled with that define, so q1n1.efi, the stages and every object they use are the ones a build without
+# STK_SURVEY makes, byte for byte. It needs SP11=1: the survey reads the Surface Pro 11's windows. Build it with
+#   make -f platform/uefi/Makefile SP11=1 STK_SURVEY=1 SP11_USB_TABLE_C=... SP11_STAGE_TABLE_C=... stk-survey
+STK_SURVEY ?= 0
+ifeq ($(STK_SURVEY),1)
+ifneq ($(SP11),1)
+$(error STK_SURVEY=1 needs SP11=1 (with SP11_USB_TABLE_C and SP11_STAGE_TABLE_C): the survey reads the Surface Pro 11's windows)
+endif
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -379,13 +393,40 @@ $(OUT)/sha256.obj: platform/uefi/sha256.c platform/uefi/sha256.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OUT)/q1n1.efi: $(OUT)/main.obj $(OUT)/entry-frame.obj $(OUT)/boot-window.obj $(OUT)/ucsi-console.obj $(OUT)/battery.obj \
+Q1N1_IMAGE_OBJS := $(OUT)/entry-frame.obj $(OUT)/boot-window.obj $(OUT)/ucsi-console.obj $(OUT)/battery.obj \
     $(OUT)/q1n1-proxy.obj $(OUT)/proxy-asm.obj $(OUT)/qcom-dwc3.obj $(OUT)/usb-ports.obj $(OUT)/gicv3.obj \
     $(OUT)/console.obj $(OUT)/sysinfo.obj $(OUT)/fbcon.obj $(OUT)/xhci.obj $(OUT)/ncm.obj $(OUT)/ncm-proxy.obj \
     $(OUT)/preload.obj $(OUT)/gpt-survey.obj $(OUT)/sha256.obj $(OUT)/smem.obj $(OUT)/glink-smem.obj $(OUT)/pmic-router.obj \
-    $(OUT)/live-battery.obj $(OUT)/gpu-el2.obj $(OUT)/call-service.obj $(SP11_OBJS)
+    $(OUT)/live-battery.obj $(OUT)/gpu-el2.obj $(OUT)/call-service.obj
+$(OUT)/q1n1.efi: $(OUT)/main.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS)
 	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \
 	    /dynamicbase /out:$@ $^
+
+ifeq ($(STK_SURVEY),1)
+STK_OBJS := $(addprefix $(OUT)/,sp11-stk-text.obj sp11-stk-path.obj sp11-stk-rules.obj sp11-stk-p2fmt.obj \
+    sp11-stk-el2.obj sp11-stk-p2.obj)
+STK_HEADERS := platform/uefi/sp11-stk-survey.h platform/uefi/sp11-stk-efi.h platform/uefi/sp11-fbgop.h \
+    platform/uefi/efi.h
+
+$(STK_OBJS): $(OUT)/%.obj: platform/uefi/%.c $(STK_HEADERS)
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_STK_SURVEY=1 -c $< -o $@
+
+$(OUT)/main-stk.obj: platform/uefi/main.c $(STK_HEADERS) platform/uefi/fbcon.h platform/uefi/boot-window.h \
+    platform/uefi/usb-ebs.h platform/uefi/qcom-dwc3.h platform/uefi/q1n1-proxy.h platform/uefi/gicv3.h \
+    platform/uefi/q1n1-bootinfo.h platform/uefi/live-battery.h platform/uefi/gpu-el2.h platform/uefi/call-service.h \
+    platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h platform/uefi/sp11-ebs-ranges.h platform/uefi/sp11-stage-table.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_STK_SURVEY=1 -c $< -o $@
+
+$(OUT)/q1n1-stk.efi: $(OUT)/main-stk.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS) $(STK_OBJS)
+	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \
+	    /dynamicbase /out:$@ $^
+
+.PHONY: stk-survey
+stk-survey: $(OUT)/q1n1-stk.efi
+all: $(OUT)/q1n1-stk.efi
+endif
 
 $(OUT)/stage/%.obj: platform/uefi/%.c
 	@mkdir -p $(OUT)/stage
@@ -423,7 +464,7 @@ clean:
 	rm -f $(OUT)/*.d $(OUT)/stage/*.d $(OUT)/stage/*.obj $(OUT)/stage/*.elf \
 	    $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin \
 	    $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
-	rm -f $(OUT)/*.obj $(OUT)/q1n1.efi $(OUT)/q1n1-usb-probe.efi \
+	rm -f $(OUT)/*.obj $(OUT)/q1n1.efi $(OUT)/q1n1-stk.efi $(OUT)/q1n1-usb-probe.efi \
 	    $(OUT)/q1n1-usb-role-probe.efi $(OUT)/usb-role-fixture.efi \
 	    $(OUT)/q1n1-usb-role-change.efi $(OUT)/q1n1-usb-serial.efi $(OUT)/q1n1-usb-typec-probe.efi \
 	    $(OUT)/q1n1-usb-ucsi-probe.efi $(OUT)/q1n1-usb-usbc-probe.efi $(OUT)/q1n1-usb-ucsi-reg-probe.efi \
