@@ -11,6 +11,12 @@ PL011 serial log carries. These are the flows the host tests cannot reach: the -
 silently declared nothing because it read a global only the --boot path sets, and no pure function
 could see that.
 
+SP11StkSurveyQemu boots the same flows with the stage S0 stick-log survey image (STK_SURVEY=1,
+q1n1-stk.efi, placed on the volume as Q1N1-STK.EFI), with the volume also on a USB mass storage device
+behind QEMU's xHCI: it re-runs every SP11Qemu test against that image and checks the survey's lines
+(docs/SP11-STK-SURVEY.md). Where QEMU lacks the Surface Pro 11's blocks the survey must fail closed:
+every EL2 block prints SKIPPED or FAULT and it still reaches its verdict.
+
 QEMU and its EDK2 are a model, not the Surface: its firmware, GOP, memory map and EL2 entry differ,
 and slbounce is absent, so ExitBootServices here is the real one and nothing about the scoped sweep
 is exercised. Evidence: EXPERIMENTAL (QEMU only); hardware NOT RUN. SKIPs, never passes, without
@@ -115,22 +121,29 @@ class SP11Qemu(unittest.TestCase):
         cls.image = out / 'q1n1.efi'
         cls.stamp = expected_stamp()
 
-    def boot(self, name, options, el2, marker, timeout=170, during=None):
+    stick_name = 'Q1N1.EFI'
+
+    def boot(self, name, options, el2, marker, timeout=170, during=None, usb_stick=False):
         """Runs q1n1.efi with `options` from the EDK2 shell until `marker` appears on the serial log
         (or `timeout` seconds pass), then returns the cleaned log after stopping QEMU. `during`, if given,
-        is called with the QMP socket path once the marker has appeared and QEMU is still running."""
+        is called with the QMP socket path once the marker has appeared and QEMU is still running.
+        `usb_stick` puts the volume on a USB mass storage device behind QEMU's xHCI, the way the real
+        stick is attached, instead of on the default disk."""
         esp = BUILD / name
         shutil.rmtree(esp, ignore_errors=True)
         esp.mkdir(parents=True)
-        shutil.copy(self.image, esp / 'Q1N1.EFI')
-        (esp / 'startup.nsh').write_text(f'fs0:\nQ1N1.EFI {options}\necho Q1N1_SHELL_RETURN_OK\n')
+        shutil.copy(self.image, esp / self.stick_name)
+        (esp / 'startup.nsh').write_text(f'fs0:\n{self.stick_name} {options}\necho Q1N1_SHELL_RETURN_OK\n')
         serial = BUILD / f'{name}.serial.log'
         qmp = BUILD / f'{name}.qmp'
         serial.unlink(missing_ok=True)
         qmp.unlink(missing_ok=True)
+        volume = (['-drive', f'format=raw,file=fat:rw:{esp},if=none,id=stick', '-device', 'qemu-xhci',
+                   '-device', 'usb-storage,drive=stick'] if usb_stick else
+                  ['-drive', f'format=raw,file=fat:rw:{esp}'])
         cmd = ['qemu-system-aarch64', '-machine', f'virt,virtualization={"on" if el2 else "off"},gic-version=3',
-               '-accel', 'tcg', '-cpu', 'max', '-smp', '1', '-m', '512M', '-bios', self.firmware,
-               '-drive', f'format=raw,file=fat:rw:{esp}', '-device', 'ramfb', '-display', 'none',
+               '-accel', 'tcg', '-cpu', 'max', '-smp', '1', '-m', '512M', '-bios', self.firmware] + volume + [
+               '-device', 'ramfb', '-display', 'none',
                '-monitor', 'none', '-nic', 'none', '-serial', f'file:{serial}',
                '-qmp', f'unix:{qmp},server=on,wait=off', '-no-reboot']
         proc = subprocess.Popen(cmd, env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -244,6 +257,110 @@ class SP11Qemu(unittest.TestCase):
         self.assertNotIn('HCR_EL2', page)
         self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
         self.assertIn(f'BUILD {self.stamp}\n', text)
+
+
+STK_FONT_LINE = re.compile(r'[A-Z0-9 :\-./=?()_]{1,100}')
+
+
+class SP11StkSurveyQemu(SP11Qemu):
+    """Stage S0 of the stick-log survey (docs/SP11-STK-SURVEY.md): the image built with STK_SURVEY=1
+    (q1n1-stk.efi) run from the volume as Q1N1-STK.EFI with the same `--el2 --uart`. Every test of
+    SP11Qemu runs again against it -- the preflight, the EBS report, the EL2 page, the uptime row and
+    the EL1 refusal -- which is the check that the survey adds lines and changes none of the page's own.
+
+    QEMU does not have the Surface Pro 11's blocks: the clock controller window is mapped Normal (it is
+    flash here), the USB windows are unmapped and the SMMU window answers all ones. So the fail-closed
+    behaviour is what these tests look for: every EL2 block prints SKIPPED or FAULT, no controller
+    register value is printed, nothing hangs and the survey reaches its verdict. QEMU is a model, not
+    the Surface: EXPERIMENTAL, hardware NOT RUN."""
+    stick_name = 'Q1N1-STK.EFI'
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        out = BUILD / 'out-stk'
+        shutil.rmtree(out, ignore_errors=True)
+        done = subprocess.run(
+            ['make', '-f', 'platform/uefi/Makefile', f'OUT={out.relative_to(ROOT)}', '-j4', 'stk-survey', 'SP11=1',
+             'STK_SURVEY=1', 'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixture.c',
+             'SP11_STAGE_TABLE_C=tools/testdata/sp11-stage-table-fixture.c'],
+            cwd=ROOT, env=ENV, capture_output=True, text=True)
+        if done.returncode:
+            raise RuntimeError('STK_SURVEY=1 build failed:\n' + done.stdout[-2000:] + done.stderr[-2000:])
+        cls.image = out / 'q1n1-stk.efi'
+
+    @staticmethod
+    def stk(text):
+        return [line for line in text.split('\n') if line.startswith('STK ')]
+
+    def assert_el2_blocks_failed_closed(self, lines):
+        """What the EL2 half must look like where the Surface's blocks do not exist."""
+        self.assertTrue(lines and lines[-1].startswith('STK P3 VERDICT'), lines[-3:])
+        self.assertRegex(lines[-1], r'^STK P3 VERDICT U0=(UNREAD|FAULT|GATED-OFF) U1=(UNREAD|FAULT|GATED-OFF) '
+                                    r'SMMU=(UNREAD|FAULT|BYPASS)$')
+        order = ['STK NEXT MAP', 'STK P3 MAP', 'STK NEXT GCC', 'STK P3 GCC', 'STK P3 GATE', 'STK NEXT SMMU',
+                 'STK P3 SMMU', 'STK P3 VERDICT']
+        at = -1
+        for prefix in order:
+            found = next((i for i, line in enumerate(lines) if i > at and line.startswith(prefix)), None)
+            self.assertIsNotNone(found, f'{prefix} missing or out of order in {lines}')
+            at = found
+        for line in lines:
+            self.assertRegex(line, STK_FONT_LINE, line)
+            # A block that was not read says why; a value from a controller or the clock controller would
+            # mean a read that cannot have happened here.
+            if re.match(r'STK P3 (GCC|U[01] )', line):
+                self.assertTrue('SKIPPED=' in line or 'FAULT=' in line, line)
+        self.assertLessEqual(len(lines), 60, 'more lines than the budget allows')
+
+    def test_the_survey_reaches_its_verdict_with_every_el2_block_failed_closed(self):
+        text = self.boot('stk-virtio', '--el2 --uart', el2=True, marker='STK P3 VERDICT')
+        before, after = text.split('EL2 CONFIRMED AFTER EXITBOOTSERVICES', 1)
+        self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
+        lines = self.stk(after)
+        self.assert_el2_blocks_failed_closed(lines)
+        # P2 ran before ExitBootServices, with the build line and the stick's path, and is repeated.
+        p2_before = [line for line in self.stk(before) if line.startswith('STK P2 ')]
+        p2_after = [line for line in lines if line.startswith('STK P2 ')]
+        self.assertTrue(p2_before and p2_after)
+        self.assertEqual(p2_before, p2_after)
+        self.assertTrue(p2_before[0].startswith('STK P2 BUILD GATE=1 REV='), p2_before[0])
+        self.assertTrue(any(line.startswith('STK P2 SELF PATH=') for line in p2_before))
+        self.assertIn('STK P2 USBIO SKIPPED=NO_USB_NODE', p2_before)      # a virtio disk, not a stick
+        self.assertIn('STK P2 UX SKIPPED=NOT_USB', p2_before)
+
+    def test_p2_reports_the_usb_stick_it_was_loaded_from_and_no_identifier(self):
+        text = self.boot('stk-usb', '--el2 --uart', el2=True, marker='STK P3 VERDICT', usb_stick=True)
+        before, after = text.split('EL2 CONFIRMED AFTER EXITBOOTSERVICES', 1)
+        self.assert_el2_blocks_failed_closed(self.stk(after))
+        for part in (before, after):                      # at P2 time and again on the EL2 page
+            lines = [line for line in self.stk(part) if line.startswith('STK P2 ')]
+            joined = '\n'.join(lines)
+            self.assertTrue(any(re.fullmatch(r'STK P2 SELF PATH=.*/USB\(\d+\.\d+\)/.*', line) for line in lines), lines)
+            self.assertRegex(joined, r'STK P2 HUB USBNODES=1 ROOTIDX=\d+ HUBPORTIDX=NONE')
+            self.assertRegex(joined, r'STK P2 USBIO BCDUSB=0X[0-9A-F]+ CLASS=0X8 SUB=0X6 PROTO=0X50 '
+                                     r'EPIN=0X[0-9A-F]+ EPOUT=0X[0-9A-F]+ MPS=0X[0-9A-F]+')
+            self.assertRegex(joined, r'STK P2 BLK LASTLBA=0X[0-9A-F]+ BLKSZ=0X[0-9A-F]+ REMOVABLE=[01] READONLY=[01]')
+            self.assertIn('STK P2 HC N=1', lines)
+            self.assertRegex(joined, r'STK P2 HC HC0 BAR0=0X[0-9A-F]+ CLASS=0XC0330 LOC=')
+            # The baseline is the stick's own controller read through the firmware, and labelled UX
+            # because its BAR is not one of the Surface's two windows.
+            self.assertRegex(joined, r'STK P2 UX CAPLEN=0X[0-9A-F]+ USBCMD=0X[0-9A-F]+ USBSTS=0X[0-9A-F]+ ')
+            # QEMU's stick has a vendor and product id and strings; none of them may appear.
+            for line in lines:
+                for banned in ('46F4', 'QEMU', 'VID', 'PID', 'SERIAL'):
+                    self.assertNotIn(banned, line)
+
+    def test_the_survey_image_prints_nothing_without_the_el2_option(self):
+        text = self.boot('stk-preflight', '', el2=False, marker='Preflight only.')
+        self.assertNotIn('STK ', text)
+
+    def test_at_el1_the_survey_says_so_and_reads_nothing(self):
+        text = self.boot('stk-el1', '--el2 --uart', el2=False, marker='STK P3 SKIPPED=NOT_AT_EL2')
+        self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
+        before, after = text.split('EL2 NOT REACHED - STILL IN EL1', 1)
+        self.assertFalse([line for line in self.stk(after) if line.startswith('STK NEXT')])
+        self.assertTrue([line for line in self.stk(before) if line.startswith('STK P2 BUILD')])
 
 
 if __name__ == '__main__':
