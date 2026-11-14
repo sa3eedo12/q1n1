@@ -608,12 +608,43 @@ static int suite_lines(void)
     return 0;
 }
 
+/* The numbers docs/SP11-PAYLOAD.md plans a chain's page with, measured rather than copied: the lines the runner adds for
+ * each payload that ran (payloads that print nothing, in chains of one to five), and the rows of the panel region on the
+ * unit's 2880x1920 panel (as the planner's own test places it) and in the least layout. Run as `lines-report`;
+ * tools/test-q1n1-sp11-payload-chain.py compares the planning table of the document with its output. */
+static uint64_t fn_silent(const struct q1n1_payload_args *a)
+{
+    ran[ran_n++] = index_of_base(a->payload_base);
+    return 0;
+}
+static int report_lines(void)
+{
+    unsigned per_payload = 0;
+    for (unsigned n = 1; n <= MAXF; n++) {
+        char kinds[MAXF + 1];
+        memset(kinds, 'P', n);
+        kinds[n] = 0;
+        build(kinds);
+        all_fn(fn_silent);
+        if (run() != Q1N1_PAYLOAD_RUN_OK) return 1;
+        unsigned added = count_of(EV_EMIT) - loaded.notes;      /* the notes are replayed first and are not the runner's */
+        if (n == 1) per_payload = added;
+        if (added != per_payload * n) return 1;
+    }
+    struct q1n1_payload_region unit;
+    q1n1_payload_region_place(2880, 1920, 3, 20, &unit);
+    printf("RUNNER_LINES_PER_PAYLOAD=%u UNIT_ROWS=%u STOCK_ROWS=%u\n", per_payload, (unsigned)unit.rows,
+           (unsigned)Q1N1_PAYLOAD_REGION_LINES);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"order", suite_order}, {"verify", suite_verify}, {"stop", suite_stop}, {"budget", suite_budget},
         {"args", suite_args}, {"lines", suite_lines},
     };
+    if (argc > 1 && !strcmp(argv[1], "lines-report")) return report_lines();
     unsigned ran_suites = 0;
     for (unsigned i = 0; i < sizeof suites / sizeof suites[0]; i++) {
         if (argc > 1 && strcmp(argv[1], "all") && strcmp(argv[1], suites[i].name)) continue;

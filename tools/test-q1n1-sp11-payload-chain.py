@@ -20,8 +20,11 @@ agreement with the sources.
     be a payload, the order is the order given, the same limits), writes for state.bin alone the manifest it always
     did, and agrees with the runner's own classification (a small C harness) on every name; ManifestChainMutants
     runs seeded bugs in the tool against those tests.
-  * DocAgreement: the documentation's id, register and line tables are the ones in the sources; DocMutants seeds
-    mistakes in the document that these tests must refuse.
+  * DocAgreement: the documentation's id, register and line tables are the ones in the sources, and the planning table
+    of "The chain" is what the payloads and the runner print under `lines-report` (the most lines `state`, `psci`
+    and `timer` print, the runner's lines for each payload, the panel rows); DocMutants seeds mistakes in the
+    document that these tests must refuse. (docs/SP11-PAYLOAD-TIMER.md is checked in
+    tools/test-q1n1-sp11-payload-timer.py.)
 
 Writes only under build/. Hardware: NOT RUN. Evidence: EXPERIMENTAL (host model only)."""
 import concurrent.futures
@@ -60,6 +63,21 @@ DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
 UEFI = ROOT / 'platform' / 'uefi'
 READELF = lambda: shutil.which('llvm-readelf', path=lib.ENV['PATH']) or 'llvm-readelf'  # noqa: E731
 run, have = lib.run, lib.have
+LINES_REPORT = {}
+
+
+def lines_report():
+    """What `lines-report` prints in four of the native programs (built once per process): the most lines each payload
+    prints, the lines the runner adds for each payload that ran, and the rows of the panel region. The planning table of
+    docs/SP11-PAYLOAD.md is checked against these numbers, which come from running the payloads and the runner."""
+    if not LINES_REPORT:
+        for name in ('state', 'psci', 'timer', 'chain'):
+            done, binary = native.build_program(name, native.UEFI, native.PAYLOADS, BUILD / 'native')
+            assert done.returncode == 0, done.stderr
+            code, output = native.run_program(binary, 'lines-report')
+            assert code == 0, output
+            LINES_REPORT[name] = {key: int(value) for key, value in re.findall(r'([A-Z_]+)=(\d+)', output)}
+    return LINES_REPORT
 
 
 class ChainNative(unittest.TestCase):
@@ -634,17 +652,57 @@ class DocAgreement(unittest.TestCase):
         base = SCRATCH / 'doc-stick'
         shutil.rmtree(base, ignore_errors=True)
         (base / 'in').mkdir(parents=True)
-        for name in ('state.bin', 'psci.bin'):
+        for name in ('state.bin', 'psci.bin', 'timer.bin'):
             (base / 'in' / name).write_bytes(bytes(range(64)))
         done = run(['python3', '-B', str(TOOLS / 'sp11_payload_manifest.py'), '--out-dir', str(base / 'out'),
-                    str(base / 'in' / 'state.bin'), str(base / 'in' / 'psci.bin')])
+                    str(base / 'in' / 'state.bin'), str(base / 'in' / 'psci.bin'), str(base / 'in' / 'timer.bin')])
         self.assertEqual(done.returncode, 0, done.stderr)
         written = sorted(p.name for p in (base / 'out' / 'SP11').iterdir())
-        self.assertEqual(written, ['PAYLOAD.MAN', 'PSCI.BIN', 'STATE.BIN'])
+        self.assertEqual(written, ['PAYLOAD.MAN', 'PSCI.BIN', 'STATE.BIN', 'TIMER.BIN'])
         table = self.doc[self.doc.index('## On the stick'):self.doc.index('## The manifest')]
         for name in written + ['Q1N1-PAYLOAD.EFI']:
             self.assertIn(f'| `SP11\\{name}` |', table)
-        self.assertIn('{state,psci}.bin', self.doc)
+        self.assertIn('{state,psci,timer}.bin', self.doc)
+
+    def test_the_planning_table_of_the_chain_is_what_the_programs_measure(self):
+        if not have('clang'):
+            self.skipTest('clang not installed')
+        cells = {label: value for label, value in re.findall(r'^\| (.+?) \| (.+?) \|$', self.section('chain-budget'), re.M)
+                 if label not in ('Item', '---')}
+
+        def cell(*words):
+            hits = [value for label, value in cells.items() if all(word in label for word in words)]
+            self.assertEqual(len(hits), 1, f'the planning table has {len(hits)} rows for {words}')
+            return hits[0]
+        measured = lines_report()
+        runner, unit, stock = (measured['chain'][key] for key in ('RUNNER_LINES_PER_PAYLOAD', 'UNIT_ROWS', 'STOCK_ROWS'))
+        self.assertEqual(int(cell('`state`')), measured['state']['LINES_MAX'])
+        self.assertEqual(int(cell('`psci`')), measured['psci']['LINES_MAX'])
+        self.assertEqual(int(cell('`timer`')), measured['timer']['LINES_MAX'])
+        self.assertEqual(int(cell('for each payload')), runner)
+        self.assertEqual(int(cell('2880 x 1920')), unit)
+        self.assertEqual(int(cell('stock')), stock)
+        self.assertEqual(cell('once per boot'), 'files + 1')
+        # What a report cannot say: the notes are one LOADED per file (the loader's loop) and one READY (the glue).
+        notes = self.load_c[self.load_c.index('static void add_notes('):]
+        notes = notes[:notes.index('\n}\n')]
+        self.assertEqual(len(re.findall(r'for \(uint32_t i = 0; i < out->count; i\+\+\)', notes)), 1)
+        self.assertEqual(notes.count('q1n1_payload_note(out, line.buf);'), 1)
+        self.assertEqual(self.main_c.count('q1n1_payload_note(&payload_loaded, ready.buf);'), 1)
+        # The worked example under the table: three payloads, so three files and `READY`, and three runner lines each.
+        flat = ' '.join(self.doc.split())
+        found = re.search(r'\(3 \+ 1\) \+ 3 x 3 \+ (\d+) \+ (\d+) \+ (\d+) = (\d+) lines', flat)
+        self.assertIsNotNone(found, 'the worked example is gone')
+        psci, new, timer, total = map(int, found.groups())
+        self.assertEqual((psci, timer), (measured['psci']['LINES_MAX'], measured['timer']['LINES_MAX']))
+        self.assertEqual(runner, 3)
+        self.assertEqual(total, (3 + 1) + 3 * runner + psci + new + timer)
+        self.assertTrue(stock < total <= unit)
+        self.assertIn(f'{unit} rows hold them, {stock} do not', flat)
+
+    def test_the_tests_table_counts_the_seeded_mistakes_of_this_file(self):
+        tests = self.doc[self.doc.index('## Tests'):self.doc.index('## Safety')]
+        self.assertIn(f'with {len(DOC_MUTANTS)} seeded mistakes in the document', ' '.join(tests.split()))
 
     def test_the_document_says_what_the_status_is(self):
         for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
@@ -682,6 +740,13 @@ DOC_MUTANTS = [
     ('a-decode-name-is-wrong', _replace('`INVALID_PARAMETERS(-2)`', '`INVALID_PARAMETER(-2)`', count=-1)),
     ('the-suffix-is-another-case', _replace('`<stem>.BIN`', '`<stem>.bin`', count=-1)),
     ('the-hardware-status-is-claimed', _replace('hardware NOT RUN', 'hardware qualified', count=-1)),
+    ('a-planned-payload-maximum-is-wrong', _replace('| `psci`, at most | 30 |', '| `psci`, at most | 29 |')),
+    ('a-planned-payload-row-is-forgotten', _replace('| `timer`, at most | 16 |\n', '')),
+    ('the-planned-runner-lines-per-payload-are-wrong', _replace('`CALL`, `DONE` | 3 |', '`CALL`, `DONE` | 4 |')),
+    ('the-planned-notes-per-boot-are-wrong', _replace('`READY` | files + 1 |', '`READY` | files |')),
+    ('the-planned-unit-rows-are-wrong', _replace("2880 x 1920 panel | 89 |", "2880 x 1920 panel | 88 |")),
+    ('the-planned-stock-rows-are-wrong', _replace('the least it asks for | 60 |', 'the least it asks for | 64 |')),
+    ('the-worked-example-total-is-wrong', _replace('= 83 lines', '= 82 lines')),
 ]
 
 

@@ -196,11 +196,28 @@ static int suite_args(void)
     return 0;
 }
 
+/* The number docs/SP11-PAYLOAD.md plans a chain's page with, measured rather than copied: the most lines this payload
+ * prints, over every EL and with HCR_EL2.E2H clear and set. Run as `lines-report`; tools/test-q1n1-sp11-payload-chain.py
+ * compares the planning table of the document with its output. */
+static int report_lines(void)
+{
+    struct q1n1_payload_args a = args();
+    unsigned most = 0;
+    for (uint64_t el = 0; el <= 3; el++)
+        for (unsigned e2h = 0; e2h < 2; e2h++) {
+            go(&a, el, (uint64_t)e2h << 34);
+            if (line_count > most) most = line_count;
+        }
+    printf("LINES_MAX=%u\n", most);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"el2", suite_el2}, {"not-el2", suite_not_el2}, {"args", suite_args},
     };
+    if (argc > 1 && !strcmp(argv[1], "lines-report")) return report_lines();
     unsigned ran = 0;
     for (unsigned i = 0; i < sizeof suites / sizeof suites[0]; i++) {
         if (argc > 1 && strcmp(argv[1], "all") && strcmp(argv[1], suites[i].name)) continue;

@@ -606,12 +606,46 @@ static int suite_args(void)
     return 0;
 }
 
+/* The number docs/SP11-PAYLOAD.md plans a chain's page with, measured rather than copied: the most lines this payload
+ * prints over every EL, the widest answers there are (every answer one of the nine error names, as the 32-bit result of
+ * an SMC32 call and as the 64-bit one) and thousands of random ones. Run as `lines-report`;
+ * tools/test-q1n1-sp11-payload-chain.py compares the planning table of the document with its output. */
+static int report_lines(void)
+{
+    struct q1n1_payload_args a = args();
+    unsigned most = 0;
+    for (uint64_t el = 0; el <= 3; el++) {
+        fill_all(~UINT64_C(1));
+        go(&a, el);
+        if (lines_n() > most) most = lines_n();
+    }
+    for (unsigned code = 1; code <= 9; code++) {
+        fill_all(-(uint64_t)code);
+        go(&a, 2);
+        if (lines_n() > most) most = lines_n();
+        fill_all((uint32_t)-(int32_t)code);
+        go(&a, 2);
+        if (lines_n() > most) most = lines_n();
+    }
+    for (unsigned round = 0; round < 3000; round++) {
+        sc.version = next_random(); sc.migrate = next_random(); sc.smccc = next_random();
+        for (unsigned i = 0; i < FEATURES; i++) sc.feature[i] = next_random() >> (next_random() & 63);
+        for (unsigned i = 0; i < CPUS; i++) sc.affinity[i] = next_random() >> (next_random() & 63);
+        sc.other = next_random();
+        go(&a, 2);
+        if (lines_n() > most) most = lines_n();
+    }
+    printf("LINES_MAX=%u\n", most);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"ids", suite_ids}, {"el", suite_el}, {"next", suite_next}, {"decode", suite_decode}, {"garbage", suite_garbage},
         {"qemu", suite_qemu}, {"args", suite_args},
     };
+    if (argc > 1 && !strcmp(argv[1], "lines-report")) return report_lines();
     unsigned ran = 0;
     for (unsigned i = 0; i < sizeof suites / sizeof suites[0]; i++) {
         if (argc > 1 && strcmp(argv[1], "all") && strcmp(argv[1], suites[i].name)) continue;

@@ -10,12 +10,13 @@
   * ElfCheck: tools/sp11_payload_elfcheck.py against real payload ELFs built with the Makefile's flags: the
     reference payload passes; an absolute pointer table, an absolute address built with MOVZ/MOVK, a writable
     global, a position-dependent link and an unreadable file are each refused.
-  * PayloadBinary: the built `state` and `psci` payloads: entry at offset 0, within their pages, identical when
+  * PayloadBinary: the built `state`, `psci` and `timer` payloads: entry at offset 0, within their pages, identical when
     linked at another base, only what each one's allow-list says (state: the documented MRS; psci: MRS of
-    CurrentEL and MPIDR_EL1 and exactly one `smc #0`; neither: any other system or exclusive instruction, or
-    CNTVOFF_EL2 and CNTPOFF_EL2), `make payloads` reproducible and running the check, and a payload with an
-    absolute relocation fails the Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which
-    tools/test-q1n1-sp11-payload-chain.py also runs against seeded-bad builds.
+    CurrentEL and MPIDR_EL1 and exactly one `smc #0`; timer: MRS of its twelve timer and counter registers, no
+    barrier; no payload: any other system or exclusive instruction; only timer: CNTVOFF_EL2 and CNTPOFF_EL2),
+    `make payloads` reproducible and running the check, and a payload with an absolute relocation fails the
+    Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which tools/test-q1n1-sp11-payload-chain.py
+    and tools/test-q1n1-sp11-payload-timer.py also run against seeded-bad builds.
   * ToolMutants: seeded bugs in the two tools, each of which ManifestTool or ElfCheck must reject (the same
     classes are run against the mutated copy through Q1N1_PAYLOAD_TOOLS_DIR), and an unmutated control.
   * PayloadDefaultOff: with Q1N1_SP11_PAYLOAD at 0 (the default) every file of the runner compiles to nothing,
@@ -343,8 +344,9 @@ class ElfCheck(unittest.TestCase):
 
 class PayloadBinary(unittest.TestCase):
     # The allow-list mechanism is tools/sp11_payload_testlib.py's POLICIES and binary_violations, one entry per payload,
-    # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py: `state` is MRS only, `psci` is MRS of
-    # CurrentEL and MPIDR_EL1 plus exactly one SMC.
+    # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py and -timer.py: `state` is MRS only,
+    # `psci` is MRS of CurrentEL and MPIDR_EL1 plus exactly one SMC, `timer` is MRS of its twelve timer and counter
+    # registers (the only payload that may read CNTVOFF_EL2 and CNTPOFF_EL2) and no barrier.
     POLICY = lib.POLICIES
 
     @classmethod
@@ -394,14 +396,26 @@ class PayloadBinary(unittest.TestCase):
 
     def test_the_code_holds_only_what_its_policy_allows(self):
         # state: MRS of the documented registers and nothing else. psci: MRS of CurrentEL and MPIDR_EL1 and exactly one
-        # `smc #0`. Neither: HVC, SVC, MSR, SYS, DC, IC, TLBI, AT, ERET, WFI, WFE, exclusives or atomics, the timer
-        # offsets CNTVOFF_EL2 and CNTPOFF_EL2, a word that is not a known instruction. Checked by the disassembly and,
-        # independently, by the encoding of every aligned word of the flat binary's code.
+        # `smc #0`. timer: MRS of its twelve timer and counter registers, CNTVOFF_EL2 and CNTPOFF_EL2 once each, no
+        # barrier, and no SMC. None of them: HVC, SVC, MSR, SYS, DC, IC, TLBI, AT, ERET, WFI, WFE, exclusives or atomics,
+        # a word that is not a known instruction; and only timer may name CNTVOFF_EL2 or CNTPOFF_EL2. Checked by the
+        # disassembly and, independently, by the encoding of every aligned word of the flat binary's code.
         for name, (elf, flat) in self.bins.items():
             with self.subTest(payload=name):
                 self.assertEqual(lib.binary_violations(elf, flat, self.POLICY[name], READELF()), [])
         self.assertEqual(self.POLICY['state']['smc'], 0, 'the reference payload executes no SMC at all')
         self.assertEqual(self.POLICY['psci']['smc'], 1)
+        self.assertEqual(self.POLICY['timer']['smc'], 0)
+        self.assertEqual([name for name, policy in self.POLICY.items() if policy.get('timer_offsets')], ['timer'])
+        offsets = {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2}
+        self.assertEqual(self.POLICY['timer']['registers'] & offsets, offsets)
+        timer_elf, timer_flat = self.bins['timer']
+        for other in ('state', 'psci'):
+            with self.subTest(refused_under=other):
+                self.assertFalse(offsets & self.POLICY[other]['registers'])
+                problems = lib.binary_violations(timer_elf, timer_flat, self.POLICY[other], READELF())
+                self.assertTrue(any('the code names' in p for p in problems), 'the timer binary must be refused under this policy')
+
     def test_make_payloads_is_reproducible(self):
         again = BUILD / 'binary-again'
         shutil.rmtree(again, ignore_errors=True)

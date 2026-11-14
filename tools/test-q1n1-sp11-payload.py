@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Native tests, seeded-bug mutants and source audits for the Surface Pro 11 stick payload runner
-(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md).
+(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md and docs/SP11-PAYLOAD-TIMER.md).
 
     python3 tools/test-q1n1-sp11-payload.py
 
@@ -12,17 +12,19 @@ Runs, under ASan and UBSan:
     read, nothing is written; which files are payloads by name), -plan.c (declared ranges, the memory-map
     rules slbounce applies, the text layer, the ABI layout), -run.c (the EL2 sequence for one payload, the
     second hash, the ops and the load32 policy), -chain.c (several payloads in one boot), -state.c (the
-    reference payload against a scripted register file) and -psci.c (the psci payload against a scripted
-    register file and a scripted SMC);
+    reference payload against a scripted register file), -psci.c (the psci payload against a scripted
+    register file and a scripted SMC) and -timer.c (the timer payload against a scripted register file and
+    counter);
   * Mutants: seeded bugs, each applied to a copy of the sources under build/, each of which the programs
     must reject (a failing, hanging or -- for the ABI -- non-compiling program catches it), against an
     unmutated control that must pass the same way. The chain's and psci's own seeded bugs are in
-    tools/test-q1n1-sp11-payload-chain.py, which runs them through the same machinery;
+    tools/test-q1n1-sp11-payload-chain.py and the timer's in tools/test-q1n1-sp11-payload-timer.py, which
+    run them through the same machinery;
   * SourceAudit: what no run can show -- SPDX lines, that the loader makes only its listed firmware calls,
     that nothing of the runner stores, that the main.c glue forwards loads only and is wholly under the
     gate, that nothing of it sits between the last GetMemoryMap and ExitBootServices, the constants shared
-    with slbounce, that the documentation's ABI table is the compiled one, and that no machine identifier
-    is in any new file.
+    with slbounce, that the documentation's ABI table is the compiled one, that both documents start with their
+    licence line and stay within the size limit, and that no machine identifier is in any new file.
 
 SLBOUNCE_SP11_DIR (the paired slbounce fork) adds the comparison of the runner's memory-map verdicts with
 slbounce's own sp11_sweep_range over 30000 random maps; without it that comparison is SKIPPED, and said
@@ -40,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UEFI = ROOT / 'platform' / 'uefi'
 PAYLOADS = ROOT / 'payloads'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
+DOC_TIMER = ROOT / 'docs' / 'SP11-PAYLOAD-TIMER.md'
+DOCS = [DOC, DOC_TIMER]
 BUILD = ROOT / 'build' / 'sp11-payload-test'
 LLVM = ('/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin', '/opt/homebrew/bin')
 ENV = dict(os.environ, PATH=os.pathsep.join(LLVM + (os.environ.get('PATH', ''),)), PYTHONDONTWRITEBYTECODE='1')
@@ -63,15 +67,16 @@ PROGRAMS = {
               ['sp11-payload-run.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'], 6, 220, 'chain'),
     'state': ('tools/test-q1n1-sp11-payload-state.c', ['sp11-payload-text.c'], 3, 900, 'state'),
     'psci': ('tools/test-q1n1-sp11-payload-psci.c', ['sp11-payload-text.c'], 7, 90000, 'psci'),
+    'timer': ('tools/test-q1n1-sp11-payload-timer.c', ['sp11-payload-text.c'], 8, 8000, 'timer'),
 }
 # The programs that test a payload's own source, built natively with a scripted register file (and SMC).
-HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c'}
+HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c'}
 # What a copy of the tree needs: the runner, its dependencies, the survey's text file (the panel layout the
 # runner copies is compared with it) and the payload sources.
 UEFI_COPIED = sorted(p.name for p in UEFI.glob('sp11-payload*')) + [
     'preload.c', 'preload.h', 'sha256.c', 'sha256.h', 'efi.h', 'sp11-ebs-ranges.h', 'sp11-fbgop.c', 'sp11-fbgop.h',
     'sp11-stk-text.c', 'sp11-stk-survey.h']
-PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c']
+PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c', 'timer.c']
 
 NEW_SOURCES = sorted(UEFI.glob('sp11-payload*')) + sorted(PAYLOADS.glob('*')) + sorted(
     (ROOT / 'tools').glob('test-q1n1-sp11-payload*')) + sorted((ROOT / 'tools').glob('sp11_payload_*')) + sorted(
@@ -183,7 +188,7 @@ class Native(unittest.TestCase):
 # a change to the source that moves a target is reported as a stale mutant and not as a survivor.
 # (name, file below the copy's root, [(needle, replacement)], programs that must reject it, build error that
 # counts as rejecting it). The programs are listed in the order they are tried.
-ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci']
+ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer']
 LOAD = 'uefi/sp11-payload-load.c'
 PLAN = 'uefi/sp11-payload-plan.c'
 RUNC = 'uefi/sp11-payload-run.c'
@@ -475,6 +480,9 @@ class SourceAudit(unittest.TestCase):
         for path in NEW_SOURCES:
             with self.subTest(file=path.name):
                 self.assertIn('SPDX-License-Identifier: MIT', self.read(path)[:200])
+        for path in DOCS:
+            with self.subTest(file=path.name):
+                self.assertEqual(self.read(path).splitlines()[0], '<!-- SPDX-License-Identifier: MIT -->')
 
     def test_the_loader_makes_only_its_listed_firmware_calls(self):
         code = self.code('sp11-payload-load.c')
@@ -584,7 +592,7 @@ class SourceAudit(unittest.TestCase):
         paths = '|'.join(['/Us' + 'ers/', '/ho' + 'me/', '/Vol' + 'umes/'])
         pattern = re.compile(paths + r'|\.loc' + r'al\b|\bsae' + r'ed\b|host' + r'name|' +
                              r'\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b', re.I)
-        for path in NEW_SOURCES + [DOC]:
+        for path in NEW_SOURCES + DOCS:
             if not path.exists():
                 continue
             for number, line in enumerate(self.read(path).splitlines(), 1):
@@ -592,7 +600,7 @@ class SourceAudit(unittest.TestCase):
                     self.assertIsNone(pattern.search(line), line)
 
     def test_new_files_are_not_oversized(self):
-        for path in NEW_SOURCES + [DOC]:
+        for path in NEW_SOURCES + DOCS:
             if not path.exists():
                 continue
             text = self.read(path)
