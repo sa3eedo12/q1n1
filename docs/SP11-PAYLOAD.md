@@ -21,7 +21,7 @@ runner a real EL2); **hardware NOT RUN**. Facts about the unit are labelled wher
 make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 \
     SP11_USB_TABLE_C=<file from sp11_usb_ports.py emit-c> \
     SP11_STAGE_TABLE_C=<file defining q1n1_sp11_stage_table_get()> \
-    payload-runner payloads          # -> $(OUT)/q1n1-payload.efi and $(OUT)/payloads/{state,psci,timer}.bin
+    payload-runner payloads          # -> $(OUT)/q1n1-payload.efi and $(OUT)/payloads/{state,psci,usbsmmu,timer}.bin
 ```
 
 * `Q1N1_SP11_PAYLOAD` (default 0) needs `SNAP_PLATFORM_SP11=1` and is an `#error` without it, in `main.c` and in
@@ -36,7 +36,7 @@ make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 \
   keeps), and flattens it. Freestanding, no libc, general-regs-only, like the rest of q1n1. A second check, in
   the tests, disassembles each binary against a per-payload allow-list: `state` may hold `MRS` of its registers
   and nothing else; `psci` may hold `MRS` of CurrentEL and MPIDR_EL1 and exactly **one** `smc #0`; `timer` `MRS` of its
-  twelve timer and counter registers and no barrier.
+  twelve timer and counter registers and no barrier; `usbsmmu` `MRS` of CurrentEL, no barrier and no `smc`.
 
 ## On the stick, and the one command
 
@@ -58,6 +58,10 @@ exactly:
 | `SP11\STATE.BIN` | the tool (a copy of `state.bin`; manifest index 0) |
 | `SP11\PSCI.BIN` | the tool (a copy of `psci.bin`; manifest index 1) |
 | `SP11\TIMER.BIN` | the tool (a copy of `timer.bin`; manifest index 2, **last**: it may stall the board) |
+| `SP11\USBSMMU.BIN` | only in a chain that has `usbsmmu`: the tool (a copy of `usbsmmu.bin`, between `psci` and `timer`) |
+
+The S0b chain is `psci.bin usbsmmu.bin timer.bin` (manifest indexes 0, 1, 2; the stick holds `SP11\PSCI.BIN`,
+`SP11\USBSMMU.BIN`, `SP11\TIMER.BIN`, `SP11\PAYLOAD.MAN` and the runner, and no `SP11\STATE.BIN`): see "Payload `usbsmmu`".
 
 Then, from the UEFI Shell, with slbounce loaded exactly as for q1n1 (`load SP11\SLBOUNCE-DEVHE-MARK.EFI`):
 
@@ -170,17 +174,21 @@ past the last row are mirrored to the UART but not drawn. Each `DONE` line stays
 | runner, for each payload: `VERIFY`, `CALL`, `DONE` | 3 |
 | `state`, at most | 22 |
 | `psci`, at most | 30 |
+| `usbsmmu`, at most | 24 |
 | `timer`, at most | 16 |
 | panel region, the unit's 2880 x 1920 panel | 89 |
 | panel region, the stock layout: the least it asks for | 60 |
 <!-- /chain-budget -->
 
-The maxima are what the host tests measure, over every EL and every answer they script. Example: `psci`, a new payload
-of at most 24 lines and `timer` need (3 + 1) + 3 x 3 + 30 + 24 + 16 = 83 lines: 89 rows hold them, 60 do not. A chain
+The maxima are what the host tests measure, over every EL and every answer they script. Example: `psci`, `usbsmmu` and
+`timer` need (3 + 1) + 3 x 3 + 30 + 24 + 16 = 83 lines: 89 rows hold them, 60 do not. Adding `state` (22 lines and the
+runner's 4) gives 109: past the unit's 89 rows, so a chain of all four is for QEMU, not the unit. A chain
 that stops adds `PAYLOAD CHAIN STOPPED` (a hash also `PAYLOAD REFUSED=HASH_AT_EL2`) and calls nothing after it.
 
 **Order.** A payload that may stall the board goes **last**, so that a stall costs only the lines after it: `timer` is
-one (`state.bin psci.bin timer.bin`, never `timer.bin` first). The manifest tool keeps the order it is given.
+one (`state.bin psci.bin timer.bin`, never `timer.bin` first). `usbsmmu` may hang or reset the board at the first read of
+a context bank, so it goes after `psci` and before `timer` (`psci.bin usbsmmu.bin timer.bin`): a stall in it costs only
+`timer`'s lines, and a stall in `timer` costs none of `usbsmmu`'s. The manifest tool keeps the order it is given.
 
 **The chain is not a sandbox.** Every payload is machine code at EL2 and may overwrite anything: another payload,
 q1n1's records of the others, the runner's own code. The second hash catches accidents (a payload that scribbled
@@ -268,187 +276,30 @@ access), and a test links the reference payload at another address and compares 
 
 ## Reference payload `state` (read only)
 
-Prints one line per register, `PAYLOAD STATE KEY=0XVALUE`, and nothing else. It executes `MRS` and no instruction
-that writes a system register, a cache, a TLB or a device (a test disassembles the binary and refuses `MSR`, `SYS`,
-`DC`, `IC`, `TLBI`, `AT`, `HVC`, `SMC`, `SVC`, `ERET`, `WFI`, `WFE`, exclusives and the rest). In particular it never
-writes CNTKCTL_EL1, never reads CNTVOFF_EL2 or CNTPOFF_EL2, and does not depend on E2H (expected 0 on the unit,
-OBSERVED through q1n1's page as HCR_EL2 0x88000010): TTBR1_EL2 is read exactly when HCR_EL2.E2H is set. CurrentEL
-is read first and the EL2 block only when it says EL2, so the payload is also safe run any other way
-(`EL2REGS=SKIPPED_NOT_AT_EL2`).
-
-<!-- registers -->
-| Key | Register | Readable at | Evidence |
-| --- | --- | --- | --- |
-| `CURRENTEL` | CurrentEL | EL1, EL2 | VERIFIED (architecture) |
-| `MIDR_EL1` | MIDR_EL1 | EL1, EL2 | VERIFIED; unit value 0x512F0011 OBSERVED |
-| `MPIDR_EL1` | MPIDR_EL1 | EL1, EL2 | VERIFIED |
-| `ID_AA64MMFR0_EL1` | ID_AA64MMFR0_EL1 | EL1, EL2 | VERIFIED |
-| `ID_AA64MMFR1_EL1` | ID_AA64MMFR1_EL1 | EL1, EL2 | VERIFIED |
-| `ID_AA64MMFR2_EL1` | ID_AA64MMFR2_EL1 | EL1, EL2 | VERIFIED; read at EL2 by q1n1's X2 probe |
-| `ID_AA64MMFR3_EL1` | S3_0_C0_C7_3 | EL1, EL2 | INFERRED: ID space, unallocated reads as zero, not UNDEFINED |
-| `ID_AA64MMFR4_EL1` | S3_0_C0_C7_4 | EL1, EL2 | INFERRED: as above |
-| `ID_AA64PFR0_EL1` | ID_AA64PFR0_EL1 | EL1, EL2 | VERIFIED |
-| `ID_AA64PFR1_EL1` | ID_AA64PFR1_EL1 | EL1, EL2 | VERIFIED |
-| `HCR_EL2` | HCR_EL2 | EL2 only | VERIFIED (architecture); value OBSERVED |
-| `SCTLR_EL2` | SCTLR_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `TCR_EL2` | TCR_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `TTBR0_EL2` | TTBR0_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `TTBR1_EL2` | S3_4_C2_C0_1 | EL2, only when E2H is set | VERIFIED (architecture); not expected to print |
-| `MAIR_EL2` | MAIR_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `VBAR_EL2` | VBAR_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `CPTR_EL2` | CPTR_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `CNTHCTL_EL2` | CNTHCTL_EL2 | EL2 only | VERIFIED; value OBSERVED |
-| `CNTFRQ_EL0` | CNTFRQ_EL0 | EL0 and up | VERIFIED |
-| `DAIF` | DAIF | EL1, EL2 | VERIFIED; 0x3C0 OBSERVED |
-| `SPSEL` | SPSel | EL1, EL2 | VERIFIED |
-| `EL2REGS` | (a note) | printed only when not at EL2 | `SKIPPED_NOT_AT_EL2` |
-<!-- /registers -->
-
-"VERIFIED (architecture)" means the Arm ARM says so, not that the unit was measured: **no hardware run exists**. The
-values the unit showed on q1n1's own page are the only OBSERVED numbers.
+`payloads/state.c` prints one line per register, `PAYLOAD STATE KEY=0XVALUE`, and nothing else; it executes `MRS` and
+no instruction that writes. All of it, the register table included, is in [SP11-PAYLOAD-STATE.md](SP11-PAYLOAD-STATE.md).
+EXPERIMENTAL; hardware NOT RUN: the payload has not run on the unit, and the only OBSERVED values are those q1n1's own
+page showed.
 
 ## Payload `psci` (read-only PSCI queries)
 
-`payloads/psci.c` asks the firmware's PSCI implementation what it supports, with `smc #0` at EL2, and prints the
-answers. It is the first payload that is not MRS-only, so it is deliberately narrow. **EXPERIMENTAL; hardware NOT
-RUN**: nothing here says what the unit's firmware answers, or whether it answers at all.
-
-**The conduit.** The unit's FADT has ARM_BOOT_ARCH_FLAGS 0x1: PSCI_COMPLIANT = 1, PSCI_USE_HVC = 0, so the PSCI
-conduit is SMC (OBSERVED). That an SMC issued from q1n1's EL2 context, after the Secure-Launch bounce, reaches the
-firmware's PSCI at all is UNKNOWN until this runs (the FADT describes what an operating system should use).
-
-**What it may issue.** Exactly five function ids, through **one** helper (`smc_query`), which is the only place an
-`smc` appears in the source and, a test counts, the only `smc` instruction in the binary. The helper takes a kind of
-query and a table index, never a function id, so no other id can be expressed through it; an index outside its
-table issues nothing. The ids are SMCCC fast calls; the numbers match Linux's `include/uapi/linux/psci.h` and
-`include/linux/arm-smccc.h` (VERIFIED against those headers; the PSCI and SMCCC specifications themselves were not
-re-read, so the meanings given for the answers in the tables below are INFERRED from them):
-
-<!-- psci-ids -->
-| Name | Function id | Size | x1 | x2 | x0 on return | Evidence |
-| --- | --- | --- | --- | --- | --- | --- |
-| `SMCCC_VERSION` | `0x80000000` | SMC32 | 0 | 0 | major in bits 31:16, minor in 15:0; -1 if SMCCC 1.0 | id VERIFIED |
-| `PSCI_VERSION` | `0x84000000` | SMC32 | 0 | 0 | major in bits 31:16, minor in 15:0 | id VERIFIED |
-| `MIGRATE_INFO_TYPE` | `0x84000006` | SMC32 | 0 | 0 | 0 UP migratable, 1 UP not migratable, 2 Trusted OS absent or MP | id VERIFIED |
-| `PSCI_FEATURES` | `0x8400000A` | SMC32 | a function id from the next table | 0 | 0 or the flags if implemented, -1 if not | id VERIFIED |
-| `AFFINITY_INFO` | `0xC4000004` | SMC64 | one affinity from the third table | 0 (the CPU itself) | 0 ON, 1 OFF, 2 ON_PENDING | id VERIFIED |
-<!-- /psci-ids -->
-
-It **never** issues CPU_ON, CPU_OFF, CPU_SUSPEND, SYSTEM_OFF, SYSTEM_RESET, SYSTEM_RESET2, SYSTEM_SUSPEND, MIGRATE or
-any vendor id. The ids below are only ever the **argument** of PSCI_FEATURES, a question about whether the function
-exists, which has no effect:
-
-<!-- psci-features -->
-| Name | Id (argument only) | If PSCI_FEATURES answers 0 (or flags), it means |
-| --- | --- | --- |
-| `CPU_SUSPEND` | `0xC4000001` | implemented; flags: bit 0 OS-initiated mode, bit 1 extended power-state format (Linux) |
-| `CPU_OFF` | `0x84000002` | implemented |
-| `CPU_ON` | `0xC4000003` | the secondaries can be started through PSCI |
-| `AFFINITY_INFO` | `0xC4000004` | the state query used below exists |
-| `MIGRATE_INFO_TYPE` | `0x84000006` | implemented |
-| `SYSTEM_OFF` | `0x84000008` | the firmware can power the machine off |
-| `SYSTEM_RESET` | `0x84000009` | a PSCI reset exists |
-| `PSCI_FEATURES` | `0x8400000A` | PSCI 1.0 or later (INFERRED: the function arrived with 1.0) |
-| `SYSTEM_SUSPEND` | `0xC400000E` | suspend-to-RAM exists |
-| `SYSTEM_RESET2` | `0xC4000012` | the PSCI 1.1 reset with a reset type exists |
-<!-- /psci-features -->
-
-The twelve affinities (lowest affinity level 0), the CPUs the MADT's GICC entries list (OBSERVED on the unit), in CPU
-order:
-
-<!-- psci-mpidrs -->
-| Cluster | MPIDR affinities | Evidence |
-| --- | --- | --- |
-| 0 | `0x0`, `0x100`, `0x200`, `0x300` | OBSERVED (MADT) |
-| 1 | `0x10000`, `0x10100`, `0x10200`, `0x10300` | OBSERVED (MADT) |
-| 2 | `0x20000`, `0x20100`, `0x20200`, `0x20300` | OBSERVED (MADT) |
-<!-- /psci-mpidrs -->
-
-The boot CPU reads MPIDR_EL1 = 0x80000000 (OBSERVED): bit 31 is RES1 and its affinity is 0, the first entry. The
-payload prints the MPIDR_EL1 of the CPU it runs on.
-
-**Registers (SMCCC 1.1).** `x0` = function id; `x1`..`x3` = arguments, zeroed when unused; results in `x0`..`x3`
-(only `x0` is used, and printed raw); `x4`..`x17` and memory are declared clobbered, so the compiler assumes nothing
-about them across the call. It reads CurrentEL first and does nothing else unless that says EL2: not at
-EL2 it prints `PAYLOAD PSCI SKIPPED_NOT_AT_EL2` and issues no SMC (the only system registers it reads are CurrentEL
-and MPIDR_EL1; it never touches CNTVOFF_EL2 or CNTPOFF_EL2, which an earlier test image stalled this board with).
-A test disassembles `psci.bin` and allows only `mrs`, exactly one `smc #0`, and none of `hvc`, `svc`, `msr`, `sys`,
-`dc`, `ic`, `tlbi`, `at`, `eret`, `wfi`, `wfe`, the exclusives and the atomics.
-
-**What it prints**, in this order; a hang is named by the last `NEXT` line, and each group's results are printed as
-soon as the group is complete:
-
-```
-PAYLOAD PSCI MPIDR_EL1=0X..
-PAYLOAD PSCI NEXT VERSION                       (before PSCI_VERSION, then MIGRATE_INFO_TYPE)
-PAYLOAD PSCI VERSION PSCI_VERSION=0X..:V1.1 MIGRATE_INFO_TYPE=0X..:TOS_MP
-PAYLOAD PSCI NEXT FEATURES                      (before the first of ten PSCI_FEATURES calls)
-PAYLOAD PSCI FEATURES CPU_SUSPEND=0X0 CPU_OFF=0X0 ...      (as many lines as 100 characters need)
-PAYLOAD PSCI NEXT AFFINITY                      (before the first of twelve AFFINITY_INFO calls)
-PAYLOAD PSCI AFFINITY 0X0=0X0:ON 0X100=0X1:OFF ...         (the key is the MPIDR; as many lines as needed)
-PAYLOAD PSCI NEXT SMCCC                         (before SMCCC_VERSION, asked last and alone)
-PAYLOAD PSCI SMCCC SMCCC_VERSION=0X..:V1.1
-```
-
-Each result is `KEY=RAW` and, where the meaning is certain, `:DECODE`; `RAW` is the 64-bit `x0` as the runner's hex
-op prints it. At most 30 lines for any answers at all (the ABI allows 40). The decode:
-
-| `x0` | Decoded as |
-| --- | --- |
-| -1 .. -9 (the 32-bit `w0` for an SMC32 call, the whole `x0` for AFFINITY_INFO) | `NOT_SUPPORTED(-1)`, `INVALID_PARAMETERS(-2)`, `DENIED(-3)`, `ALREADY_ON(-4)`, `ON_PENDING(-5)`, `INTERNAL_FAILURE(-6)`, `NOT_PRESENT(-7)`, `DISABLED(-8)`, `INVALID_ADDRESS(-9)` |
-| PSCI_VERSION, SMCCC_VERSION, bit 31 clear | `V<major>.<minor>` |
-| MIGRATE_INFO_TYPE 0, 1, 2 | `TOS_UP_MIGRATE`, `TOS_UP_NO_MIGRATE`, `TOS_MP` |
-| AFFINITY_INFO 0, 1, 2 | `ON`, `OFF`, `ON_PENDING` |
-| PSCI_FEATURES, not an error | none: the raw value is the flags |
-| anything else, garbage included | none: raw only |
-
-**Four groups, not three, and why.** SMCCC_VERSION is not a PSCI function, and Linux asks PSCI_FEATURES whether it
-exists before calling it; the fixed table of ten ids does not allow that question, so it is asked last and alone
-under its own `NEXT SMCCC` line: whatever a PSCI-only firmware does with it, the PSCI answers are already on the
-page. The helper is `static noinline`, not `static inline`: an inline copy at each call site would put several
-`smc` instructions into the binary, and the build test demands exactly one.
-
-**What each answer would mean for the port** (INFERRED; none of it is measured):
-
-| Question | Line | An answer | What it would mean |
-| --- | --- | --- | --- |
-| Does PSCI answer here at all, and which version? | `PSCI_VERSION` | `0X10001:V1.1`, `0X10000:V1.0` | PSCI 1.x: PSCI_FEATURES exists, the FEATURES group is meaningful |
-| | | `0X2:V0.2` | PSCI 0.2: PSCI_FEATURES does not exist (it answers -1), so FEATURES says nothing |
-| | | `NOT_SUPPORTED(-1)` or any error | the SMC is not PSCI here, or not from this context |
-| | | no further line after `NEXT VERSION`, or a fault page | a hang: SMC is not answered from this state; a fault page whose ELR lies in `psci.bin` (subtract the base printed in the `LOADED` note, disassemble the binary) says the `smc` itself raised an exception |
-| Which functions exist? | `FEATURES` | `=0X0` or flags | implemented; `CPU_ON` present means a later payload can start the secondaries |
-| | | `NOT_SUPPORTED(-1)` | not implemented; `CPU_ON` absent means no standard way to start a secondary |
-| Where are the 11 secondaries? | `AFFINITY` | `:OFF` for the eleven | powered down: the state `CPU_ON` starts from |
-| | | `:ON` | running or parked by the firmware: `CPU_ON` would answer `ALREADY_ON(-4)`; another mechanism would be needed |
-| | | `:ON_PENDING` | a power-up is under way; ask again |
-| | | `INVALID_PARAMETERS(-2)` | PSCI does not know that MPIDR: the MADT and PSCI disagree, or the conduit is not the platform's |
-| Boot CPU sanity | `0X0=` | `0X0:ON` | expected (INFERRED: the CPU executing is on); anything else puts the whole table in doubt |
-| Can PSCI reset the unit? | `SYSTEM_RESET` | `=0X0` | a PSCI reset exists, a possible deliberate way back to the firmware instead of a power cycle: using it would be a separate, authorized change, it is never called here |
-| | | `NOT_SUPPORTED(-1)` | there is none |
-| Which SMCCC? | `SMCCC_VERSION` | `V1.1` or later | the conduit speaks SMCCC 1.1+ |
-| | | `NOT_SUPPORTED(-1)` | SMCCC 1.0, or a PSCI-only firmware: informational |
-
-**QEMU** (OBSERVED, QEMU 11.1.3 with `virt,virtualization=on,gic-version=3`, `-cpu max -smp 1`, TCG, EDK2 AArch64):
-`smc #0` at EL2 without an EL3 **does not fault**: QEMU's own PSCI emulation answers it. The answers (22 lines, the
-text `tools/test-q1n1-sp11-payload-qemu-chain.py` compares): `PSCI_VERSION 0X10001` (V1.1), `MIGRATE_INFO_TYPE 0X2`
-(TOS_MP), `PSCI_FEATURES` 0 for CPU_SUSPEND, CPU_OFF, CPU_ON, AFFINITY_INFO, MIGRATE_INFO_TYPE, SYSTEM_OFF,
-SYSTEM_RESET and PSCI_FEATURES and -1 for SYSTEM_SUSPEND and SYSTEM_RESET2, `AFFINITY_INFO` 0 (ON) for MPIDR 0 and -2
-for the other eleven (there is one CPU), `SMCCC_VERSION` -1. That proves the register convention against a real SMC
-conduit, the decode, the group order, that the 22 lines and the `NEXT` lines fit the page and the budget, and that
-`state` then `psci` run to the end in one boot. It proves **nothing** about the unit: its firmware, whether it
-answers after the bounce, the MPIDRs it knows. A different QEMU may answer differently and the test then fails
-rather than adapting; if `smc` had faulted, q1n1's fault page would have named it and the chain would have stopped
-there.
-
-**Status.** EXPERIMENTAL. Hardware NOT RUN: no value of this payload has been OBSERVED on the unit. INFERRED: the
-boot CPU is ON. UNKNOWN: whether the firmware answers an SMC from this context, and everything else the payload
-would print.
+`payloads/psci.c` asks the firmware's PSCI implementation what it supports, with `smc #0` at EL2: five function ids,
+through one helper, which holds the only `smc` of the binary. All of it is in [SP11-PAYLOAD-PSCI.md](SP11-PAYLOAD-PSCI.md).
+EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.
 
 ## Payload `timer` (read-only timer and counter probe)
 
 `payloads/timer.c` reads the generic timer and counter at EL2 to isolate the CNTVOFF_EL2 and CNTPOFF_EL2 reads that
 stalled this board. It may stall the board, so it goes **last** in a chain. All of it is in
 [SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.
+
+## Payload `usbsmmu` (S0b: read-only USB controller, SMMU and context bank survey)
+
+`payloads/usbsmmu.c` reads, with loads only, the xHC and DWC3 registers of the stick's USB controller, the firmware's xHCI
+structures in RAM and the SMMU context bank its DMA goes through, then walks that bank's stage-1 tables in software, to
+decide whether an EL2 xHCI driver may let the xHC DMA into memory of its own and where. It may hang the board at the
+first context bank register and goes between `psci` and `timer`. All of it is in
+[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.
 
 ## Line catalogue
 
@@ -464,9 +315,10 @@ On the firmware console before the bounce, and on the page and the UART after it
 | `PAYLOAD CALL <n> <hash16>` | page | printed just before payload n (its manifest index) is called |
 | `PAYLOAD DONE INDEX=n RETURN=0X.. STACK=OK\|OVERFLOW LOADS=.. FAULTS=.. REFUSED=.. LINES=.. DROPPED=..` | page | payload n returned: its value, the guard words, and what its ops did (loads tried, guarded loads that faulted, refused loads, lines kept, lines dropped); the counts are per payload |
 | `PAYLOAD CHAIN STOPPED INDEX=n REASON=HASH_AT_EL2\|STACK_OVERFLOW` | page | the chain ends at payload n; later payloads are not called |
-| `PAYLOAD STATE KEY=0XVALUE` | page | the `state` payload's lines |
-| `PAYLOAD PSCI ...` | page | the `psci` payload's lines (above) |
+| `PAYLOAD STATE KEY=0XVALUE` | page | the `state` payload's lines ([SP11-PAYLOAD-STATE.md](SP11-PAYLOAD-STATE.md)) |
+| `PAYLOAD PSCI ...` | page | the `psci` payload's lines ([SP11-PAYLOAD-PSCI.md](SP11-PAYLOAD-PSCI.md)) |
 | `PAYLOAD TIMER ...` | page | the `timer` payload's lines ([SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md#what-it-prints)) |
+| `PAYLOAD USBSMMU ...` | page | the `usbsmmu` payload's lines, at most 24 ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md#what-it-prints)) |
 | `PAYLOAD SKIPPED=NOT_AT_EL2` | page | not at EL2: nothing called |
 
 Every line is within the page font and at most 100 characters (a `DONE` line is about 85 characters; the counters
@@ -513,13 +365,16 @@ the run under the pinned UEFI Shell).
 
 | Command | What it covers |
 | --- | --- |
-| `python3 tools/test-q1n1-sp11-payload.py` | seven native programs under ASan and UBSan: the loader against a fake firmware (ConnectController and every call outside its list is a tripwire; a manifest on a second volume is ignored; nothing is written; the kind of each file follows its name), the declared-range planner and slbounce's rules against synthetic and 30000 random maps, the text layer and the ABI layout, the EL2 sequence of one payload, the chain's run sequence on a fake platform (order, per-payload hash and arguments, stops, budget reset), the `state` payload against a scripted register file, the `psci` payload against a scripted SMC (only the five ids, only table arguments, no SMC off EL2, every decode, garbage answers), the `timer` payload against a scripted register file and counter; 80 seeded-bug mutants and an unmutated control; source audits |
-| `python3 tools/test-q1n1-sp11-payload-chain.py` | 48 more seeded-bug mutants the native programs must catch (9 in the loader, 19 in the chain loop, 20 in `psci.c`: calling data, calling in reverse order, skipping a second hash, not resetting the budgets or the guard words, running past a corrupted guard, synchronising only file 0's pages, `.bin` case-sensitive, another payload's base, an extra id, CPU_ON instead of a query, a call at EL1, a second `smc` call site...); 13 seeded `psci` binaries the disassembly check must reject; the manifest tool on chains with 10 seeded bugs; the agreement of this document with the sources (the planning table of "The chain" included), with 20 seeded mistakes in the document |
-| `python3 tools/test-q1n1-sp11-payload-build.py` | the manifest tool, the ELF check (absolute pointers, MOVZ/MOVK addresses, writable globals, a PIE link, an unreadable file), the built binaries (entry at offset 0, identical when linked elsewhere, an allow-list per payload: `state` only the documented `MRS`; `psci` `MRS` of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; `timer` `MRS` of its twelve registers and no barrier; none of the forbidden mnemonics, no CNTVOFF_EL2 or CNTPOFF_EL2 outside `timer`, reproducible in two runs), a payload with an absolute relocation failing the Makefile build, 13 seeded bugs in the two tools, and the default-off proof |
+| `python3 tools/test-q1n1-sp11-payload.py` | eight native programs under ASan and UBSan: the loader against a fake firmware (ConnectController and every call outside its list is a tripwire; a manifest on a second volume is ignored; nothing is written; the kind of each file follows its name), the declared-range planner and slbounce's rules against synthetic and 30000 random maps, the text layer and the ABI layout, the EL2 sequence of one payload, the chain's run sequence on a fake platform (order, per-payload hash and arguments, stops, budget reset), the `state` payload against a scripted register file, the `psci` payload against a scripted SMC (only the five ids, only table arguments, no SMC off EL2, every decode, garbage answers), the `timer` payload against a scripted register file and counter, the `usbsmmu` payload against scripted MMIO windows, RAM and a memory map; 80 seeded-bug mutants and an unmutated control; source audits |
+| `python3 tools/test-q1n1-sp11-payload-chain.py` | 48 more seeded-bug mutants the native programs must catch (9 in the loader, 19 in the chain loop, 20 in `psci.c`: calling data, calling in reverse order, skipping a second hash, not resetting the budgets or the guard words, running past a corrupted guard, synchronising only file 0's pages, `.bin` case-sensitive, another payload's base, an extra id, CPU_ON instead of a query, a call at EL1, a second `smc` call site...); 13 seeded `psci` binaries the disassembly check must reject; the manifest tool on chains with 10 seeded bugs; the agreement of this document with the sources (the planning table of "The chain" included), with 22 seeded mistakes in the document |
+| `python3 tools/test-q1n1-sp11-payload-build.py` | the manifest tool, the ELF check (absolute pointers, MOVZ/MOVK addresses, writable globals, a PIE link, an unreadable file), the built binaries (entry at offset 0, identical when linked elsewhere, an allow-list per payload: `state` only the documented `MRS`; `psci` `MRS` of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; `timer` `MRS` of its twelve registers and no barrier; `usbsmmu` `MRS` of CurrentEL and no barrier; none of the forbidden mnemonics, no CNTVOFF_EL2 or CNTPOFF_EL2 outside `timer`, reproducible in two runs), a payload with an absolute relocation failing the Makefile build, 13 seeded bugs in the two tools, and the default-off proof |
 | `python3 tools/test-q1n1-sp11-payload-qemu.py` | QEMU/EDK2 at EL2 and EL1: the whole flow for `state`, every refusal, the call path with five test payloads (`tools/testdata/sp11-payload-fixture-*.c`) and two seeded variants of the runner |
 | `python3 tools/test-q1n1-sp11-payload-qemu-chain.py` | QEMU/EDK2 at EL2: a chain of three in order, each with its own base and size; data never called (a data file that holds a working payload); mixed-case names; five files and eight ranges; a wrong hash before the bounce; a hash that changes after it (a seeded runner variant, and a payload that damages a later one); a stack overflow; a hanging and a faulting second payload with the first one's lines still on the page; the budgets of every payload; file 0 not a payload; `state` then `psci` |
 | `python3 tools/test-q1n1-sp11-payload-timer.py` | `timer` ([SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md)): 31 seeded-bug mutants, the allow-list on `timer.bin` (20 seeded bad binaries, 6 that break the compiled order), the manifest tool and the runner's validator on `state psci timer`, the two documents against the source and each other (links included), with 41 seeded mistakes |
 | `python3 tools/test-q1n1-sp11-payload-qemu-timer.py` | QEMU/EDK2 at EL2: `state`, `psci`, `timer` in one boot (72 lines); `timer` copies that hang or fault on a hazardous read: the NEXT line last on the page, or q1n1's fault page |
+| `python3 tools/test-q1n1-sp11-payload-usbsmmu.py` | `usbsmmu` ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)): the ten suites of its host test (scripted MMIO windows, RAM and memory map, the walk against independently built page tables, an abort at every load, hostile registers, the line and load budgets), 83 seeded-bug mutants and an unmutated control, the source audit of what it may touch, the allow-list on `usbsmmu.bin` (23 seeded bad binaries) and on the other policies, the manifest tool and the runner's validator on `psci usbsmmu timer` |
+| `python3 tools/test-q1n1-sp11-payload-usbsmmu-doc.py` | the five payload documents against the source and each other (registers and their evidence labels, the printed blocks against the host test's own dump, numbers, reason names, decision tables, the QEMU block, links and anchors, the pointers in this document, the moved `state` and `psci` stubs), with 78 seeded mistakes in the documents |
+| `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 
 The default-off proof (`PayloadDefaultOff`): with the gate at 0 every runner file compiles to an object with no
 symbols, `main.c` preprocesses to the same text as at the commit before the runner (default, plain SP11 and SP11
@@ -545,6 +400,10 @@ lines), the sweep (slbounce is absent), the unit's firmware memory attributes, a
   neither is a chain (see "The chain").
 * `psci` is the only payload with an `smc`: five function ids, one helper, one instruction in the binary, no id
   that changes the machine; the others are only the argument of PSCI_FEATURES.
+* `usbsmmu` reads device registers of three fixed windows (the stick's USB controller, the other one and the SMMU) and
+  RAM, with loads only: a window only after the block's identity looked plausible, and nothing more from it after an
+  abort; RAM only where the UEFI memory map says it is usable. It can still hang or reset the board at a context bank
+  register nobody has read, which nothing recovers (named by its last `NEXT CB<n>` line); it goes before `timer`.
 * Hardware rules of `AGENTS.md` apply to every payload: AC power or at least 50% battery, the thermal guard, no
   single `CP_MEMCPY` over 1 MiB, one hardware client at a time, nothing that changes persistent firmware, clocks or
   voltages without explicit authorization.
