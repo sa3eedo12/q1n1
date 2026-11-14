@@ -564,7 +564,7 @@ class TimerDocAgreement(unittest.TestCase):
         for claim in (f'{len(MUTANTS)} seeded-bug mutants', f'{len(BAD_BINARIES)} seeded bad binaries',
                       f'{len(ORDER_BREAKERS)} that break the compiled order', f'with {len(DOC_MUTANTS)} seeded mistakes'):
             self.mentions(claim, tests)
-        self.mentions('seven native programs', tests)
+        self.mentions('eight native programs', tests)
         self.mentions('`timer` `MRS` of its twelve registers and no barrier', tests)
 
     def test_this_document_says_why_it_exists_where_it_goes_and_what_is_known(self):
@@ -660,9 +660,9 @@ MAIN_DOC_MUTANTS = [
     ('the-mutant-count-is-wrong', _replace(f'{len(MUTANTS)} seeded-bug mutants', f'{len(MUTANTS) - 1} seeded-bug mutants')),
     ('the-order-breaker-count-is-wrong', _replace(f'{len(ORDER_BREAKERS)} that break the compiled order', f'{len(ORDER_BREAKERS) - 1} that break the compiled order')),
     ('the-stub-lost-its-pointer', _replace('[SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md). EXPERIMENTAL', 'SP11-PAYLOAD-TIMER.md. EXPERIMENTAL')),
-    ('the-stub-claims-the-hardware-ran', _replace('NOT RUN: nothing of it is OBSERVED on the unit.', 'run: all of it is OBSERVED on the unit.')),
+    ('the-stub-claims-the-hardware-ran', _replace('SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.', 'SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware run: all of it is OBSERVED on the unit.')),
     ('the-catalogue-anchor-does-not-resolve', _replace('SP11-PAYLOAD-TIMER.md#what-it-prints', 'SP11-PAYLOAD-TIMER.md#what-it-says')),
-    ('the-tests-row-forgot-the-seventh-program', _replace('seven native programs', 'six native programs')),
+    ('the-tests-row-forgot-the-eighth-program', _replace('eight native programs', 'seven native programs')),
     ('the-build-row-forgot-the-timer-allow-list', _replace('`timer` `MRS` of its twelve registers and no barrier; ', '')),
     ('the-licence-line-is-gone-from-the-main-document', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
 ]

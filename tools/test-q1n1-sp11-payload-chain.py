@@ -7,24 +7,21 @@ agreement with the sources.
     python3 tools/test-q1n1-sp11-payload-chain.py
 
   * ChainNative: tools/test-q1n1-sp11-payload-chain.c (several payloads in one boot: order, the hash taken again
-    before each call, the stop conditions, the per-call budgets, the arguments, the lines) and
-    tools/test-q1n1-sp11-payload-psci.c (the psci payload against a scripted register file and a scripted SMC),
-    built and run by the machinery of tools/test-q1n1-sp11-payload.py.
-  * ChainMutants: seeded bugs in the loader's classification of files, in the chain and in the psci payload, each
-    applied to a copy of the sources, each of which the programs must reject.
-  * SeededBadBinaries: psci built with one forbidden thing added (a second SMC, an HVC, an MSR, a read of
-    CNTVOFF_EL2, an exclusive, a cache operation...), each of which the allow-list check of
-    tools/sp11_payload_testlib.py (the one tools/test-q1n1-sp11-payload-build.py applies to the real binaries) must
-    name.
+    before each call, the stop conditions, the budgets, the arguments, the lines) and -psci.c (the psci payload against
+    a scripted register file and SMC), built and run by the machinery of tools/test-q1n1-sp11-payload.py.
+  * ChainMutants: seeded bugs in the loader's classification of files, the chain and the psci payload, each applied to
+    a copy of the sources, each of which the programs must reject.
+  * SeededBadBinaries: psci built with one forbidden thing added (a second SMC, an HVC, an MSR, a read of CNTVOFF_EL2,
+    an exclusive, a cache operation...), each of which the allow-list check of tools/sp11_payload_testlib.py must name.
   * ManifestChain: tools/sp11_payload_manifest.py classifies files by extension as the runner does (the first must
     be a payload, the order is the order given, the same limits), writes for state.bin alone the manifest it always
     did, and agrees with the runner's own classification (a small C harness) on every name; ManifestChainMutants
     runs seeded bugs in the tool against those tests.
-  * DocAgreement: the documentation's id, register and line tables are the ones in the sources, and the planning table
-    of "The chain" is what the payloads and the runner print under `lines-report` (the most lines `state`, `psci`
-    and `timer` print, the runner's lines for each payload, the panel rows); DocMutants seeds mistakes in the
-    document that these tests must refuse. (docs/SP11-PAYLOAD-TIMER.md is checked in
-    tools/test-q1n1-sp11-payload-timer.py.)
+  * DocAgreement: the id, feature and affinity tables of docs/SP11-PAYLOAD-PSCI.md and the line, refusal and stop tables of
+    docs/SP11-PAYLOAD.md are the ones in the sources, and the planning table of "The chain" is what the payloads and the
+    runner print under `lines-report` (the most lines `state`, `psci`, `timer` and `usbsmmu` print, the runner's lines for
+    each payload, the panel rows); DocMutants seeds mistakes in either document that these tests must refuse. (The
+    other per-payload documents are checked in tools/test-q1n1-sp11-payload-timer.py and -usbsmmu.py.)
 
 Writes only under build/. Hardware: NOT RUN. Evidence: EXPERIMENTAL (host model only)."""
 import concurrent.futures
@@ -43,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import preload  # noqa: E402
 import sp11_payload_testlib as lib  # noqa: E402
+from sp11_payload_manifest_mutants import manifest_mutants  # noqa: E402
 
 
 def load_module(name, path):
@@ -60,6 +58,7 @@ BUILD = native.BUILD
 TOOLS = Path(os.environ.get('Q1N1_PAYLOAD_TOOLS_DIR', ROOT / 'tools'))
 SCRATCH = BUILD / os.environ.get('Q1N1_PAYLOAD_TOOLS_TAG', 'main')
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
+DOC_PSCI = ROOT / 'docs' / 'SP11-PAYLOAD-PSCI.md'
 UEFI = ROOT / 'platform' / 'uefi'
 READELF = lambda: shutil.which('llvm-readelf', path=lib.ENV['PATH']) or 'llvm-readelf'  # noqa: E731
 run, have = lib.run, lib.have
@@ -67,11 +66,10 @@ LINES_REPORT = {}
 
 
 def lines_report():
-    """What `lines-report` prints in four of the native programs (built once per process): the most lines each payload
-    prints, the lines the runner adds for each payload that ran, and the rows of the panel region. The planning table of
-    docs/SP11-PAYLOAD.md is checked against these numbers, which come from running the payloads and the runner."""
+    """What `lines-report` prints in five of the native programs, built once per process: the figures the planning table of
+    docs/SP11-PAYLOAD.md is checked against."""
     if not LINES_REPORT:
-        for name in ('state', 'psci', 'timer', 'chain'):
+        for name in ('state', 'psci', 'timer', 'usbsmmu', 'chain'):
             done, binary = native.build_program(name, native.UEFI, native.PAYLOADS, BUILD / 'native')
             assert done.returncode == 0, done.stderr
             code, output = native.run_program(binary, 'lines-report')
@@ -498,24 +496,6 @@ class ManifestChain(unittest.TestCase):
         self.assertEqual(sorted(theirs.values()), ['code', 'code', 'code', 'data', 'data'])
 
 
-def _manifest_mutants():
-    tool = 'sp11_payload_manifest.py'
-    return [
-        ('manifest-calls-everything', tool, "kind = 'payload' if is_payload(name) else 'data'", "kind = 'payload'"),
-        ('manifest-calls-only-the-first-file', tool, "kind = 'payload' if is_payload(name) else 'data'",
-         "kind = 'payload' if index == 0 else 'data'"),
-        ('manifest-matches-the-extension-case-sensitively', tool, "kind = 'payload' if is_payload(name) else 'data'",
-         "kind = 'payload' if local.name.endswith('.bin') else 'data'"),
-        ('manifest-lets-data-come-first', tool, "if index == 0 and kind != 'payload':", 'if False:'),
-        ('manifest-checks-the-length-of-the-first-payload-only', tool, "if kind == 'payload' and size < 4:", 'if index == 0 and size < 4:'),
-        ('manifest-reorders-the-files', tool, 'paths = [Path(p) for p in paths]', 'paths = sorted(Path(p) for p in paths)'),
-        ('manifest-takes-the-wrong-extension', tool, "CODE_SUFFIX = '.BIN'", "CODE_SUFFIX = '.DAT'"),
-        ('manifest-says-data-is-called', tool, "'data, never called'", "'data, called'"),
-        ('manifest-does-not-say-the-index', tool, '(INDEX={index}, {role})', '({role})'),
-        ('manifest-matches-a-shorter-extension', tool, 'return name.upper().endswith(CODE_SUFFIX)', "return name.upper().endswith('.BI')"),
-    ]
-
-
 class ManifestChainMutants(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -549,7 +529,7 @@ class ManifestChainMutants(unittest.TestCase):
         self.assertEqual(status, 'control-ok', detail)
 
     def test_every_seeded_tool_bug_is_caught(self):
-        mutants = _manifest_mutants()
+        mutants = manifest_mutants()
         self.assertGreaterEqual(len(mutants), 8)
         self.assertEqual(len({m[0] for m in mutants}), len(mutants))
         workers = max(1, min(4, os.cpu_count() or 1))
@@ -562,12 +542,15 @@ class ManifestChainMutants(unittest.TestCase):
 
 
 class DocAgreement(unittest.TestCase):
-    """The documentation says what the sources do: the tables are read from the document and compared with the C."""
-    TEXT = None     # a changed copy of the document, for DocMutants
+    """The documentation says what the sources do: the tables are read from the documents and compared with the C. The tables
+    of `psci` (ids, features, affinities, decode names) are in docs/SP11-PAYLOAD-PSCI.md, the rest in docs/SP11-PAYLOAD.md."""
+    TEXT = None         # a changed copy of docs/SP11-PAYLOAD.md, for DocMutants
+    PSCI_TEXT = None    # a changed copy of docs/SP11-PAYLOAD-PSCI.md
 
     @classmethod
     def setUpClass(cls):
         cls.doc = DOC.read_text(encoding='utf-8') if cls.TEXT is None else cls.TEXT
+        cls.psci_doc = DOC_PSCI.read_text(encoding='utf-8') if cls.PSCI_TEXT is None else cls.PSCI_TEXT
         cls.psci = (ROOT / 'payloads' / 'psci.c').read_text(encoding='utf-8')
         cls.run_c = (UEFI / 'sp11-payload-run.c').read_text(encoding='utf-8')
         cls.load_c = (UEFI / 'sp11-payload-load.c').read_text(encoding='utf-8')
@@ -575,8 +558,9 @@ class DocAgreement(unittest.TestCase):
 
     def section(self, name):
         start, end = f'<!-- {name} -->', f'<!-- /{name} -->'
-        self.assertIn(start, self.doc)
-        return self.doc[self.doc.index(start):self.doc.index(end)]
+        doc = self.psci_doc if name.startswith('psci-') else self.doc
+        self.assertIn(start, doc)
+        return doc[doc.index(start):doc.index(end)]
 
     def rows(self, name):
         return re.findall(r'^\| `([A-Z0-9_]+)` \| `(0x[0-9A-Fa-f]+)` \|', self.section(name), re.M)
@@ -608,9 +592,9 @@ class DocAgreement(unittest.TestCase):
         errors = self.array('error_name', r'"([A-Z_]+)"')
         self.assertEqual(len(errors), 9)
         for number, name in enumerate(errors, 1):
-            self.assertIn(f'`{name}(-{number})`', self.doc)
+            self.assertIn(f'`{name}(-{number})`', self.psci_doc)
         for name in self.array('tos_name', r'"([A-Z_]+)"') + self.array('state_name', r'"([A-Z_]+)"'):
-            self.assertIn(f'`{name}`', self.doc)
+            self.assertIn(f'`{name}`', self.psci_doc)
 
     def test_the_doc_lists_every_refusal_the_loader_can_print(self):
         names = set(re.findall(r'case Q1N1_PAYLOAD_E_[A-Z0-9_]+: return "([A-Z0-9_]+)";', self.load_c))
@@ -652,17 +636,19 @@ class DocAgreement(unittest.TestCase):
         base = SCRATCH / 'doc-stick'
         shutil.rmtree(base, ignore_errors=True)
         (base / 'in').mkdir(parents=True)
-        for name in ('state.bin', 'psci.bin', 'timer.bin'):
+        for name in ('state.bin', 'psci.bin', 'timer.bin', 'usbsmmu.bin'):
             (base / 'in' / name).write_bytes(bytes(range(64)))
-        done = run(['python3', '-B', str(TOOLS / 'sp11_payload_manifest.py'), '--out-dir', str(base / 'out'),
-                    str(base / 'in' / 'state.bin'), str(base / 'in' / 'psci.bin'), str(base / 'in' / 'timer.bin')])
-        self.assertEqual(done.returncode, 0, done.stderr)
-        written = sorted(p.name for p in (base / 'out' / 'SP11').iterdir())
-        self.assertEqual(written, ['PAYLOAD.MAN', 'PSCI.BIN', 'STATE.BIN', 'TIMER.BIN'])
         table = self.doc[self.doc.index('## On the stick'):self.doc.index('## The manifest')]
-        for name in written + ['Q1N1-PAYLOAD.EFI']:
-            self.assertIn(f'| `SP11\\{name}` |', table)
-        self.assertIn('{state,psci,timer}.bin', self.doc)
+        for chain, expected in ((('state', 'psci', 'timer'), ['PAYLOAD.MAN', 'PSCI.BIN', 'STATE.BIN', 'TIMER.BIN']),
+                                (('psci', 'usbsmmu', 'timer'), ['PAYLOAD.MAN', 'PSCI.BIN', 'TIMER.BIN', 'USBSMMU.BIN'])):
+            done = run(['python3', '-B', str(TOOLS / 'sp11_payload_manifest.py'), '--out-dir', str(base / ('out-' + '-'.join(chain)))]
+                       + [str(base / 'in' / f'{name}.bin') for name in chain])
+            self.assertEqual(done.returncode, 0, done.stderr)
+            written = sorted(p.name for p in (base / ('out-' + '-'.join(chain)) / 'SP11').iterdir())
+            self.assertEqual(written, expected)
+            for name in written + ['Q1N1-PAYLOAD.EFI']:
+                self.assertIn(f'| `SP11\\{name}` |', table)
+        self.assertIn('{state,psci,usbsmmu,timer}.bin', self.doc)
 
     def test_the_planning_table_of_the_chain_is_what_the_programs_measure(self):
         if not have('clang'):
@@ -679,6 +665,7 @@ class DocAgreement(unittest.TestCase):
         self.assertEqual(int(cell('`state`')), measured['state']['LINES_MAX'])
         self.assertEqual(int(cell('`psci`')), measured['psci']['LINES_MAX'])
         self.assertEqual(int(cell('`timer`')), measured['timer']['LINES_MAX'])
+        self.assertEqual(int(cell('`usbsmmu`')), measured['usbsmmu']['LINES_MAX'])
         self.assertEqual(int(cell('for each payload')), runner)
         self.assertEqual(int(cell('2880 x 1920')), unit)
         self.assertEqual(int(cell('stock')), stock)
@@ -694,7 +681,7 @@ class DocAgreement(unittest.TestCase):
         found = re.search(r'\(3 \+ 1\) \+ 3 x 3 \+ (\d+) \+ (\d+) \+ (\d+) = (\d+) lines', flat)
         self.assertIsNotNone(found, 'the worked example is gone')
         psci, new, timer, total = map(int, found.groups())
-        self.assertEqual((psci, timer), (measured['psci']['LINES_MAX'], measured['timer']['LINES_MAX']))
+        self.assertEqual((psci, new, timer), tuple(measured[name]['LINES_MAX'] for name in ('psci', 'usbsmmu', 'timer')))
         self.assertEqual(runner, 3)
         self.assertEqual(total, (3 + 1) + 3 * runner + psci + new + timer)
         self.assertTrue(stock < total <= unit)
@@ -705,8 +692,9 @@ class DocAgreement(unittest.TestCase):
         self.assertIn(f'with {len(DOC_MUTANTS)} seeded mistakes in the document', ' '.join(tests.split()))
 
     def test_the_document_says_what_the_status_is(self):
-        for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
-            self.assertIn(word, self.doc)
+        for text in (self.doc, self.psci_doc):
+            for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
+                self.assertIn(word, text)
 
 
 def _replace(old, new, count=1):
@@ -742,6 +730,8 @@ DOC_MUTANTS = [
     ('the-hardware-status-is-claimed', _replace('hardware NOT RUN', 'hardware qualified', count=-1)),
     ('a-planned-payload-maximum-is-wrong', _replace('| `psci`, at most | 30 |', '| `psci`, at most | 29 |')),
     ('a-planned-payload-row-is-forgotten', _replace('| `timer`, at most | 16 |\n', '')),
+    ('the-usbsmmu-row-is-forgotten', _replace('| `usbsmmu`, at most | 24 |\n', '')),
+    ('a-planned-usbsmmu-maximum-is-wrong', _replace('| `usbsmmu`, at most | 24 |', '| `usbsmmu`, at most | 25 |')),
     ('the-planned-runner-lines-per-payload-are-wrong', _replace('`CALL`, `DONE` | 3 |', '`CALL`, `DONE` | 4 |')),
     ('the-planned-notes-per-boot-are-wrong', _replace('`READY` | files + 1 |', '`READY` | files |')),
     ('the-planned-unit-rows-are-wrong', _replace("2880 x 1920 panel | 89 |", "2880 x 1920 panel | 88 |")),
@@ -751,28 +741,35 @@ DOC_MUTANTS = [
 
 
 class DocMutants(unittest.TestCase):
-    """The agreement tests above must be able to fail: each seeded mistake in the document is refused by one."""
+    """The agreement tests above must be able to fail: each seeded mistake in either document is refused by one."""
+    # The mistakes in the tables that moved to docs/SP11-PAYLOAD-PSCI.md; every other one is in docs/SP11-PAYLOAD.md.
+    IN_PSCI_DOC = {'a-function-id-is-wrong', 'a-sixth-function-id-appears', 'the-features-are-in-another-order', 'a-feature-is-forgotten',
+                   'an-affinity-is-wrong', 'a-decode-name-is-wrong'}
 
     @staticmethod
-    def outcome(text):
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(type('Changed', (DocAgreement,), {'TEXT': text}))
+    def outcome(text=None, psci_text=None):
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            type('Changed', (DocAgreement,), {'TEXT': text, 'PSCI_TEXT': psci_text}))
         result = unittest.TestResult()
         suite.run(result)
         return result
 
-    def test_the_unchanged_document_passes_through_the_same_mechanism(self):
-        result = self.outcome(DOC.read_text(encoding='utf-8'))
+    def test_the_unchanged_documents_pass_through_the_same_mechanism(self):
+        result = self.outcome(DOC.read_text(encoding='utf-8'), DOC_PSCI.read_text(encoding='utf-8'))
         self.assertTrue(result.wasSuccessful(), [str(f[1])[-300:] for f in result.failures + result.errors])
         self.assertGreaterEqual(result.testsRun, 10)
 
-    def test_every_seeded_mistake_in_the_document_is_refused(self):
-        original = DOC.read_text(encoding='utf-8')
+    def test_every_seeded_mistake_in_either_document_is_refused(self):
+        originals = {'main': DOC.read_text(encoding='utf-8'), 'psci': DOC_PSCI.read_text(encoding='utf-8')}
         self.assertGreaterEqual(len(DOC_MUTANTS), 12)
+        self.assertLessEqual(self.IN_PSCI_DOC, {name for name, _ in DOC_MUTANTS})
         for name, mutate in DOC_MUTANTS:
+            which = 'psci' if name in self.IN_PSCI_DOC else 'main'
             with self.subTest(mutant=name):
-                changed = mutate(original)
-                self.assertNotEqual(changed, original)
-                self.assertFalse(self.outcome(changed).wasSuccessful(), 'every agreement test still passed')
+                changed = mutate(originals[which])
+                self.assertNotEqual(changed, originals[which])
+                result = self.outcome(None, changed) if which == 'psci' else self.outcome(changed)
+                self.assertFalse(result.wasSuccessful(), 'every agreement test still passed')
 
 
 if __name__ == '__main__':

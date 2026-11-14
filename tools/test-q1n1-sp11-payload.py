@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Native tests, seeded-bug mutants and source audits for the Surface Pro 11 stick payload runner
-(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md and docs/SP11-PAYLOAD-TIMER.md).
+(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md and the per-payload documents docs/SP11-PAYLOAD-STATE.md,
+-PSCI.md, -TIMER.md and -USBSMMU.md).
 
     python3 tools/test-q1n1-sp11-payload.py
 
@@ -13,18 +14,19 @@ Runs, under ASan and UBSan:
     rules slbounce applies, the text layer, the ABI layout), -run.c (the EL2 sequence for one payload, the
     second hash, the ops and the load32 policy), -chain.c (several payloads in one boot), -state.c (the
     reference payload against a scripted register file), -psci.c (the psci payload against a scripted
-    register file and a scripted SMC) and -timer.c (the timer payload against a scripted register file and
-    counter);
+    register file and a scripted SMC), -timer.c (the timer payload against a scripted register file and
+    counter) and -usbsmmu.c (the usbsmmu payload against a scripted MMIO, RAM and memory map);
   * Mutants: seeded bugs, each applied to a copy of the sources under build/, each of which the programs
     must reject (a failing, hanging or -- for the ABI -- non-compiling program catches it), against an
     unmutated control that must pass the same way. The chain's and psci's own seeded bugs are in
-    tools/test-q1n1-sp11-payload-chain.py and the timer's in tools/test-q1n1-sp11-payload-timer.py, which
-    run them through the same machinery;
+    tools/test-q1n1-sp11-payload-chain.py, the timer's in tools/test-q1n1-sp11-payload-timer.py and the
+    usbsmmu's in tools/test-q1n1-sp11-payload-usbsmmu.py, which run them through the same machinery;
   * SourceAudit: what no run can show -- SPDX lines, that the loader makes only its listed firmware calls,
     that nothing of the runner stores, that the main.c glue forwards loads only and is wholly under the
     gate, that nothing of it sits between the last GetMemoryMap and ExitBootServices, the constants shared
-    with slbounce, that the documentation's ABI table is the compiled one, that both documents start with their
-    licence line and stay within the size limit, and that no machine identifier is in any new file.
+    with slbounce, that the documentation's ABI table is the compiled one, that every document (the main one and the
+    per-payload ones) starts with its licence line and stays within the size limit, and that no machine identifier is
+    in any new file.
 
 SLBOUNCE_SP11_DIR (the paired slbounce fork) adds the comparison of the runner's memory-map verdicts with
 slbounce's own sp11_sweep_range over 30000 random maps; without it that comparison is SKIPPED, and said
@@ -43,7 +45,10 @@ UEFI = ROOT / 'platform' / 'uefi'
 PAYLOADS = ROOT / 'payloads'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
 DOC_TIMER = ROOT / 'docs' / 'SP11-PAYLOAD-TIMER.md'
-DOCS = [DOC, DOC_TIMER]
+DOC_PSCI = ROOT / 'docs' / 'SP11-PAYLOAD-PSCI.md'
+DOC_STATE = ROOT / 'docs' / 'SP11-PAYLOAD-STATE.md'
+DOC_USBSMMU = ROOT / 'docs' / 'SP11-PAYLOAD-USBSMMU.md'
+DOCS = [DOC, DOC_TIMER, DOC_PSCI, DOC_STATE, DOC_USBSMMU]
 BUILD = ROOT / 'build' / 'sp11-payload-test'
 LLVM = ('/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin', '/opt/homebrew/bin')
 ENV = dict(os.environ, PATH=os.pathsep.join(LLVM + (os.environ.get('PATH', ''),)), PYTHONDONTWRITEBYTECODE='1')
@@ -68,15 +73,16 @@ PROGRAMS = {
     'state': ('tools/test-q1n1-sp11-payload-state.c', ['sp11-payload-text.c'], 3, 900, 'state'),
     'psci': ('tools/test-q1n1-sp11-payload-psci.c', ['sp11-payload-text.c'], 7, 90000, 'psci'),
     'timer': ('tools/test-q1n1-sp11-payload-timer.c', ['sp11-payload-text.c'], 8, 8000, 'timer'),
+    'usbsmmu': ('tools/test-q1n1-sp11-payload-usbsmmu.c', ['sp11-payload-text.c'], 10, 19000, 'usbsmmu'),
 }
 # The programs that test a payload's own source, built natively with a scripted register file (and SMC).
-HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c'}
+HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c', 'usbsmmu': 'usbsmmu.c'}
 # What a copy of the tree needs: the runner, its dependencies, the survey's text file (the panel layout the
 # runner copies is compared with it) and the payload sources.
 UEFI_COPIED = sorted(p.name for p in UEFI.glob('sp11-payload*')) + [
     'preload.c', 'preload.h', 'sha256.c', 'sha256.h', 'efi.h', 'sp11-ebs-ranges.h', 'sp11-fbgop.c', 'sp11-fbgop.h',
     'sp11-stk-text.c', 'sp11-stk-survey.h']
-PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c', 'timer.c']
+PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c', 'timer.c', 'usbsmmu.c']
 
 NEW_SOURCES = sorted(UEFI.glob('sp11-payload*')) + sorted(PAYLOADS.glob('*')) + sorted(
     (ROOT / 'tools').glob('test-q1n1-sp11-payload*')) + sorted((ROOT / 'tools').glob('sp11_payload_*')) + sorted(
@@ -188,7 +194,7 @@ class Native(unittest.TestCase):
 # a change to the source that moves a target is reported as a stale mutant and not as a survivor.
 # (name, file below the copy's root, [(needle, replacement)], programs that must reject it, build error that
 # counts as rejecting it). The programs are listed in the order they are tried.
-ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer']
+ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer', 'usbsmmu']
 LOAD = 'uefi/sp11-payload-load.c'
 PLAN = 'uefi/sp11-payload-plan.c'
 RUNC = 'uefi/sp11-payload-run.c'
@@ -467,6 +473,18 @@ def strip_comments(text):
     return re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', text, flags=re.S))
 
 
+def state_keys_documented(doc):
+    """The keys of the `registers` table of docs/SP11-PAYLOAD-STATE.md (also used by the chain test's seeded mistakes)."""
+    section = doc[doc.index('<!-- registers -->'):doc.index('<!-- /registers -->')]
+    return re.findall(r'^\| `([A-Z0-9_]+)` \|', section, re.M)
+
+
+def state_keys_printed(source):
+    """The keys payloads/state.c prints, plus the CurrentEL line and the note it prints off EL2."""
+    keys = re.findall(r'(?:SHOW|show)\((?:a, )?"([A-Z0-9_]+)"', source)
+    return sorted(set(keys + ['EL2REGS', 'CURRENTEL']))
+
+
 class SourceAudit(unittest.TestCase):
     @staticmethod
     def read(path):
@@ -651,15 +669,10 @@ class SourceAudit(unittest.TestCase):
         self.assertIn(f'{compiled["q1n1_payload_args"]} bytes', doc)
 
     def test_the_documented_registers_are_the_ones_the_payload_reads(self):
-        if not DOC.exists():
-            self.skipTest('docs/SP11-PAYLOAD.md does not exist yet')
-        source = self.read(PAYLOADS / 'state.c')
-        keys = re.findall(r'(?:SHOW|show)\((?:a, )?"([A-Z0-9_]+)"', source)
-        keys.append('EL2REGS')
-        doc = self.read(DOC)
-        section = doc[doc.index('<!-- registers -->'):doc.index('<!-- /registers -->')]
-        documented = re.findall(r'^\| `([A-Z0-9_]+)` \|', section, re.M)
-        self.assertEqual(sorted(set(documented)), sorted(set(keys + ['CURRENTEL'])))
+        if not DOC_STATE.exists():
+            self.skipTest('docs/SP11-PAYLOAD-STATE.md does not exist yet')
+        documented = state_keys_documented(self.read(DOC_STATE))
+        self.assertEqual(sorted(set(documented)), state_keys_printed(self.read(PAYLOADS / 'state.c')))
         self.assertGreaterEqual(len(documented), 20)
 
 

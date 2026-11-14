@@ -74,7 +74,10 @@ def build_payload(source, out_dir, name=None, extra_cflags=(), root=ROOT, check=
 # whatever its size), and optionally `timer_offsets` (the payload may name CNTVOFF_EL2 and CNTPOFF_EL2, and must read
 # each exactly once) and `forbid` (more mnemonics no instruction of it may use). The reference payload `state` is MRS
 # only; `psci` is MRS of CurrentEL and MPIDR_EL1 plus exactly one SMC, its one helper; `timer` is MRS of the timer and
-# counter registers and the only payload that may read the two timer offsets, with no barrier instruction either.
+# counter registers and the only payload that may read the two timer offsets, with no barrier instruction either;
+# `usbsmmu` is MRS of CurrentEL and nothing else (every device access and every RAM access at an address from hardware is a
+# call through the runner's load op; only the runner's own memory map is read in place), no SMC, no barrier, and the only
+# payload that is allowed to be larger than a page or two.
 STATE_REGISTERS = {
     'currentel', 'midr_el1', 'mpidr_el1', 'id_aa64mmfr0_el1', 'id_aa64mmfr1_el1', 'id_aa64mmfr2_el1', 's3_0_c0_c7_3',
     's3_0_c0_c7_4', 'id_aa64pfr0_el1', 'id_aa64pfr1_el1', 'hcr_el2', 'sctlr_el2', 'tcr_el2', 'ttbr0_el2', 's3_4_c2_c0_1',
@@ -90,6 +93,7 @@ POLICIES = {
     'psci': {'registers': {'currentel', 'mpidr_el1'}, 'smc': 1, 'bytes': 8192},
     'timer': {'registers': TIMER_REGISTERS, 'smc': 0, 'bytes': 4096, 'timer_offsets': True,
               'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
+    'usbsmmu': {'registers': {'currentel'}, 'smc': 0, 'bytes': 20480, 'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
 }
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
@@ -232,4 +236,40 @@ def hazard_order_violations(elf, flat):
         printed = _string_argument(instructions, call, data)
         if printed != wanted:
             problems.append(f'{register}: the call before the read prints {printed!r}, not {wanted!r}')
+    return problems
+
+
+# ---- The documents ------------------------------------------------------------------------------------------------------
+# docs/SP11-PAYLOAD.md and one document per payload link each other: the helpers below say which links do not resolve.
+LINK = re.compile(r'(?<!!)\[[^\]\n]+\]\(([^)\s]+)\)')
+
+
+def anchors_of(text):
+    """The anchors GitHub gives the headings of a Markdown document: lower case, everything but letters, digits, spaces,
+    underscores and hyphens dropped, spaces to hyphens. Headings inside code fences are not headings."""
+    outside = re.sub(r'```.*?```', '', text, flags=re.S)
+    return {re.sub(r'[^a-z0-9 _-]', '', title.strip().lower()).replace(' ', '-')
+            for title in re.findall(r'^#{1,6} +(.+?) *$', outside, re.M)}
+
+
+def link_problems(texts, directory):
+    """Every relative link of the documents in `texts` ({file name: text}) that does not resolve, as sentences: a file that is
+    not there, or an anchor that no heading of its target gives. A target named in `texts` is read from there, so that a
+    changed copy is judged; any other is read from `directory`. Links to other sites are not this check's business."""
+    problems = []
+    for name, text in texts.items():
+        for target in LINK.findall(text):
+            if re.match(r'[a-z][a-z0-9+.-]*:', target):
+                continue
+            path, _, fragment = target.partition('#')
+            other = path or name
+            if other in texts:
+                body = texts[other]
+            elif (Path(directory) / other).is_file():
+                body = (Path(directory) / other).read_text(encoding='utf-8')
+            else:
+                problems.append(f'{name}: {target}: {other} is not a file')
+                continue
+            if fragment and fragment not in anchors_of(body):
+                problems.append(f'{name}: {target}: {other} has no such heading')
     return problems

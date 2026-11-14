@@ -10,13 +10,14 @@
   * ElfCheck: tools/sp11_payload_elfcheck.py against real payload ELFs built with the Makefile's flags: the
     reference payload passes; an absolute pointer table, an absolute address built with MOVZ/MOVK, a writable
     global, a position-dependent link and an unreadable file are each refused.
-  * PayloadBinary: the built `state`, `psci` and `timer` payloads: entry at offset 0, within their pages, identical when
-    linked at another base, only what each one's allow-list says (state: the documented MRS; psci: MRS of
-    CurrentEL and MPIDR_EL1 and exactly one `smc #0`; timer: MRS of its twelve timer and counter registers, no
-    barrier; no payload: any other system or exclusive instruction; only timer: CNTVOFF_EL2 and CNTPOFF_EL2),
+  * PayloadBinary: the built `state`, `psci`, `timer` and `usbsmmu` payloads: entry at offset 0, within their pages (usbsmmu:
+    its byte budget), identical when linked at another base, only what each one's allow-list says (state: the documented
+    MRS; psci: MRS of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; timer: MRS of its twelve timer and counter
+    registers, no barrier; usbsmmu: MRS of CurrentEL, no barrier; no payload: any other system or exclusive
+    instruction; only timer: CNTVOFF_EL2 and CNTPOFF_EL2),
     `make payloads` reproducible and running the check, and a payload with an absolute relocation fails the
-    Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which tools/test-q1n1-sp11-payload-chain.py
-    and tools/test-q1n1-sp11-payload-timer.py also run against seeded-bad builds.
+    Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which tools/test-q1n1-sp11-payload-chain.py,
+    -timer.py and -usbsmmu.py also run against seeded-bad builds.
   * ToolMutants: seeded bugs in the two tools, each of which ManifestTool or ElfCheck must reject (the same
     classes are run against the mutated copy through Q1N1_PAYLOAD_TOOLS_DIR), and an unmutated control.
   * PayloadDefaultOff: with Q1N1_SP11_PAYLOAD at 0 (the default) every file of the runner compiles to nothing,
@@ -344,9 +345,9 @@ class ElfCheck(unittest.TestCase):
 
 class PayloadBinary(unittest.TestCase):
     # The allow-list mechanism is tools/sp11_payload_testlib.py's POLICIES and binary_violations, one entry per payload,
-    # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py and -timer.py: `state` is MRS only,
+    # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py, -timer.py and -usbsmmu.py: `state` is MRS only,
     # `psci` is MRS of CurrentEL and MPIDR_EL1 plus exactly one SMC, `timer` is MRS of its twelve timer and counter
-    # registers (the only payload that may read CNTVOFF_EL2 and CNTPOFF_EL2) and no barrier.
+    # registers (the only payload that may read CNTVOFF_EL2 and CNTPOFF_EL2) and no barrier, `usbsmmu` MRS of CurrentEL.
     POLICY = lib.POLICIES
 
     @classmethod
@@ -406,11 +407,14 @@ class PayloadBinary(unittest.TestCase):
         self.assertEqual(self.POLICY['state']['smc'], 0, 'the reference payload executes no SMC at all')
         self.assertEqual(self.POLICY['psci']['smc'], 1)
         self.assertEqual(self.POLICY['timer']['smc'], 0)
+        self.assertEqual(self.POLICY['usbsmmu']['smc'], 0)
+        self.assertEqual(self.POLICY['usbsmmu']['registers'], {'currentel'})
+        self.assertGreaterEqual(self.POLICY['usbsmmu']['forbid'], {'isb', 'dsb', 'dmb'})
         self.assertEqual([name for name, policy in self.POLICY.items() if policy.get('timer_offsets')], ['timer'])
         offsets = {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2}
         self.assertEqual(self.POLICY['timer']['registers'] & offsets, offsets)
         timer_elf, timer_flat = self.bins['timer']
-        for other in ('state', 'psci'):
+        for other in ('state', 'psci', 'usbsmmu'):
             with self.subTest(refused_under=other):
                 self.assertFalse(offsets & self.POLICY[other]['registers'])
                 problems = lib.binary_violations(timer_elf, timer_flat, self.POLICY[other], READELF())
