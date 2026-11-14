@@ -49,6 +49,16 @@
 #endif
 #include "sp11-stk-efi.h"
 #endif
+/* The stick payload runner (docs/SP11-PAYLOAD.md): default off, its own image (platform/uefi/Makefile,
+ * PAYLOAD=1). Like the survey, nothing below an #if line that mentions the gate reaches the compiler with
+ * it at 0, so every other build is unchanged. sp11-payload.h holds the #errors: the gate needs
+ * SNAP_PLATFORM_SP11=1 and cannot be combined with the survey. */
+#ifndef Q1N1_SP11_PAYLOAD
+#define Q1N1_SP11_PAYLOAD 0
+#endif
+#if Q1N1_SP11_PAYLOAD
+#include "sp11-payload.h"
+#endif
 
 static struct {
     volatile uint32_t *pixels;
@@ -1473,6 +1483,79 @@ static void sp11_stk_el2_survey(void)
 }
 #endif /* Q1N1_SP11_STK_SURVEY */
 
+#if Q1N1_SP11_PAYLOAD
+/* ---- Stick payload runner (sp11-payload.h): the platform side ----
+ * The policy is in the sp11-payload-*.c files, where the native tests drive it; this is only what needs
+ * main.c's own state (the panel, the UART, the recoverable-fault copy), and it forwards loads only. */
+static struct q1n1_payload_loaded payload_loaded;
+static int payload_requested;       /* set by the --el2 flow only: --boot and --uart-proxy never run it */
+static int payload_plan_status = Q1N1_PLAN_NO_TABLE;
+static struct q1n1_payload_region payload_page;
+static uint32_t payload_next_row;
+
+/* Like out() to the UART, and drawn with the page's own screen_char in the region at its own scale, the
+ * page cursor restored so nothing the page printed moves. Past the region's last row it is mirrored only. */
+static void payload_emit(const char *line)
+{
+    for (const char *s = line; *s; s++) uart_byte((uint8_t)*s);
+    uart_byte('\r');
+    uart_byte('\n');
+    if (payload_next_row < payload_page.row0 + payload_page.rows) {
+        uint32_t scale = fb.scale, saved_row = fb.row, saved_col = fb.col;
+        fb.scale = payload_page.scale; fb.row = payload_next_row; fb.col = payload_page.col0;
+        for (const char *s = line; *s; s++) screen_char(*s);
+        fb.scale = scale; fb.row = saved_row; fb.col = saved_col;
+    }
+    payload_next_row++;
+}
+
+/* Loads only: a store kind is refused here too, so a mistake in the runner is an error and not a write
+ * to a device register. */
+static int payload_guarded(int kind, uint64_t dst, uint64_t src, uint64_t size)
+{
+    return kind == Q1N1_PAYLOAD_G_COPY32 ? live_guarded(0, dst, src, size) : 1;
+}
+
+/* After the page is drawn, at EL2: verifies the payload where it now is and calls it. */
+static void sp11_payload_el2_run(void)
+{
+    struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter};
+    struct q1n1_payload_platform platform = {(uintptr_t)fb.pixels, fb.bytes, info.memory_map, info.memory_map_size,
+                                             info.memory_map_stride, fb.width, fb.height, fb.stride, fb.format};
+    struct q1n1_payload_result result;
+    q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);
+    payload_next_row = payload_page.row0;
+    q1n1_payload_run(&env, &payload_loaded, &platform, &result);
+}
+
+static void payload_console(struct efi_system_table *st, const char *line)
+{
+    firmware_out(st, line);
+    firmware_out(st, "\n");
+}
+
+/* Before ExitBootServices: finds, checks and loads the payload from the volume this image came from.
+ * Prints one PAYLOAD line on the firmware console and returns non-success, with nothing bounced, when it
+ * cannot. */
+static efi_status sp11_payload_prepare(struct efi_system_table *st, struct efi_loaded_image *image)
+{
+    struct q1n1_payload_diag diag;
+    int err = q1n1_payload_prepare(st->boot, image, &payload_loaded, &diag);
+    if (err) {
+        char line[160];
+        q1n1_payload_refusal_line(err, &diag, line, sizeof line);
+        payload_console(st, line);
+        return Q1N1_PAYLOAD_STATUS_REFUSED;
+    }
+    /* The table is the "preload" range sp11_declare_ranges already declares. */
+    info.preload_table = payload_loaded.table_base;
+    info.preload_size = sizeof(struct q1n1_preload_cache);
+    info.preload_status = 0;
+    for (uint32_t i = 0; i < payload_loaded.notes; i++) payload_console(st, payload_loaded.note[i]);
+    return 0;
+}
+#endif /* Q1N1_SP11_PAYLOAD */
+
 void q1n1_main(void) __attribute__((noreturn));
 void q1n1_main(void)
 {
@@ -1551,6 +1634,12 @@ void q1n1_main(void)
     if (el == 2) sp11_stk_el2_survey();
     else out("STK P3 SKIPPED=NOT_AT_EL2\n");
 #endif
+#if Q1N1_SP11_PAYLOAD
+    /* Likewise: the runner's lines go in the survey's region, beside or below the page, which it leaves as
+     * it is. At EL1 nothing is called: the payload is written for EL2. */
+    if (el == 2) sp11_payload_el2_run();
+    else out("PAYLOAD SKIPPED=NOT_AT_EL2\n");
+#endif
 #endif
     for (;;) {
         if (counter() - last >= ticks) {
@@ -1619,6 +1708,16 @@ static void sp11_declare_ranges(struct efi_system_table *st, uint64_t map_base, 
         sp11_declared_label[t.count] = labels[i];
         t.range[t.count++] = ranges[i];
     }
+#if Q1N1_SP11_PAYLOAD
+    /* The runner's files come after those: in its flow the image, the map buffer and its own preload
+     * table. A table that does not fit, or has a range slbounce must refuse (sp11-payload-plan.c), is
+     * not written at all; leave_firmware turns the status into a refusal that returns to the Shell. */
+    if (payload_requested) {
+        payload_plan_status = q1n1_payload_plan_append(&t, sp11_declared_label, &payload_loaded,
+                                                       (uintptr_t)fb.pixels, fb.bytes);
+        if (payload_plan_status) return;
+    }
+#endif
     if (t.count == 0) return; /* nothing to declare; never write an empty table */
     t.checksum = sp11_ebs_ranges_fnv((const uint8_t *)&t, offsetof(struct sp11_ebs_ranges_table, checksum));
     efi_guid guid = SP11_EBS_RANGES_GUID_INIT;
@@ -1673,6 +1772,44 @@ static void sp11_report_ebs(struct efi_system_table *st, uint64_t map)
     }
     firmware_out(st, t->buf);
 }
+
+#if Q1N1_SP11_PAYLOAD
+/* The last look before the point of no return, where every refusal of the runner that needs the final
+ * map lands: slbounce's own rules for the declared table (sp11-payload-plan.c), so that a table it would
+ * refuse is refused here, on the firmware console and as a status the Shell gets, instead of as the bare
+ * EFI_ABORTED that ends in the halted failure page. Reads the map into the buffer the retry loop will use
+ * and allocates nothing. A refusal also takes the declared table back (UEFI deletes a variable set with no
+ * attributes and no data) and frees the map buffer. */
+static efi_status sp11_payload_precheck(struct efi_system_table *st, uint64_t map)
+{
+    uint64_t size = MAP_BYTES, key = 0, stride = 0;
+    uint32_t version = 0, count = 0;
+    struct q1n1_payload_diag diag = {0};
+    efi_status status = st->boot->get_memory_map(&size, (void *)(uintptr_t)map, &key, &stride, &version);
+    int parsed = !status && q1n1_sp11_gop_map_parse((const uint8_t *)(uintptr_t)map, size, stride, sp11_map_entries,
+                                                    SP11_GOP_MAX_MAP_ENTRIES, &count) == Q1N1_SP11_MAP_OK;
+    int err = q1n1_payload_precheck(payload_plan_status, sp11_declared_status, status, parsed, &sp11_declared,
+                                    sp11_map_entries, count, &diag);
+    if (err) {
+        char line[160];
+        efi_guid guid = SP11_EBS_RANGES_GUID_INIT;
+        static const char16 name[] = SP11_EBS_RANGES_VARIABLE_NAME_U16;
+        struct efi_runtime_services *runtime = st->runtime_services;
+        q1n1_payload_refusal_line(err, &diag, line, sizeof line);
+        payload_console(st, line);
+        if (runtime) runtime->set_variable(name, &guid, 0, 0, NULL);
+        st->boot->free_pages(map, MAP_BYTES / 4096);
+        return Q1N1_PAYLOAD_STATUS_REFUSED;
+    }
+    struct q1n1_payload_line ready;
+    q1n1_payload_line_begin(&ready, "PAYLOAD READY");
+    q1n1_payload_line_dec(&ready, "FILES", payload_loaded.count);
+    q1n1_payload_line_dec(&ready, "RANGES", sp11_declared.count);
+    q1n1_payload_note(&payload_loaded, ready.buf);
+    payload_console(st, ready.buf);
+    return 0;
+}
+#endif /* Q1N1_SP11_PAYLOAD */
 #endif
 
 static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st, const char *message)
@@ -1692,6 +1829,14 @@ static efi_status leave_firmware(efi_handle handle, struct efi_system_table *st,
      * the diagnostic's is its image and this map buffer. */
     sp11_declare_ranges(st, map, MAP_BYTES);
     sp11_report_ebs(st, map);
+#if Q1N1_SP11_PAYLOAD
+    /* Every refusal of the runner is before the retry loop below, so it never bounces: the table and the
+     * map are checked here, after every allocation and before the loop's first GetMemoryMap. */
+    if (payload_requested) {
+        efi_status refused = sp11_payload_precheck(st, map);
+        if (refused) return refused;
+    }
+#endif
 #if Q1N1_SP11_STK_SURVEY
     /* The survey's P2 queries use firmware protocols, so they run here: after the allocations above
      * and before the retry loop below, whose first call is the GetMemoryMap whose key ExitBootServices
@@ -1901,6 +2046,21 @@ static efi_status proxy_efi_main(efi_handle handle, struct efi_system_table *st,
     return usb_mode ? 0 : status;
 }
 
+#if Q1N1_SP11_PAYLOAD
+/* The --el2 flow of the payload runner: load and check everything, then leave firmware. leave_firmware
+ * only returns when it refused before the point of no return, nothing was exited, and so what was
+ * allocated for the payload is given back before the Shell gets its status. */
+static efi_status sp11_payload_flow(efi_handle handle, struct efi_system_table *st, struct efi_loaded_image *image)
+{
+    efi_status refused = sp11_payload_prepare(st, image);
+    if (refused) return refused;
+    payload_requested = 1;      /* only the --el2 flow gets here: --boot and --uart-proxy returned earlier */
+    efi_status status = leave_firmware(handle, st, "Leaving firmware now. Green bar = EL2; amber = EL1.\n");
+    q1n1_payload_release(st->boot, &payload_loaded);
+    return status;
+}
+#endif /* Q1N1_SP11_PAYLOAD */
+
 efi_status efi_main(efi_handle handle, struct efi_system_table *st)
 {
     efi_guid loaded_guid = {0x5b1b31a1,0x9562,0x11d2,{0x8e,0x3f,0,0xa0,0xc9,0x69,0x72,0x3b}};
@@ -1942,7 +2102,11 @@ efi_status efi_main(efi_handle handle, struct efi_system_table *st)
 #if Q1N1_SP11_STK_SURVEY
     stk_requested = 1;      /* this is the --el2 flow: --boot and --uart-proxy returned above */
 #endif
+#if Q1N1_SP11_PAYLOAD
+    return sp11_payload_flow(handle, st, image);
+#else
     return leave_firmware(handle, st, "Leaving firmware now. Green bar = EL2; amber = EL1.\n");
+#endif
 }
 #else /* Q1N1_STAGE: a flat payload chainloaded over the proxy */
 

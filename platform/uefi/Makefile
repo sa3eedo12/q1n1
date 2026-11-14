@@ -100,6 +100,25 @@ $(error STK_SURVEY=1 needs SP11=1 (with SP11_USB_TABLE_C and SP11_STAGE_TABLE_C)
 endif
 endif
 
+# Surface Pro 11 stick payload runner (default off), docs/SP11-PAYLOAD.md: loads a reviewed EL2 payload from the
+# volume the image was loaded from before ExitBootServices, declares it to the paired slbounce's scoped sweep
+# and calls it at EL2 afterwards. A second image, $(OUT)/q1n1-payload.efi (Q1N1-PAYLOAD.EFI on the stick), run
+# with the same --el2 argument, built from its own main-payload.obj and sp11-payload-*.obj with
+# -DQ1N1_SP11_PAYLOAD=1. Nothing else is compiled with that define, so q1n1.efi, the stages, the survey image
+# and every object they use are what a build without PAYLOAD makes, byte for byte. It needs SP11=1 (it declares
+# ranges to the SP11 slbounce and loads from the SP11 stick) and cannot be built with STK_SURVEY=1: the two are
+# separate images. Build it with
+#   make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 SP11_USB_TABLE_C=... SP11_STAGE_TABLE_C=... payload-runner payloads
+PAYLOAD ?= 0
+ifeq ($(PAYLOAD),1)
+ifneq ($(SP11),1)
+$(error PAYLOAD=1 needs SP11=1 (with SP11_USB_TABLE_C and SP11_STAGE_TABLE_C): the runner loads from the Surface Pro 11's stick)
+endif
+ifeq ($(STK_SURVEY),1)
+$(error PAYLOAD=1 cannot be combined with STK_SURVEY=1: the payload runner and the survey are separate images)
+endif
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -428,6 +447,71 @@ stk-survey: $(OUT)/q1n1-stk.efi
 all: $(OUT)/q1n1-stk.efi
 endif
 
+# The payload runner image and the payloads themselves (see the PAYLOAD block above). The payloads are
+# bare-metal ELF files linked at 0 and flattened; they do not need SP11 and are built by `payloads` whatever
+# PAYLOAD is. `make PAYLOAD=1 all` builds the normal artefacts beside both.
+PAYLOAD_SRCS := $(sort $(wildcard payloads/*.c))
+PAYLOAD_BINS := $(patsubst payloads/%.c,$(OUT)/payloads/%.bin,$(PAYLOAD_SRCS))
+READELF := $(if $(wildcard $(LLVM)/llvm-readelf),$(LLVM)/llvm-readelf,llvm-readelf)
+PYTHON ?= python3
+# -fno-pic with the small code model addresses data with ADRP and ADD, which are PC-relative; the link keeps
+# its relocations (--emit-relocs) so that tools/sp11_payload_elfcheck.py can refuse any that is not.
+PAYLOAD_CFLAGS := --target=aarch64-unknown-none-elf -march=armv8-a -O2 -ffreestanding -fno-builtin \
+    -fno-stack-protector -mgeneral-regs-only -mno-outline-atomics -fno-pic -fno-pie -mcmodel=small \
+    -fno-jump-tables -fno-asynchronous-unwind-tables -fno-unwind-tables -ffunction-sections \
+    -mbranch-protection=none -Wall -Wextra -Werror -Iplatform/uefi -MMD -MP
+PAYLOAD_LDFLAGS := -static -nostdlib -z norelro --build-id=none --emit-relocs
+
+.PHONY: payloads
+payloads: $(PAYLOAD_BINS)
+
+$(OUT)/payloads/%.o: payloads/%.c platform/uefi/sp11-payload-abi.h payloads/payload-util.h
+	@mkdir -p $(OUT)/payloads
+	$(CC) $(PAYLOAD_CFLAGS) -c $< -o $@
+
+$(OUT)/payloads/start.o: payloads/start.S
+	@mkdir -p $(OUT)/payloads
+	$(CC) $(PAYLOAD_CFLAGS) -c $< -o $@
+
+$(OUT)/payloads/%.elf: $(OUT)/payloads/start.o $(OUT)/payloads/%.o payloads/payload.ld
+	$(LLD) $(PAYLOAD_LDFLAGS) -T payloads/payload.ld -o $@ $(OUT)/payloads/start.o $(OUT)/payloads/$*.o
+	$(PYTHON) -B tools/sp11_payload_elfcheck.py --readelf $(READELF) $@
+
+$(OUT)/payloads/%.bin: $(OUT)/payloads/%.elf
+	$(OBJCOPY) -O binary $< $@
+
+.PRECIOUS: $(OUT)/payloads/%.o $(OUT)/payloads/%.elf
+
+ifeq ($(PAYLOAD),1)
+PAYLOAD_OBJS := $(addprefix $(OUT)/,sp11-payload-text.obj sp11-payload-plan.obj sp11-payload-load.obj \
+    sp11-payload-run.obj sp11-payload-call.obj)
+PAYLOAD_HEADERS := platform/uefi/sp11-payload.h platform/uefi/sp11-payload-abi.h platform/uefi/sp11-ebs-ranges.h \
+    platform/uefi/sp11-fbgop.h platform/uefi/preload.h platform/uefi/efi.h
+
+$(OUT)/sp11-payload-%.obj: platform/uefi/sp11-payload-%.c $(PAYLOAD_HEADERS)
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+
+$(OUT)/sp11-payload-call.obj: platform/uefi/sp11-payload-call.S
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+
+$(OUT)/main-payload.obj: platform/uefi/main.c $(PAYLOAD_HEADERS) platform/uefi/fbcon.h platform/uefi/boot-window.h \
+    platform/uefi/usb-ebs.h platform/uefi/qcom-dwc3.h platform/uefi/q1n1-proxy.h platform/uefi/gicv3.h \
+    platform/uefi/q1n1-bootinfo.h platform/uefi/live-battery.h platform/uefi/gpu-el2.h platform/uefi/call-service.h \
+    platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h platform/uefi/sp11-stage-table.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+
+$(OUT)/q1n1-payload.efi: $(OUT)/main-payload.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS) $(PAYLOAD_OBJS)
+	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \
+	    /dynamicbase /out:$@ $^
+
+.PHONY: payload-runner
+payload-runner: $(OUT)/q1n1-payload.efi
+all: $(OUT)/q1n1-payload.efi $(PAYLOAD_BINS)
+endif
+
 $(OUT)/stage/%.obj: platform/uefi/%.c
 	@mkdir -p $(OUT)/stage
 	$(CC) $(STAGE_CFLAGS) -c $< -o $@
@@ -458,13 +542,14 @@ $(OUT)/q1n1-stage-qemu-alt.bin: $(STAGE_OBJS) platform/uefi/stage.ld
 
 # Every object's header list, as the compiler saw it. Missing on a first build,
 # which is what the leading dash is for.
--include $(wildcard $(OUT)/*.d) $(wildcard $(OUT)/stage/*.d)
+-include $(wildcard $(OUT)/*.d) $(wildcard $(OUT)/stage/*.d) $(wildcard $(OUT)/payloads/*.d)
 
 clean:
 	rm -f $(OUT)/*.d $(OUT)/stage/*.d $(OUT)/stage/*.obj $(OUT)/stage/*.elf \
 	    $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin \
 	    $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
-	rm -f $(OUT)/*.obj $(OUT)/q1n1.efi $(OUT)/q1n1-stk.efi $(OUT)/q1n1-usb-probe.efi \
+	rm -f $(OUT)/payloads/*.d $(OUT)/payloads/*.o $(OUT)/payloads/*.elf $(OUT)/payloads/*.bin
+	rm -f $(OUT)/*.obj $(OUT)/q1n1.efi $(OUT)/q1n1-stk.efi $(OUT)/q1n1-payload.efi $(OUT)/q1n1-usb-probe.efi \
 	    $(OUT)/q1n1-usb-role-probe.efi $(OUT)/usb-role-fixture.efi \
 	    $(OUT)/q1n1-usb-role-change.efi $(OUT)/q1n1-usb-serial.efi $(OUT)/q1n1-usb-typec-probe.efi \
 	    $(OUT)/q1n1-usb-ucsi-probe.efi $(OUT)/q1n1-usb-usbc-probe.efi $(OUT)/q1n1-usb-ucsi-reg-probe.efi \
