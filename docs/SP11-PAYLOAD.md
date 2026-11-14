@@ -21,7 +21,7 @@ runner a real EL2); **hardware NOT RUN**. Facts about the unit are labelled wher
 make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 \
     SP11_USB_TABLE_C=<file from sp11_usb_ports.py emit-c> \
     SP11_STAGE_TABLE_C=<file defining q1n1_sp11_stage_table_get()> \
-    payload-runner payloads          # -> $(OUT)/q1n1-payload.efi and $(OUT)/payloads/{state,psci}.bin
+    payload-runner payloads          # -> $(OUT)/q1n1-payload.efi and $(OUT)/payloads/{state,psci,timer}.bin
 ```
 
 * `Q1N1_SP11_PAYLOAD` (default 0) needs `SNAP_PLATFORM_SP11=1` and is an `#error` without it, in `main.c` and in
@@ -35,19 +35,20 @@ make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 \
   PLT or TLS part (`tools/sp11_payload_elfcheck.py`, run after every link on the relocations `--emit-relocs`
   keeps), and flattens it. Freestanding, no libc, general-regs-only, like the rest of q1n1. A second check, in
   the tests, disassembles each binary against a per-payload allow-list: `state` may hold `MRS` of its registers
-  and nothing else; `psci` may hold `MRS` of CurrentEL and MPIDR_EL1 and exactly **one** `smc #0`.
+  and nothing else; `psci` may hold `MRS` of CurrentEL and MPIDR_EL1 and exactly **one** `smc #0`; `timer` `MRS` of its
+  twelve timer and counter registers and no barrier.
 
 ## On the stick, and the one command
 
 ```sh
-python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/state.bin build/uefi/payloads/psci.bin [data.dat ...]
+python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/state.bin build/uefi/payloads/psci.bin build/uefi/payloads/timer.bin [data.dat ...]
 ```
 
 writes `build/stick/SP11/PAYLOAD.MAN` and a capitalised 8.3 copy of every file below `build/stick/SP11/`, and
 prints what to copy and what to run, one line per file saying whether it is a payload (called, in manifest order)
 or data (never called). The positional files keep the order given. A file whose name ends in `.BIN` (any case) is a
 payload; any other is data; the **first** must be a `.BIN`. `state.bin` alone gives exactly the manifest it always
-gave. Copy these to the stick, keeping the `SP11` directory; for a `state` then `psci` boot the stick holds
+gave. Copy these to the stick, keeping the `SP11` directory; for a `state`, `psci`, `timer` boot the stick holds
 exactly:
 
 | File on the stick | From |
@@ -56,6 +57,7 @@ exactly:
 | `SP11\PAYLOAD.MAN` | the tool |
 | `SP11\STATE.BIN` | the tool (a copy of `state.bin`; manifest index 0) |
 | `SP11\PSCI.BIN` | the tool (a copy of `psci.bin`; manifest index 1) |
+| `SP11\TIMER.BIN` | the tool (a copy of `timer.bin`; manifest index 2, **last**: it may stall the board) |
 
 Then, from the UEFI Shell, with slbounce loaded exactly as for q1n1 (`load SP11\SLBOUNCE-DEVHE-MARK.EFI`):
 
@@ -158,6 +160,27 @@ The page: the runner's own lines are three per payload (`VERIFY`, `CALL`, `DONE`
 chain of `state` and `psci` is 3 + 3 + 21 + 3 + 22 = 52 lines. The region on the panel holds about 89 lines on
 the unit's panel size (2880 x 1920, computed by the layout function) and the layout asks for at least 60; lines
 past the last row are mirrored to the UART but not drawn. Each `DONE` line stays within 100 characters.
+
+**Planning a chain's page.** A chain fits when the lines below add up to at most the panel's rows:
+
+<!-- chain-budget -->
+| Item | Lines |
+| --- | --- |
+| runner, once per boot: `LOADED` for each file (payload or data), `READY` | files + 1 |
+| runner, for each payload: `VERIFY`, `CALL`, `DONE` | 3 |
+| `state`, at most | 22 |
+| `psci`, at most | 30 |
+| `timer`, at most | 16 |
+| panel region, the unit's 2880 x 1920 panel | 89 |
+| panel region, the stock layout: the least it asks for | 60 |
+<!-- /chain-budget -->
+
+The maxima are what the host tests measure, over every EL and every answer they script. Example: `psci`, a new payload
+of at most 24 lines and `timer` need (3 + 1) + 3 x 3 + 30 + 24 + 16 = 83 lines: 89 rows hold them, 60 do not. A chain
+that stops adds `PAYLOAD CHAIN STOPPED` (a hash also `PAYLOAD REFUSED=HASH_AT_EL2`) and calls nothing after it.
+
+**Order.** A payload that may stall the board goes **last**, so that a stall costs only the lines after it: `timer` is
+one (`state.bin psci.bin timer.bin`, never `timer.bin` first). The manifest tool keeps the order it is given.
 
 **The chain is not a sandbox.** Every payload is machine code at EL2 and may overwrite anything: another payload,
 q1n1's records of the others, the runner's own code. The second hash catches accidents (a payload that scribbled
@@ -421,6 +444,12 @@ there.
 boot CPU is ON. UNKNOWN: whether the firmware answers an SMC from this context, and everything else the payload
 would print.
 
+## Payload `timer` (read-only timer and counter probe)
+
+`payloads/timer.c` reads the generic timer and counter at EL2 to isolate the CNTVOFF_EL2 and CNTPOFF_EL2 reads that
+stalled this board. It may stall the board, so it goes **last** in a chain. All of it is in
+[SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.
+
 ## Line catalogue
 
 On the firmware console before the bounce, and on the page and the UART after it (the notes are replayed):
@@ -437,6 +466,7 @@ On the firmware console before the bounce, and on the page and the UART after it
 | `PAYLOAD CHAIN STOPPED INDEX=n REASON=HASH_AT_EL2\|STACK_OVERFLOW` | page | the chain ends at payload n; later payloads are not called |
 | `PAYLOAD STATE KEY=0XVALUE` | page | the `state` payload's lines |
 | `PAYLOAD PSCI ...` | page | the `psci` payload's lines (above) |
+| `PAYLOAD TIMER ...` | page | the `timer` payload's lines ([SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md#what-it-prints)) |
 | `PAYLOAD SKIPPED=NOT_AT_EL2` | page | not at EL2: nothing called |
 
 Every line is within the page font and at most 100 characters (a `DONE` line is about 85 characters; the counters
@@ -483,11 +513,13 @@ the run under the pinned UEFI Shell).
 
 | Command | What it covers |
 | --- | --- |
-| `python3 tools/test-q1n1-sp11-payload.py` | six native programs under ASan and UBSan: the loader against a fake firmware (ConnectController and every call outside its list is a tripwire; a manifest on a second volume is ignored; nothing is written; the kind of each file follows its name), the declared-range planner and slbounce's rules against synthetic and 30000 random maps, the text layer and the ABI layout, the EL2 sequence of one payload, the chain's run sequence on a fake platform (order, per-payload hash and arguments, stops, budget reset), the `state` payload against a scripted register file, the `psci` payload against a scripted SMC (only the five ids, only table arguments, no SMC off EL2, every decode, garbage answers); 80 seeded-bug mutants and an unmutated control; source audits |
-| `python3 tools/test-q1n1-sp11-payload-chain.py` | 48 more seeded-bug mutants the native programs must catch (9 in the loader, 19 in the chain loop, 20 in `psci.c`: calling data, calling in reverse order, skipping a second hash, not resetting the budgets or the guard words, running past a corrupted guard, synchronising only file 0's pages, `.bin` case-sensitive, another payload's base, an extra id, CPU_ON instead of a query, a call at EL1, a second `smc` call site...); 13 seeded `psci` binaries the disassembly check must reject; the manifest tool on chains with 10 seeded bugs; the agreement of this document with the sources, with 13 seeded mistakes in the document |
-| `python3 tools/test-q1n1-sp11-payload-build.py` | the manifest tool, the ELF check (absolute pointers, MOVZ/MOVK addresses, writable globals, a PIE link, an unreadable file), the built binaries (entry at offset 0, identical when linked elsewhere, an allow-list per payload: `state` only the documented `MRS`; `psci` `MRS` of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; none of the forbidden mnemonics, no CNTVOFF_EL2 or CNTPOFF_EL2, reproducible in two runs), a payload with an absolute relocation failing the Makefile build, 13 seeded bugs in the two tools, and the default-off proof |
+| `python3 tools/test-q1n1-sp11-payload.py` | seven native programs under ASan and UBSan: the loader against a fake firmware (ConnectController and every call outside its list is a tripwire; a manifest on a second volume is ignored; nothing is written; the kind of each file follows its name), the declared-range planner and slbounce's rules against synthetic and 30000 random maps, the text layer and the ABI layout, the EL2 sequence of one payload, the chain's run sequence on a fake platform (order, per-payload hash and arguments, stops, budget reset), the `state` payload against a scripted register file, the `psci` payload against a scripted SMC (only the five ids, only table arguments, no SMC off EL2, every decode, garbage answers), the `timer` payload against a scripted register file and counter; 80 seeded-bug mutants and an unmutated control; source audits |
+| `python3 tools/test-q1n1-sp11-payload-chain.py` | 48 more seeded-bug mutants the native programs must catch (9 in the loader, 19 in the chain loop, 20 in `psci.c`: calling data, calling in reverse order, skipping a second hash, not resetting the budgets or the guard words, running past a corrupted guard, synchronising only file 0's pages, `.bin` case-sensitive, another payload's base, an extra id, CPU_ON instead of a query, a call at EL1, a second `smc` call site...); 13 seeded `psci` binaries the disassembly check must reject; the manifest tool on chains with 10 seeded bugs; the agreement of this document with the sources (the planning table of "The chain" included), with 20 seeded mistakes in the document |
+| `python3 tools/test-q1n1-sp11-payload-build.py` | the manifest tool, the ELF check (absolute pointers, MOVZ/MOVK addresses, writable globals, a PIE link, an unreadable file), the built binaries (entry at offset 0, identical when linked elsewhere, an allow-list per payload: `state` only the documented `MRS`; `psci` `MRS` of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; `timer` `MRS` of its twelve registers and no barrier; none of the forbidden mnemonics, no CNTVOFF_EL2 or CNTPOFF_EL2 outside `timer`, reproducible in two runs), a payload with an absolute relocation failing the Makefile build, 13 seeded bugs in the two tools, and the default-off proof |
 | `python3 tools/test-q1n1-sp11-payload-qemu.py` | QEMU/EDK2 at EL2 and EL1: the whole flow for `state`, every refusal, the call path with five test payloads (`tools/testdata/sp11-payload-fixture-*.c`) and two seeded variants of the runner |
 | `python3 tools/test-q1n1-sp11-payload-qemu-chain.py` | QEMU/EDK2 at EL2: a chain of three in order, each with its own base and size; data never called (a data file that holds a working payload); mixed-case names; five files and eight ranges; a wrong hash before the bounce; a hash that changes after it (a seeded runner variant, and a payload that damages a later one); a stack overflow; a hanging and a faulting second payload with the first one's lines still on the page; the budgets of every payload; file 0 not a payload; `state` then `psci` |
+| `python3 tools/test-q1n1-sp11-payload-timer.py` | `timer` ([SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md)): 31 seeded-bug mutants, the allow-list on `timer.bin` (20 seeded bad binaries, 6 that break the compiled order), the manifest tool and the runner's validator on `state psci timer`, the two documents against the source and each other (links included), with 41 seeded mistakes |
+| `python3 tools/test-q1n1-sp11-payload-qemu-timer.py` | QEMU/EDK2 at EL2: `state`, `psci`, `timer` in one boot (72 lines); `timer` copies that hang or fault on a hazardous read: the NEXT line last on the page, or q1n1's fault page |
 
 The default-off proof (`PayloadDefaultOff`): with the gate at 0 every runner file compiles to an object with no
 symbols, `main.c` preprocesses to the same text as at the commit before the runner (default, plain SP11 and SP11
