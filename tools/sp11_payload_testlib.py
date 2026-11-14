@@ -78,6 +78,21 @@ def build_payload(source, out_dir, name=None, extra_cflags=(), root=ROOT, check=
 # `usbsmmu` is MRS of CurrentEL and nothing else (every device access and every RAM access at an address from hardware is a
 # call through the runner's load op; only the runner's own memory map is read in place), no SMC, no barrier, and the only
 # payload that is allowed to be larger than a page or two.
+# Three more optional keys let a payload that changes the machine be described exactly, and a policy without them is
+# checked exactly as before:
+#   `allow`        {mnemonic: {first operand, ...}}: a mnemonic of FORBIDDEN that this payload may use, but only in the
+#                  listed forms (`msr` to VBAR_EL2 and DAIFSet, `dc` civac and ivac, a bare `wfe` is ''). Every other
+#                  operand of it is a violation, and so is a word whose encoding is not that of an allowed form (ALLOW_WORDS).
+#   `smc_ids`      the function ids its `smc` instructions are called with, one per instruction: each is read from the
+#                  straight-line mov/movz/movk run that builds w0 right before the instruction, and an id that cannot be read
+#                  that way (a branch target in the run, another write of w0, a call) is a violation, never a pass.
+#   `single_reads` registers it reads in addition to `registers`, each exactly once, and may name for that (CNTVOFF_EL2 for
+#                  `cpuon`: it is read once, on the core that was just started; CNTPOFF_EL2 can never be one of them, and
+#                  stays in `registers` of `timer` alone).
+# `cpuon` is the first payload that starts other CPUs: MRS of the fifteen registers its secondary and its primary read,
+# MSR of VBAR_EL2 (the secondary's own vector table) and DAIF, DC CIVAC and DC IVAC (the cache rules of a core that starts
+# with its caches off), DSB and ISB, one WFE (the park loop of a core whose CPU_OFF returned), and three `smc #0`: CPU_ON and
+# AFFINITY_INFO of the primary, CPU_OFF of the secondary.
 STATE_REGISTERS = {
     'currentel', 'midr_el1', 'mpidr_el1', 'id_aa64mmfr0_el1', 'id_aa64mmfr1_el1', 'id_aa64mmfr2_el1', 's3_0_c0_c7_3',
     's3_0_c0_c7_4', 'id_aa64pfr0_el1', 'id_aa64pfr1_el1', 'hcr_el2', 'sctlr_el2', 'tcr_el2', 'ttbr0_el2', 's3_4_c2_c0_1',
@@ -88,12 +103,22 @@ CNTVOFF_EL2, CNTPOFF_EL2 = 's3_4_c14_c0_3', 's3_4_c14_c0_6'
 TIMER_REGISTERS = {
     'currentel', 'id_aa64mmfr0_el1', 'hcr_el2', 'cntfrq_el0', 'cnthctl_el2', 'cntp_ctl_el0', 'cntv_ctl_el0',
     'cnthp_ctl_el2', 'cntpct_el0', 'cntvct_el0', CNTVOFF_EL2, CNTPOFF_EL2}
+# What `cpuon` reads besides CNTVOFF_EL2 (which its policy lists apart, as a register read exactly once): the primary reads
+# CurrentEL, MPIDR_EL1, CNTFRQ_EL0, MIDR_EL1 and the three ID registers it compares; the secondary stub reads those too and
+# SCTLR_EL2, HCR_EL2, VBAR_EL2, CNTPCT_EL0 and, in a vector, ESR_EL2, ELR_EL2 and FAR_EL2.
+CPUON_REGISTERS = {
+    'currentel', 'mpidr_el1', 'midr_el1', 'id_aa64mmfr0_el1', 'id_aa64isar0_el1', 'id_aa64pfr0_el1', 'cntfrq_el0',
+    'sctlr_el2', 'hcr_el2', 'vbar_el2', 'cntpct_el0', 'esr_el2', 'elr_el2', 'far_el2'}
+CPUON_SMC_IDS = (0x84000002, 0xC4000003, 0xC4000004)      # CPU_OFF, CPU_ON, AFFINITY_INFO (Arm DEN0022, SMC64 for the last two)
 POLICIES = {
     'state': {'registers': STATE_REGISTERS, 'smc': 0, 'bytes': 4096},
     'psci': {'registers': {'currentel', 'mpidr_el1'}, 'smc': 1, 'bytes': 8192},
     'timer': {'registers': TIMER_REGISTERS, 'smc': 0, 'bytes': 4096, 'timer_offsets': True,
               'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
     'usbsmmu': {'registers': {'currentel'}, 'smc': 0, 'bytes': 20480, 'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
+    'cpuon': {'registers': CPUON_REGISTERS, 'single_reads': {CNTVOFF_EL2}, 'smc': 3, 'smc_ids': CPUON_SMC_IDS,
+              'bytes': 20480, 'forbid': {'dmb', 'sb', 'sev', 'sevl'},
+              'allow': {'msr': {'vbar_el2', 'daifset'}, 'dc': {'civac', 'ivac'}, 'wfe': {''}}},
 }
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
@@ -109,16 +134,32 @@ FORBIDDEN_WORDS = {
     'eretaa': (0xffffffff, 0xd69f0bff), 'eretab': (0xffffffff, 0xd69f0fff), 'msr-register': (0xfff00000, 0xd5100000),
     'msr-immediate': (0xfff8f01f, 0xd500401f), 'sys': (0xfff80000, 0xd5080000), 'sysl': (0xfff80000, 0xd5280000),
     'wfi': (0xffffffff, 0xd503207f), 'wfe': (0xffffffff, 0xd503205f)}
-# The same for the barriers a policy may forbid with `forbid` (the CRm field is any).
-BARRIER_WORDS = {'isb': (0xfffff0ff, 0xd50330df), 'dsb': (0xfffff0ff, 0xd503309f), 'dmb': (0xfffff0ff, 0xd50330bf)}
+# The same for the barriers a policy may forbid with `forbid` (the CRm field is any), and for the event hints no payload has a
+# use for (SEV, SEVL: a wake-up for a core parked in WFE is not a thing a payload may send).
+BARRIER_WORDS = {'isb': (0xfffff0ff, 0xd50330df), 'dsb': (0xfffff0ff, 0xd503309f), 'dmb': (0xfffff0ff, 0xd50330bf),
+                 'sev': (0xffffffff, 0xd503209f), 'sevl': (0xffffffff, 0xd50320bf)}
+# By encoding, the forms a policy's `allow` may name: (mnemonic, first operand) -> the FORBIDDEN_WORDS class the word is in,
+# and the mask and value of exactly that form (every register of Rt is any). Independent of the disassembler: a word of such a
+# class that is not one of these is a violation whatever the disassembler calls it.
+ALLOW_WORDS = {
+    ('msr', 'vbar_el2'): ('msr-register', 0xffffffe0, 0xd51cc000),      # S3_4_C12_C0_0
+    ('msr', 'daifset'): ('msr-immediate', 0xfffff0ff, 0xd50340df),      # PSTATE.DAIFSet, any 4-bit immediate
+    ('dc', 'civac'): ('sys', 0xffffffe0, 0xd50b7e20),                   # SYS #3, C7, C14, #1
+    ('dc', 'ivac'): ('sys', 0xffffffe0, 0xd5087620),                    # SYS #0, C7, C6, #1
+    ('wfe', ''): ('wfe', 0xffffffff, 0xd503205f),
+}
 SYSTEM_REGISTER_ALIASES = {'id_aa64mmfr3_el1': 's3_0_c0_c7_3', 'id_aa64mmfr4_el1': 's3_0_c0_c7_4', 'ttbr1_el2': 's3_4_c2_c0_1',
                            'cntvoff_el2': CNTVOFF_EL2, 'cntpoff_el2': CNTPOFF_EL2}
+# Every spelling of a timer offset: a policy that reads one of them once names it too.
+OFFSET_NAMES = {CNTVOFF_EL2: ('cntvoff_el2', CNTVOFF_EL2), CNTPOFF_EL2: ('cntpoff_el2', CNTPOFF_EL2)}
 
 
 def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     """Everything in a payload's code that `policy` does not allow, as sentences; an empty list means it is clean.
     Reads the disassembly of the ELF (every mnemonic, every MRS register, every SMC and its immediate, the timer
-    offsets) and, independently, every aligned word of the flat binary's code by encoding."""
+    offsets) and, independently, every aligned word of the flat binary's code by encoding. The optional policy keys
+    `allow`, `smc_ids` and `single_reads` (see POLICIES) widen what is allowed in exact forms only; a policy without them
+    is checked as it always was."""
     problems = []
     dis = run(['llvm-objdump', '-d', '--no-show-raw-insn', str(elf)])
     if dis.returncode:
@@ -135,10 +176,24 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
         if mnemonic == 'mrs':
             register = operands.split(',')[-1].strip().lower()
             reads[SYSTEM_REGISTER_ALIASES.get(register, register)] += 1
-    if set(reads) != policy['registers']:
-        problems.append(f'registers read {sorted(reads)}, allowed {sorted(policy["registers"])}')
-    for mnemonic in sorted(mnemonics & (FORBIDDEN | set(policy.get('forbid', ())))):
+    single = set(policy.get('single_reads', ()))
+    if CNTPOFF_EL2 in single:
+        problems.append(f'the policy allows a read of {CNTPOFF_EL2}, which never returns on this unit')
+    if set(reads) != policy['registers'] | single:
+        problems.append(f'registers read {sorted(reads)}, allowed {sorted(policy["registers"] | single)}')
+    for register in sorted(single):
+        if reads[register] != 1:
+            problems.append(f'{register} is read {reads[register]} times, the policy allows exactly one read')
+    allow = policy.get('allow', {})
+    forbid = set(policy.get('forbid', ()))
+    for mnemonic in sorted(set(allow) & forbid):
+        problems.append(f'the policy both allows and forbids {mnemonic}')
+    for mnemonic in sorted(mnemonics & ((FORBIDDEN | forbid) - set(allow))):
         problems.append(f'forbidden instruction {mnemonic}')
+    for form in sorted({(mnemonic, operands.split('//')[0].split(',')[0].strip().lower())
+                        for mnemonic, operands in instructions if mnemonic in allow}):
+        if form[1] not in allow[form[0]]:
+            problems.append(f'forbidden instruction {form[0]} {form[1]}'.strip())
     for mnemonic in sorted(m for m in mnemonics if EXCLUSIVE.match(m) or ATOMIC.match(m)):
         problems.append(f'exclusive or atomic instruction {mnemonic}')
     smc = [operands.strip() for mnemonic, operands in instructions if mnemonic == 'smc']
@@ -146,13 +201,21 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
         problems.append(f'{len(smc)} smc instructions, the policy allows {policy["smc"]}')
     if any(operand != '#0' for operand in smc):
         problems.append(f'an smc with another immediate than #0: {smc}')
+    if 'smc_ids' in policy:
+        ids, unreadable = smc_function_ids(text)
+        for address in unreadable:
+            problems.append(f'the function id of the smc at {address:#x} cannot be read from the code before it')
+        if sorted(ids) != sorted(policy['smc_ids']):
+            problems.append(f'smc function ids {[hex(i) for i in sorted(ids)]}, the policy allows '
+                            f'{[hex(i) for i in sorted(policy["smc_ids"])]}')
     if policy.get('timer_offsets'):
         for register in (CNTVOFF_EL2, CNTPOFF_EL2):
             if reads[register] != 1:
                 problems.append(f'{register} is read {reads[register]} times, the policy allows exactly one read')
     else:
+        named_by_policy = {name for register in single for name in OFFSET_NAMES.get(register, ())}
         for register in TIMER_OFFSETS:
-            if register in text.lower():
+            if register in text.lower() and register not in named_by_policy:
                 problems.append(f'the code names {register}')
     if len(mnemonics) < 8:
         problems.append('fewer than eight different mnemonics: the disassembly was not read')
@@ -165,10 +228,17 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     if not 0 < size <= len(data) or size % 4:
         return problems + [f'the .text size {size} does not fit the flat binary']
     words = struct.unpack(f'<{size // 4}I', data[:size])
+    allowed_words = {}
+    for form in sorted({(m, first) for m, firsts in allow.items() for first in firsts}):
+        if form not in ALLOW_WORDS:
+            problems.append(f'no encoding is known for the allowed form {form[0]} {form[1]}'.strip())
+            continue
+        what, mask, value = ALLOW_WORDS[form]
+        allowed_words.setdefault(what, []).append((mask, value))
     for what, (mask, value) in FORBIDDEN_WORDS.items():
-        if any(w & mask == value for w in words):
+        if any(w & mask == value and not any(w & m == v for m, v in allowed_words.get(what, ())) for w in words):
             problems.append(f'a word of the code encodes {what}')
-    for what in sorted(set(policy.get('forbid', ())) & set(BARRIER_WORDS)):
+    for what in sorted(forbid & set(BARRIER_WORDS)):
         mask, value = BARRIER_WORDS[what]
         if any(w & mask == value for w in words):
             problems.append(f'a word of the code encodes {what}')
@@ -178,6 +248,82 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     if len(data) > policy['bytes']:
         problems.append(f'{len(data)} bytes, the policy allows {policy["bytes"]}')
     return problems
+
+
+_DIRECT_BRANCH = re.compile(r'^(b|bl|b\.[a-z]{2}|cbz|cbnz|tbz|tbnz)$')
+_ANY_TRANSFER = re.compile(r'^(b|bl|b\.[a-z]{2}|cbz|cbnz|tbz|tbnz|br|blr|ret|eret|bra[ab]z?|blra[ab]z?|retaa|retab|smc|hvc|svc)$')
+
+
+def _addressed_instructions(text):
+    """[(address, mnemonic, operands)] of a disassembly, comments dropped; a symbol line is (address, '<label>', name)."""
+    items = []
+    for line in text.splitlines():
+        label = re.match(r'([0-9a-f]+) <(.+)>:\s*$', line)
+        if label:
+            items.append((int(label.group(1), 16), '<label>', label.group(2)))
+            continue
+        found = re.match(r'\s+([0-9a-f]+):\s+(\S+)\s*(.*)$', line)
+        if found:
+            items.append((int(found.group(1), 16), found.group(2).lower(), found.group(3).split('//')[0].strip()))
+    return items
+
+
+def _w0_before(items, smc_index, branch_targets):
+    """The value w0 holds at items[smc_index] (an smc), or None when it cannot be read with certainty. The only code that may
+    set it is a straight-line run of mov/movz/movn and movk into w0 or x0; between that run and the smc nothing else may name
+    w0 or x0, nothing may transfer control (calls, returns, branches, other traps), no symbol may begin, and no branch of the
+    program may land inside the run (a join where w0 could have another value)."""
+    smc_address = items[smc_index][0]
+    halfwords = {}
+    for j in range(smc_index - 1, -1, -1):
+        address, mnemonic, operands = items[j]
+        if mnemonic == '<label>' or _ANY_TRANSFER.match(mnemonic):
+            return None
+        fields = [field.strip() for field in operands.split(',')]
+        if fields[0] in ('w0', 'x0') and mnemonic in ('mov', 'movz', 'movn', 'movk') and len(fields) in (2, 3):
+            try:
+                immediate = int(fields[1].lstrip('#'), 0)
+                shift = int(fields[2].replace('lsl', '').strip().lstrip('#'), 0) if len(fields) == 3 else 0
+            except ValueError:
+                return None
+            width = 32 if fields[0] == 'w0' else 64
+            if mnemonic == 'movk':
+                if shift % 16 or shift >= width or not 0 <= immediate <= 0xffff:
+                    return None
+                halfwords.setdefault(shift // 16, immediate)
+                continue
+            mask = (1 << width) - 1
+            value = ~(immediate << shift) & mask if mnemonic == 'movn' else (immediate << shift) & mask
+            for half, piece in halfwords.items():
+                value = value & ~(0xffff << 16 * half) | piece << 16 * half
+            if any(address < target <= smc_address for target in branch_targets):
+                return None
+            return value
+        if re.search(r'\b[wx]0\b', operands):
+            return None
+    return None
+
+
+def smc_function_ids(text):
+    """(ids, unreadable): the function id of every `smc` in a disassembly, and the addresses of those whose id is not
+    certain (see _w0_before)."""
+    items = _addressed_instructions(text)
+    targets = set()
+    for _, mnemonic, operands in items:
+        if _DIRECT_BRANCH.match(mnemonic):
+            found = re.search(r'\b0x([0-9a-f]+)\b', operands)
+            if found:
+                targets.add(int(found.group(1), 16))
+    ids, unreadable = [], []
+    for index, (address, mnemonic, _) in enumerate(items):
+        if mnemonic != 'smc':
+            continue
+        value = _w0_before(items, index, targets)
+        if value is None:
+            unreadable.append(address)
+        else:
+            ids.append(value)
+    return ids, unreadable
 
 
 def _string_at(data, address):

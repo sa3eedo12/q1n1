@@ -10,10 +10,12 @@
   * ElfCheck: tools/sp11_payload_elfcheck.py against real payload ELFs built with the Makefile's flags: the
     reference payload passes; an absolute pointer table, an absolute address built with MOVZ/MOVK, a writable
     global, a position-dependent link and an unreadable file are each refused.
-  * PayloadBinary: the built `state`, `psci`, `timer` and `usbsmmu` payloads: entry at offset 0, within their pages (usbsmmu:
+  * PayloadBinary: the built `state`, `psci`, `timer`, `usbsmmu` and `cpuon` payloads: entry at offset 0, within their pages (usbsmmu:
     its byte budget), identical when linked at another base, only what each one's allow-list says (state: the documented
     MRS; psci: MRS of CurrentEL and MPIDR_EL1 and exactly one `smc #0`; timer: MRS of its twelve timer and counter
-    registers, no barrier; usbsmmu: MRS of CurrentEL, no barrier; no payload: any other system or exclusive
+    registers, no barrier; usbsmmu: MRS of CurrentEL, no barrier; cpuon: its fifteen registers, MSR of VBAR_EL2 and DAIFSet,
+    DC CIVAC and IVAC, three `smc #0` whose function ids are read from the code (tools/test-q1n1-sp11-payload-cpuon.py runs it
+    against seeded-bad builds); no payload: any other system or exclusive
     instruction; only timer: CNTVOFF_EL2 and CNTPOFF_EL2),
     `make payloads` reproducible and running the check, and a payload with an absolute relocation fails the
     Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which tools/test-q1n1-sp11-payload-chain.py,
@@ -347,7 +349,8 @@ class PayloadBinary(unittest.TestCase):
     # The allow-list mechanism is tools/sp11_payload_testlib.py's POLICIES and binary_violations, one entry per payload,
     # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py, -timer.py and -usbsmmu.py: `state` is MRS only,
     # `psci` is MRS of CurrentEL and MPIDR_EL1 plus exactly one SMC, `timer` is MRS of its twelve timer and counter
-    # registers (the only payload that may read CNTVOFF_EL2 and CNTPOFF_EL2) and no barrier, `usbsmmu` MRS of CurrentEL.
+    # registers (the only payload that may read CNTVOFF_EL2 and CNTPOFF_EL2) and no barrier, `usbsmmu` MRS of CurrentEL, `cpuon`
+    # the first payload with MSR, DC and three SMC (its own allow-list keys; it reads CNTVOFF_EL2 once, never CNTPOFF_EL2).
     POLICY = lib.POLICIES
 
     @classmethod
@@ -410,6 +413,8 @@ class PayloadBinary(unittest.TestCase):
         self.assertEqual(self.POLICY['usbsmmu']['smc'], 0)
         self.assertEqual(self.POLICY['usbsmmu']['registers'], {'currentel'})
         self.assertGreaterEqual(self.POLICY['usbsmmu']['forbid'], {'isb', 'dsb', 'dmb'})
+        self.assertEqual(self.POLICY['cpuon']['smc'], 3)
+        self.assertEqual(sorted(self.POLICY['cpuon']['smc_ids']), [0x84000002, 0xC4000003, 0xC4000004])
         self.assertEqual([name for name, policy in self.POLICY.items() if policy.get('timer_offsets')], ['timer'])
         offsets = {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2}
         self.assertEqual(self.POLICY['timer']['registers'] & offsets, offsets)

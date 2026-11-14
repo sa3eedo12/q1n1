@@ -253,13 +253,16 @@ class TimerBinary(unittest.TestCase):
         self.assertEqual(lib.binary_violations(elf, flat, lib.POLICIES['timer'], READELF()), [])
         self.assertEqual(lib.hazard_order_violations(elf, flat), [])
 
-    def test_only_the_timer_payload_may_name_the_timer_offsets(self):
+    def test_only_the_timer_payload_may_name_the_timer_offsets_bar_cpuons_one_read_of_cntvoff_el2(self):
         self.assertEqual([name for name, policy in lib.POLICIES.items() if policy.get('timer_offsets')], ['timer'])
         for name, policy in lib.POLICIES.items():
             with self.subTest(payload=name):
                 has = {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2} & policy['registers']
                 self.assertEqual(bool(has), name == 'timer')
-                self.assertEqual(policy['smc'], 0 if name != 'psci' else 1)
+                self.assertEqual(policy['smc'], {'psci': 1, 'cpuon': 3}.get(name, 0))
+        # The one other place a timer offset is allowed: cpuon's secondary reads CNTVOFF_EL2 once; CNTPOFF_EL2 is never allowed.
+        self.assertEqual({name for name, policy in lib.POLICIES.items() if lib.CNTVOFF_EL2 in policy.get('single_reads', ())}, {'cpuon'})
+        self.assertFalse([name for name, policy in lib.POLICIES.items() if lib.CNTPOFF_EL2 in policy.get('single_reads', ())])
         self.assertEqual(lib.POLICIES['timer']['registers'] - {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2}, lib.TIMER_REGISTERS - {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2})
         self.assertGreaterEqual(lib.POLICIES['timer']['forbid'], {'isb', 'dsb', 'dmb'})
 

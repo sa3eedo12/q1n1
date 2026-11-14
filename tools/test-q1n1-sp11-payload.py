@@ -15,12 +15,15 @@ Runs, under ASan and UBSan:
     second hash, the ops and the load32 policy), -chain.c (several payloads in one boot), -state.c (the
     reference payload against a scripted register file), -psci.c (the psci payload against a scripted
     register file and a scripted SMC), -timer.c (the timer payload against a scripted register file and
-    counter) and -usbsmmu.c (the usbsmmu payload against a scripted MMIO, RAM and memory map);
+    counter) and -usbsmmu.c (the usbsmmu payload against a scripted MMIO, RAM and memory map) and -cpuon.c (the cpuon
+    payload against a modelled machine: scripted PSCI, a counter, and a cache that agrees with memory only through cache
+    maintenance);
   * Mutants: seeded bugs, each applied to a copy of the sources under build/, each of which the programs
     must reject (a failing, hanging or -- for the ABI -- non-compiling program catches it), against an
     unmutated control that must pass the same way. The chain's and psci's own seeded bugs are in
-    tools/test-q1n1-sp11-payload-chain.py, the timer's in tools/test-q1n1-sp11-payload-timer.py and the
-    usbsmmu's in tools/test-q1n1-sp11-payload-usbsmmu.py, which run them through the same machinery;
+    tools/test-q1n1-sp11-payload-chain.py, the timer's in tools/test-q1n1-sp11-payload-timer.py, the
+    usbsmmu's in tools/test-q1n1-sp11-payload-usbsmmu.py and the cpuon's in tools/test-q1n1-sp11-payload-cpuon.py,
+    which run them through the same machinery;
   * SourceAudit: what no run can show -- SPDX lines, that the loader makes only its listed firmware calls,
     that nothing of the runner stores, that the main.c glue forwards loads only and is wholly under the
     gate, that nothing of it sits between the last GetMemoryMap and ExitBootServices, the constants shared
@@ -75,15 +78,16 @@ PROGRAMS = {
     'psci': ('tools/test-q1n1-sp11-payload-psci.c', ['sp11-payload-text.c'], 7, 90000, 'psci'),
     'timer': ('tools/test-q1n1-sp11-payload-timer.c', ['sp11-payload-text.c'], 8, 8000, 'timer'),
     'usbsmmu': ('tools/test-q1n1-sp11-payload-usbsmmu.c', ['sp11-payload-text.c'], 10, 19000, 'usbsmmu'),
+    'cpuon': ('tools/test-q1n1-sp11-payload-cpuon.c', ['sp11-payload-text.c'], 10, 20000, 'cpuon'),
 }
 # The programs that test a payload's own source, built natively with a scripted register file (and SMC).
-HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c', 'usbsmmu': 'usbsmmu.c'}
+HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c', 'usbsmmu': 'usbsmmu.c', 'cpuon': 'cpuon.c'}
 # What a copy of the tree needs: the runner, its dependencies, the survey's text file (the panel layout the
 # runner copies is compared with it) and the payload sources.
 UEFI_COPIED = sorted(p.name for p in UEFI.glob('sp11-payload*')) + [
     'preload.c', 'preload.h', 'sha256.c', 'sha256.h', 'efi.h', 'sp11-ebs-ranges.h', 'sp11-fbgop.c', 'sp11-fbgop.h',
     'sp11-stk-text.c', 'sp11-stk-survey.h']
-PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c', 'timer.c', 'usbsmmu.c']
+PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c', 'timer.c', 'usbsmmu.c', 'cpuon.c']
 
 NEW_SOURCES = sorted(UEFI.glob('sp11-payload*')) + sorted(PAYLOADS.glob('*')) + sorted(
     (ROOT / 'tools').glob('test-q1n1-sp11-payload*')) + sorted((ROOT / 'tools').glob('sp11_payload_*')) + sorted(
@@ -195,7 +199,7 @@ class Native(unittest.TestCase):
 # a change to the source that moves a target is reported as a stale mutant and not as a survivor.
 # (name, file below the copy's root, [(needle, replacement)], programs that must reject it, build error that
 # counts as rejecting it). The programs are listed in the order they are tried.
-ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer', 'usbsmmu']
+ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer', 'usbsmmu', 'cpuon']
 LOAD = 'uefi/sp11-payload-load.c'
 PLAN = 'uefi/sp11-payload-plan.c'
 RUNC = 'uefi/sp11-payload-run.c'
