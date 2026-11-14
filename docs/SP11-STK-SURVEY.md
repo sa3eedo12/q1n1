@@ -6,9 +6,12 @@ boot, no device write, to learn the state of the USB controller the boot stick s
 clocks, the xHCI identity and operational state, the ports, the slot contexts the firmware left behind and the
 SMMU stream mapping. The answer decides whether an EL2 stick log writer is feasible.
 
-Evidence labels follow the Snapintosh `AGENTS.md`. Everything below is **EXPERIMENTAL**: built and tested on a
-host and on QEMU's EDK2; **hardware NOT RUN**. Register offsets are **VERIFIED** only as what the pinned Linux
-source says (the design document lists the lines); that the unit behaves so is **INFERRED**.
+Evidence labels follow the Snapintosh `AGENTS.md`. The survey is **EXPERIMENTAL**: built and tested on a host and
+on QEMU's EDK2. **It ran once on the unit** (2026-11-14, autorun step 2, build `8235433AAD59`, one boot, photographs):
+it reached `STK AT DONE` and its verdict with no fault, no hang and no write, so its format and its guards worked
+there; the values it printed are **OBSERVED** once and are recorded in section 12 of the Snapintosh
+`docs/SP11-STICK-LOG.md`, not repeated here. Register offsets are **VERIFIED** only as what the pinned Linux source
+says (the design document lists the lines); that the unit behaves so is **INFERRED** wherever the run did not show it.
 
 ## Build
 
@@ -109,3 +112,16 @@ The survey build leaves every other artefact byte-identical and is the only imag
 
 Anything that writes to hardware, xHCI initialisation, rings or enumeration (stages S1 and later); the stick log
 writer; autorun allow-lists; any change to `--boot`, `--uart` or `--uart-proxy`.
+
+## Gaps the run on the unit showed
+
+None of these changes the survey image. The payload `usbsmmu` (`docs/SP11-PAYLOAD-USBSMMU.md`) covers the first and the
+third without a new survey boot; the second and the fourth stay open.
+
+* `USBSTS` bit 12 (HCE, host controller error) is not decoded, and the verdict ignores it. The unit's xHC read `0x1019`
+  after the bounce, HCE among the bits, and the survey printed only the raw value; `HSE` (bit 2) is the one it names.
+* The firmware lists four xHCI handles and the survey shows three (`STK_P2_HC_SHOWN`); the line says `MORE=1`.
+* The SMMU stream lines say a stream translates through a context bank (bank 3 on the unit) and nothing about the
+  bank: its type, tables and what it maps are not read.
+* The endpoint buffer of the USB descriptor read is 7 bytes: right for packed descriptors, one byte short if a
+  firmware copies an unpacked 8-byte structure. Low priority.
