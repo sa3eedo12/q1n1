@@ -104,6 +104,7 @@ static void make_loaded(void)
     memset(table, 0, 8192);
     memset(&loaded, 0, sizeof loaded);
     loaded.count = 1;
+    loaded.code_count = 1;
     loaded.file[0].base = (uint64_t)(uintptr_t)payload_mem;
     loaded.file[0].bytes = PAYLOAD_BYTES;
     loaded.file[0].alloc = 4096;
@@ -202,6 +203,7 @@ static uint64_t payload_load32(const struct q1n1_payload_args *a)
     TRY(0x1000, &outside);                                       /* 4: not in the stack (a local) */
     TRY(0x1000, top);                                            /* 5: the last word of the stack is inside */
     TRY(0x1000, bottom);                                         /* 6: the first word too */
+    ((volatile uint64_t *)(uintptr_t)a->stack_base)[0] = UINT64_C(0x5afe5afe5afe5afe);   /* it is the runner's guard: put it back */
     TRY(0x1000, (uint32_t *)(uintptr_t)stack_end);               /* 7: one past the stack */
     TRY(0x1000, (uint32_t *)(uintptr_t)(stack_end - 2));         /* 8: straddles the end (and is misaligned) */
     TRY(0x1000, (uint32_t *)(uintptr_t)(a->stack_base - 4));     /* 9: one word before the stack */
@@ -235,44 +237,45 @@ static int suite_order(void)
     payload_fn = payload_hello;
     seen_calls = 0;
     CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.status == Q1N1_PAYLOAD_RUN_OK);
-    CHECK(seen_calls == 1 && result.retval == 0x1234 && result.stack_ok == 1);
+    CHECK(seen_calls == 1 && result.call[0].retval == 0x1234 && result.call[0].stack_ok == 1);
+    CHECK(result.called == 1 && result.call[0].index == 0);
     int notes0 = find(EV_EMIT, "PAYLOAD LOADED"), ready = find(EV_EMIT, "PAYLOAD READY"), verify = find(EV_EMIT, "PAYLOAD VERIFY=OK");
     int sync = find_kind(EV_SYNC), call_line = find(EV_EMIT, "PAYLOAD CALL "), call = find_kind(EV_CALL);
-    int hello = find(EV_EMIT, "PAYLOAD HELLO ONE"), ret = find(EV_EMIT, "PAYLOAD RETURN="), stack = find(EV_EMIT, "PAYLOAD STACK=");
-    int ops = find(EV_EMIT, "PAYLOAD OPS ");
+    int hello = find(EV_EMIT, "PAYLOAD HELLO ONE"), done = find(EV_EMIT, "PAYLOAD DONE ");
     CHECK(notes0 == 0 && ready == 1);                           /* the notes from before the bounce come first */
     CHECK(verify > ready && sync > verify && call_line > sync && call > call_line);
-    CHECK(hello > call && ret > hello && stack > ret && ops > stack);
+    CHECK(hello > call && done > hello);
+    /* The old RETURN, STACK and OPS lines are one line now, the last the runner prints for the payload. */
+    CHECK(find(EV_EMIT, "PAYLOAD RETURN=") < 0 && find(EV_EMIT, "PAYLOAD STACK=") < 0 && find(EV_EMIT, "PAYLOAD OPS ") < 0);
     CHECK(count_of(EV_CALL) == 1 && count_of(EV_SYNC) == 1);
     /* The cache maintenance is of the whole allocation and the call is to its first byte. */
     CHECK(log_[sync].a == loaded.file[0].base && log_[sync].b == 4096);
     CHECK(log_[call].a == loaded.file[0].base);
     CHECK(log_[call].c == loaded.stack_base + Q1N1_PAYLOAD_STACK_BYTES && (log_[call].c & 15) == 0);
-    /* The line that names the call carries the hash prefix of the file. */
+    /* The line that names the call carries the payload's index and the hash prefix of the file. */
     uint8_t digest[32];
     q1n1_sha256(payload_mem, PAYLOAD_BYTES, digest);
     char want[64];
-    snprintf(want, sizeof want, "PAYLOAD CALL %02X%02X%02X%02X%02X%02X%02X%02X", digest[0], digest[1], digest[2], digest[3],
+    snprintf(want, sizeof want, "PAYLOAD CALL 0 %02X%02X%02X%02X%02X%02X%02X%02X", digest[0], digest[1], digest[2], digest[3],
              digest[4], digest[5], digest[6], digest[7]);
     CHECK(!strcmp(log_[call_line].text, want));
-    CHECK(!strcmp(log_[ret].text, "PAYLOAD RETURN=0X1234"));
-    CHECK(!strcmp(log_[stack].text, "PAYLOAD STACK=OK"));
-    CHECK(!strcmp(log_[ops].text, "PAYLOAD OPS LOADS=0 FAULTS=0 REFUSED=0 LINES=2 DROPPED=0"));
+    CHECK(!strcmp(log_[done].text, "PAYLOAD DONE INDEX=0 RETURN=0X1234 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=2 DROPPED=0"));
     /* hex through the op, and the counter through the platform. */
     CHECK(find(EV_EMIT, "0XABC") > call);
     CHECK(seen_counters[0] == 1000 && seen_counters[1] == 2000 && count_of(EV_COUNTER) == 2);
-    CHECK(result.lines == 2 && result.dropped == 0 && result.loads == 0 && result.faults == 0 && result.refused == 0);
+    CHECK(result.call[0].lines == 2 && result.call[0].dropped == 0 && result.call[0].loads == 0 && result.call[0].faults == 0 &&
+          result.call[0].refused == 0);
     /* The payload's own bytes are untouched by the runner. */
     CHECK(!memcmp(payload_mem, (uint8_t[]){3, 10, 17}, 3));
 
     /* Return values are printed whatever they are, the biggest included. */
     make_loaded();
     payload_fn = payload_all_ones;
-    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.retval == ~UINT64_C(0));
-    CHECK(find(EV_EMIT, "PAYLOAD RETURN=0XFFFFFFFFFFFFFFFF") >= 0);
+    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.call[0].retval == ~UINT64_C(0));
+    CHECK(find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0XFFFFFFFFFFFFFFFF STACK=OK") >= 0);
     make_loaded();
     payload_fn = payload_noisy;
-    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.retval == 7 && find(EV_EMIT, "PAYLOAD RETURN=0X7") >= 0);
+    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.call[0].retval == 7 && find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0X7 ") >= 0);
     return 0;
 }
 
@@ -297,7 +300,7 @@ static int suite_verify(void)
         CHECK(refused_not_called("PAYLOAD REFUSED=HASH_AT_EL2 INDEX=0 WANT="));
         int line = find(EV_EMIT, "PAYLOAD REFUSED=HASH_AT_EL2");
         CHECK(strstr(log_[line].text, " HAVE=") != NULL);
-        CHECK(result.retval == 0);
+        CHECK(result.called == 0 && result.stopped == 0);
     }
     /* The last byte of the file, and the first byte past it (which is not hashed): only the first is caught. */
     make_loaded();
@@ -329,7 +332,7 @@ static int suite_verify(void)
     make_loaded();
     payload_mem[10] ^= 0x01;
     q1n1_sha256(payload_mem, PAYLOAD_BYTES, table->files[0].file.sha256);
-    CHECK(q1n1_payload_verify_in_place(&loaded) == 0);
+    CHECK(q1n1_payload_verify_in_place(&loaded, 0) == 0);
     CHECK(run() == Q1N1_PAYLOAD_RUN_HASH && refused_not_called("PAYLOAD REFUSED=HASH_AT_EL2"));
     make_loaded();
     loaded.file[0].bytes--;                                      /* the record says another size: the table's is not it */
@@ -348,9 +351,14 @@ static int suite_verify(void)
     loaded.file[0].sha256[31] ^= 1;
     CHECK(run() == Q1N1_PAYLOAD_RUN_HASH);
     make_loaded();
-    CHECK(q1n1_payload_verify_in_place(&loaded) == 1);
+    CHECK(q1n1_payload_verify_in_place(&loaded, 0) == 1);
     loaded.table_base = 0;
-    CHECK(q1n1_payload_verify_in_place(&loaded) == 0);
+    CHECK(q1n1_payload_verify_in_place(&loaded, 0) == 0);
+    /* An index past the files, and a count the record cannot hold, are not payloads that verify. */
+    make_loaded();
+    CHECK(q1n1_payload_verify_in_place(&loaded, 1) == 0 && q1n1_payload_verify_in_place(&loaded, 99) == 0);
+    loaded.count = Q1N1_PAYLOAD_MAX_FILES + 1;
+    CHECK(q1n1_payload_verify_in_place(&loaded, 0) == 0);
     /* Nothing loaded. */
     make_loaded();
     loaded.count = 0;
@@ -372,10 +380,10 @@ static int suite_ops(void)
     CHECK(run() == Q1N1_PAYLOAD_RUN_OK);
     unsigned noise = 0;
     for (unsigned i = 0; i < log_n; i++) noise += log_[i].kind == EV_EMIT && !strcmp(log_[i].text, "PAYLOAD NOISE");
-    CHECK(noise == Q1N1_PAYLOAD_LINES_MAX && result.lines == Q1N1_PAYLOAD_LINES_MAX && result.dropped == 10);
-    CHECK(find(EV_EMIT, "PAYLOAD OPS LOADS=0 FAULTS=0 REFUSED=0 LINES=40 DROPPED=10") >= 0);
+    CHECK(noise == Q1N1_PAYLOAD_LINES_MAX && result.call[0].lines == Q1N1_PAYLOAD_LINES_MAX && result.call[0].dropped == 10);
+    CHECK(find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0X7 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=40 DROPPED=10") >= 0);
     /* The runner's own lines are not charged to the payload's budget, so they all arrive. */
-    CHECK(find(EV_EMIT, "PAYLOAD RETURN=0X7") >= 0 && find(EV_EMIT, "PAYLOAD STACK=OK") >= 0);
+    CHECK(find(EV_EMIT, "PAYLOAD VERIFY=OK") >= 0 && find(EV_EMIT, "PAYLOAD CALL 0 ") >= 0 && find(EV_EMIT, "PAYLOAD DONE INDEX=0") >= 0);
     CHECK(log_n <= Q1N1_PAYLOAD_REGION_LINES);
 
     /* The font and the cap, a NULL line and an empty one. */
@@ -388,13 +396,13 @@ static int suite_ops(void)
     for (unsigned i = 0; i < log_n; i++) if (log_[i].kind == EV_EMIT && log_[i].text[0] == 'X') longest = (int)i;
     CHECK(longest >= 0 && strlen(log_[longest].text) == Q1N1_PAYLOAD_LINE_MAX);      /* cut at the cap, folded up */
     CHECK(log_[longest].text[Q1N1_PAYLOAD_LINE_MAX - 1] == 'X');
-    CHECK(result.lines == 3);                                    /* NULL is not a line; the empty one is */
+    CHECK(result.call[0].lines == 3);                            /* NULL is not a line; the empty one is */
 
     /* load32: every case of the policy, in one payload. */
     make_loaded();
     payload_fn = payload_load32;
     memset(load_rc, 0x7f, sizeof load_rc);
-    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.retval == 14);
+    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.call[0].retval == 14);
     CHECK(load_rc[0] == Q1N1_PAYLOAD_LOAD_OK && load_val[0] == (uint32_t)(0x1000u * 2654435761u));
     CHECK(load_rc[1] == Q1N1_PAYLOAD_LOAD_E_ALIGN && load_val[1] == 0x11111111);
     CHECK(load_rc[2] == Q1N1_PAYLOAD_LOAD_E_ALIGN);
@@ -405,7 +413,7 @@ static int suite_ops(void)
     CHECK(load_rc[9] == Q1N1_PAYLOAD_LOAD_E_OUT);
     CHECK(load_rc[10] == Q1N1_PAYLOAD_LOAD_E_RANGE && load_rc[11] == Q1N1_PAYLOAD_LOAD_OK && load_rc[12] == Q1N1_PAYLOAD_LOAD_E_RANGE);
     CHECK(load_rc[13] == Q1N1_PAYLOAD_LOAD_E_FAULT && load_val[13] == 0x11111111);  /* a fault leaves the word alone */
-    CHECK(result.loads == 5 && result.faults == 1 && result.refused == 9);
+    CHECK(result.call[0].loads == 5 && result.call[0].faults == 1 && result.call[0].refused == 9);
     /* The guarded copy only ever stores into the runner's own variable, never into a payload-chosen address. */
     unsigned guarded = 0;
     for (unsigned i = 0; i < log_n; i++) {
@@ -414,16 +422,16 @@ static int suite_ops(void)
         CHECK(log_[i].c == 4);
         CHECK(log_[i].a < loaded.stack_base || log_[i].a >= loaded.stack_base + loaded.stack_alloc);
     }
-    CHECK(guarded == result.loads && guarded_calls == result.loads);
-    CHECK(find(EV_EMIT, "PAYLOAD OPS LOADS=5 FAULTS=1 REFUSED=9 ") >= 0);
+    CHECK(guarded == result.call[0].loads && guarded_calls == result.call[0].loads);
+    CHECK(find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0XE STACK=OK LOADS=5 FAULTS=1 REFUSED=9 ") >= 0);
 
     /* The budget: Q1N1_PAYLOAD_LOADS_MAX loads succeed and every later one is refused without a guarded read. */
     make_loaded();
     payload_fn = payload_budget;
     CHECK(run() == Q1N1_PAYLOAD_RUN_OK);
-    CHECK(result.retval == (((uint64_t)Q1N1_PAYLOAD_LOADS_MAX << 32) | 10));
+    CHECK(result.call[0].retval == (((uint64_t)Q1N1_PAYLOAD_LOADS_MAX << 32) | 10));
     CHECK(load_rc[0] == Q1N1_PAYLOAD_LOAD_E_BUDGET && guarded_calls == Q1N1_PAYLOAD_LOADS_MAX);
-    CHECK(result.loads == Q1N1_PAYLOAD_LOADS_MAX && result.refused == 10);
+    CHECK(result.call[0].loads == Q1N1_PAYLOAD_LOADS_MAX && result.call[0].refused == 10);
 
     /* The policy function on its own, as a table. */
     uint8_t stack[64] __attribute__((aligned(8)));
@@ -459,13 +467,15 @@ static int suite_guard(void)
 {
     make_loaded();
     payload_fn = payload_hello;
-    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.stack_ok == 1 && find(EV_EMIT, "PAYLOAD STACK=OK") >= 0);
+    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.call[0].stack_ok == 1 && find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0X1234 STACK=OK ") >= 0);
+    CHECK(find(EV_EMIT, "PAYLOAD CHAIN STOPPED") < 0);
     CHECK(((uint64_t *)stack_mem)[0] == UINT64_C(0x5afe5afe5afe5afe) && ((uint64_t *)stack_mem)[1] == UINT64_C(0x5afe5afe5afe5afe));
     make_loaded();
     payload_fn = payload_scribble;
-    CHECK(run() == Q1N1_PAYLOAD_RUN_OK && result.stack_ok == 0);
-    CHECK(find(EV_EMIT, "PAYLOAD STACK=OVERFLOW") >= 0 && find(EV_EMIT, "PAYLOAD STACK=OK") < 0);
-    CHECK(find(EV_EMIT, "PAYLOAD RETURN=0X0") >= 0);              /* it is still reported to the end */
+    /* Running past the stack stops the chain, here after its only payload, and says so. */
+    CHECK(run() == Q1N1_PAYLOAD_RUN_STACK && result.call[0].stack_ok == 0 && result.stopped == 0 && result.called == 1);
+    CHECK(find(EV_EMIT, "PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OVERFLOW ") >= 0 && find(EV_EMIT, " STACK=OK") < 0);
+    CHECK(find(EV_EMIT, "PAYLOAD CHAIN STOPPED INDEX=0 REASON=STACK_OVERFLOW") > find(EV_EMIT, "PAYLOAD DONE"));   /* reported to the end */
     /* The guard words are written after the verification, so a refused payload leaves the stack as it was. */
     make_loaded();
     payload_mem[0] ^= 1;

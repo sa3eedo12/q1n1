@@ -10,9 +10,12 @@
   * ElfCheck: tools/sp11_payload_elfcheck.py against real payload ELFs built with the Makefile's flags: the
     reference payload passes; an absolute pointer table, an absolute address built with MOVZ/MOVK, a writable
     global, a position-dependent link and an unreadable file are each refused.
-  * PayloadBinary: the built `state` payload: entry at offset 0, one page, identical when linked at another
-    base, only the documented MRS and no system-changing instruction, `make payloads` reproducible and
-    running the check, and a payload with an absolute relocation fails the Makefile's build.
+  * PayloadBinary: the built `state` and `psci` payloads: entry at offset 0, within their pages, identical when
+    linked at another base, only what each one's allow-list says (state: the documented MRS; psci: MRS of
+    CurrentEL and MPIDR_EL1 and exactly one `smc #0`; neither: any other system or exclusive instruction, or
+    CNTVOFF_EL2 and CNTPOFF_EL2), `make payloads` reproducible and running the check, and a payload with an
+    absolute relocation fails the Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which
+    tools/test-q1n1-sp11-payload-chain.py also runs against seeded-bad builds.
   * ToolMutants: seeded bugs in the two tools, each of which ManifestTool or ElfCheck must reject (the same
     classes are run against the mutated copy through Q1N1_PAYLOAD_TOOLS_DIR), and an unmutated control.
   * PayloadDefaultOff: with Q1N1_SP11_PAYLOAD at 0 (the default) every file of the runner compiles to nothing,
@@ -94,18 +97,18 @@ class ManifestTool(unittest.TestCase):
 
     def test_writes_the_manifest_and_the_copies_in_capitals(self):
         payload, data = bytes([0x1f, 0x20, 0x03, 0xd5]) * 50, bytes(range(256)) * 28
-        base, paths = self.inputs('ok', {'state.bin': payload, 'data.bin': data})
+        base, paths = self.inputs('ok', {'state.bin': payload, 'data.dat': data})
         done = self.tool_run(base / 'out', *paths)
         self.assertEqual(done.returncode, 0, done.stderr)
         stick = base / 'out' / 'SP11'
         self.assertEqual(sorted(p.name for p in (base / 'out').iterdir()), ['SP11'])
-        self.assertEqual(sorted(p.name for p in stick.iterdir()), ['DATA.BIN', 'PAYLOAD.MAN', 'STATE.BIN'])
+        self.assertEqual(sorted(p.name for p in stick.iterdir()), ['DATA.DAT', 'PAYLOAD.MAN', 'STATE.BIN'])
         self.assertEqual((stick / 'STATE.BIN').read_bytes(), payload)
-        self.assertEqual((stick / 'DATA.BIN').read_bytes(), data)
+        self.assertEqual((stick / 'DATA.DAT').read_bytes(), data)
         magic, version, count, entry, entries = self.decode((stick / 'PAYLOAD.MAN').read_bytes())
         self.assertEqual((magic, version, count, entry), (MANIFEST_MAGIC, 1, 2, 296))
         self.assertEqual(entries, [(len(payload), hashlib.sha256(payload).hexdigest(), '\\SP11\\STATE.BIN'),
-                                   (len(data), hashlib.sha256(data).hexdigest(), '\\SP11\\DATA.BIN')])
+                                   (len(data), hashlib.sha256(data).hexdigest(), '\\SP11\\DATA.DAT')])
 
     def test_prints_what_to_copy_and_the_one_command_to_run(self):
         payload = bytes(64)
@@ -139,7 +142,7 @@ class ManifestTool(unittest.TestCase):
         done = run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined', '-I', str(UEFI), str(harness),
                     str(UEFI / 'preload.c'), str(UEFI / 'sha256.c'), '-o', str(binary)])
         self.assertEqual(done.returncode, 0, done.stderr)
-        base, paths = self.inputs('valid', {'state.bin': bytes(range(100)), 'data.bin': bytes(range(200))})
+        base, paths = self.inputs('valid', {'state.bin': bytes(range(100)), 'data.dat': bytes(range(200))})
         self.assertEqual(self.tool_run(base / 'out', *paths).returncode, 0)
         manifest = base / 'out' / 'SP11' / 'PAYLOAD.MAN'
         self.assertEqual(run([str(binary), str(manifest)]).stdout.strip(), '1')
@@ -339,12 +342,10 @@ class ElfCheck(unittest.TestCase):
 
 
 class PayloadBinary(unittest.TestCase):
-    ALLOWED_REGISTERS = {
-        'currentel', 'midr_el1', 'mpidr_el1', 'id_aa64mmfr0_el1', 'id_aa64mmfr1_el1', 'id_aa64mmfr2_el1', 's3_0_c0_c7_3',
-        's3_0_c0_c7_4', 'id_aa64pfr0_el1', 'id_aa64pfr1_el1', 'hcr_el2', 'sctlr_el2', 'tcr_el2', 'ttbr0_el2', 's3_4_c2_c0_1',
-        'mair_el2', 'vbar_el2', 'cptr_el2', 'cnthctl_el2', 'cntfrq_el0', 'daif', 'spsel'}
-    FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'smc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
-                 'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3', 'ldxr', 'stxr', 'ldaxr', 'stlxr', 'casal', 'swp'}
+    # The allow-list mechanism is tools/sp11_payload_testlib.py's POLICIES and binary_violations, one entry per payload,
+    # shared with the seeded-bug builds of tools/test-q1n1-sp11-payload-chain.py: `state` is MRS only, `psci` is MRS of
+    # CurrentEL and MPIDR_EL1 plus exactly one SMC.
+    POLICY = lib.POLICIES
 
     @classmethod
     def setUpClass(cls):
@@ -356,18 +357,23 @@ class PayloadBinary(unittest.TestCase):
         done = run(['make'] + MAKE_ARGS + [f'OUT={cls.out.relative_to(ROOT)}', 'payloads'])
         if done.returncode:
             raise RuntimeError('make payloads failed:\n' + done.stdout[-2000:] + done.stderr[-2000:])
-        cls.elf, cls.flat = cls.out / 'payloads' / 'state.elf', cls.out / 'payloads' / 'state.bin'
+        cls.bins = {name: (cls.out / 'payloads' / f'{name}.elf', cls.out / 'payloads' / f'{name}.bin') for name in cls.POLICY}
+        cls.elf, cls.flat = cls.bins['state']
 
     def test_entry_is_at_offset_zero(self):
-        data = self.flat.read_bytes()
-        first, second = struct.unpack_from('<II', data)
-        self.assertEqual(first, 0xd503245f, 'BTI c is the first instruction')
-        self.assertEqual(second >> 26, 0b000101, 'then an unconditional PC-relative branch to payload_entry')
+        for name, (_, flat) in self.bins.items():
+            with self.subTest(payload=name):
+                first, second = struct.unpack_from('<II', flat.read_bytes())
+                self.assertEqual(first, 0xd503245f, 'BTI c is the first instruction')
+                self.assertEqual(second >> 26, 0b000101, 'then an unconditional PC-relative branch to payload_entry')
 
-    def test_it_is_one_page_and_has_no_relocation_the_check_refuses(self):
-        self.assertLessEqual(self.flat.stat().st_size, 4096, 'one page: one declared range')
-        done = run(['python3', '-B', str(ROOT / 'tools' / 'sp11_payload_elfcheck.py'), '--readelf', READELF(), str(self.elf)])
-        self.assertEqual(done.returncode, 0, done.stderr)
+    def test_it_stays_within_its_pages_and_has_no_relocation_the_check_refuses(self):
+        for name, (elf, flat) in self.bins.items():
+            with self.subTest(payload=name):
+                self.assertLessEqual(flat.stat().st_size, self.POLICY[name]['bytes'], 'one range is declared whatever its size')
+                done = run(['python3', '-B', str(ROOT / 'tools' / 'sp11_payload_elfcheck.py'), '--readelf', READELF(), str(elf)])
+                self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertLessEqual(self.flat.stat().st_size, 4096, 'the reference payload is one page')
 
     def test_linked_at_another_address_the_bytes_are_the_same(self):
         script = (ROOT / 'payloads' / 'payload.ld').read_text(encoding='utf-8')
@@ -375,47 +381,47 @@ class PayloadBinary(unittest.TestCase):
         moved = SCRATCH / 'moved'
         moved.mkdir(parents=True, exist_ok=True)
         (moved / 'moved.ld').write_text(script.replace('. = 0;', '. = 0x7000000000;'), encoding='utf-8')
-        objs = [str(self.out / 'payloads' / 'start.o'), str(self.out / 'payloads' / 'state.o')]
-        linked = run(['ld.lld'] + lib.makefile_flags('PAYLOAD_LDFLAGS') + ['-T', str(moved / 'moved.ld'), '-o',
-                     str(moved / 'moved.elf')] + objs)
-        self.assertEqual(linked.returncode, 0, linked.stderr)
-        self.assertEqual(run(['llvm-objcopy', '-O', 'binary', str(moved / 'moved.elf'), str(moved / 'moved.bin')]).returncode, 0)
-        self.assertEqual((moved / 'moved.bin').read_bytes(), self.flat.read_bytes(),
-                         'the payload depends on the address it is linked at')
+        for name, (_, flat) in self.bins.items():
+            with self.subTest(payload=name):
+                objs = [str(self.out / 'payloads' / 'start.o'), str(self.out / 'payloads' / f'{name}.o')]
+                linked = run(['ld.lld'] + lib.makefile_flags('PAYLOAD_LDFLAGS') + ['-T', str(moved / 'moved.ld'), '-o',
+                             str(moved / f'{name}-moved.elf')] + objs)
+                self.assertEqual(linked.returncode, 0, linked.stderr)
+                self.assertEqual(run(['llvm-objcopy', '-O', 'binary', str(moved / f'{name}-moved.elf'),
+                                      str(moved / f'{name}-moved.bin')]).returncode, 0)
+                self.assertEqual((moved / f'{name}-moved.bin').read_bytes(), flat.read_bytes(),
+                                 'the payload depends on the address it is linked at')
 
-    def test_only_the_documented_registers_are_read_and_nothing_system_wide_is_executed(self):
-        text = run(['llvm-objdump', '-d', '--no-show-raw-insn', str(self.elf)]).stdout
-        reads, mnemonics = set(), set()
-        alias = {'id_aa64mmfr3_el1': 's3_0_c0_c7_3', 'id_aa64mmfr4_el1': 's3_0_c0_c7_4', 'ttbr1_el2': 's3_4_c2_c0_1'}
-        for line in text.splitlines():
-            found = re.match(r'\s+[0-9a-f]+:\s+(\S+)\s*(.*)$', line)
-            if not found:
-                continue
-            mnemonic, operands = found.group(1).lower(), found.group(2)
-            mnemonics.add(mnemonic)
-            if mnemonic == 'mrs':
-                name = operands.split(',')[-1].strip().lower()
-                reads.add(alias.get(name, name))
-        self.assertEqual(reads, self.ALLOWED_REGISTERS)
-        self.assertEqual(sorted(mnemonics & self.FORBIDDEN), [], 'an instruction a read-only payload has no use for')
-        self.assertGreaterEqual(len(mnemonics), 8)
-
+    def test_the_code_holds_only_what_its_policy_allows(self):
+        # state: MRS of the documented registers and nothing else. psci: MRS of CurrentEL and MPIDR_EL1 and exactly one
+        # `smc #0`. Neither: HVC, SVC, MSR, SYS, DC, IC, TLBI, AT, ERET, WFI, WFE, exclusives or atomics, the timer
+        # offsets CNTVOFF_EL2 and CNTPOFF_EL2, a word that is not a known instruction. Checked by the disassembly and,
+        # independently, by the encoding of every aligned word of the flat binary's code.
+        for name, (elf, flat) in self.bins.items():
+            with self.subTest(payload=name):
+                self.assertEqual(lib.binary_violations(elf, flat, self.POLICY[name], READELF()), [])
+        self.assertEqual(self.POLICY['state']['smc'], 0, 'the reference payload executes no SMC at all')
+        self.assertEqual(self.POLICY['psci']['smc'], 1)
     def test_make_payloads_is_reproducible(self):
         again = BUILD / 'binary-again'
         shutil.rmtree(again, ignore_errors=True)
         done = run(['make'] + MAKE_ARGS + [f'OUT={again.relative_to(ROOT)}', 'payloads'])
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((again / 'payloads' / 'state.bin').read_bytes(), self.flat.read_bytes())
+        for name, (_, flat) in self.bins.items():
+            with self.subTest(payload=name):
+                self.assertEqual((again / 'payloads' / f'{name}.bin').read_bytes(), flat.read_bytes())
 
     def test_the_makefile_runs_the_check_between_the_link_and_the_flattening(self):
         done = run(['make', '-n'] + MAKE_ARGS + ['OUT=build/dryrun-payloads', 'payloads'])
         self.assertEqual(done.returncode, 0, done.stderr)
         lines = done.stdout.splitlines()
-        link = next(i for i, line in enumerate(lines) if 'ld.lld' in line and 'payloads/state.elf' in line)
-        check = next(i for i, line in enumerate(lines) if 'sp11_payload_elfcheck.py' in line)
-        flatten = next(i for i, line in enumerate(lines) if 'objcopy' in line and 'payloads/state.bin' in line)
-        self.assertLess(link, check)
-        self.assertLess(check, flatten)
+        for name in self.bins:
+            with self.subTest(payload=name):
+                link = next(i for i, line in enumerate(lines) if 'ld.lld' in line and f'payloads/{name}.elf' in line)
+                check = next(i for i, line in enumerate(lines) if 'sp11_payload_elfcheck.py' in line and f'payloads/{name}.elf' in line)
+                flatten = next(i for i, line in enumerate(lines) if 'objcopy' in line and f'payloads/{name}.bin' in line)
+                self.assertLess(link, check)
+                self.assertLess(check, flatten)
 
     def test_the_makefile_flags_keep_a_payload_freestanding_and_pc_relative(self):
         cflags = lib.payload_cflags()
@@ -455,7 +461,7 @@ def _tool_mutants():
         ('manifest-accepts-any-name', manifest, "NAME = re.compile(r'^[A-Z0-9_-]{1,8}\\.[A-Z0-9_-]{1,3}$')", "NAME = re.compile(r'^.+$')"),
         ('manifest-allows-the-reserved-name', manifest, '    if name == MANIFEST_NAME:', '    if False:'),
         ('manifest-accepts-an-empty-file', manifest, 'if not 0 < size <= MAX_FILE_BYTES:', 'if not 0 <= size <= MAX_FILE_BYTES:'),
-        ('manifest-accepts-a-short-payload', manifest, 'if index == 0 and size < 4:', 'if index == 0 and size < 0:'),
+        ('manifest-accepts-a-short-payload', manifest, "if kind == 'payload' and size < 4:", "if kind == 'payload' and size < 0:"),
         ('manifest-writes-below-the-wrong-directory', manifest, "STICK_DIR = 'SP11'", "STICK_DIR = 'SP12'"),
         ('manifest-writes-before-validating', manifest, '    manifest, entries = build(paths)\n    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n',
          '    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n    manifest, entries = build(paths)\n'),
@@ -670,7 +676,8 @@ class PayloadDefaultOff(unittest.TestCase):
                              f'{artefact} changed when the runner was built')
         image, normal = (runner / 'q1n1-payload.efi').read_bytes(), (plain / 'q1n1.efi').read_bytes()
         self.assertNotEqual(image, normal)
-        for text in (b'PAYLOAD CALL', b'PAYLOAD VERIFY=OK', b'PAYLOAD REFUSED=', b'PAYLOAD SKIPPED=NOT_AT_EL2', b'PAYLOAD READY'):
+        for text in (b'PAYLOAD CALL', b'PAYLOAD VERIFY=OK', b'PAYLOAD REFUSED=', b'PAYLOAD SKIPPED=NOT_AT_EL2', b'PAYLOAD READY',
+                     b'PAYLOAD DONE', b'PAYLOAD CHAIN STOPPED', b'FILE0_NOT_BIN'):
             self.assertIn(text, image)
             self.assertNotIn(text, normal)
             self.assertNotIn(text, (runner / 'q1n1.efi').read_bytes())

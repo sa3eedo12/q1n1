@@ -307,26 +307,32 @@ static void manifest_make(struct manifest_build *m, unsigned count, const char *
     memcpy(m->bytes, &man, m->size);
 }
 
-/* A stick with a manifest and `count` files: file 0 is the payload, the rest data. */
+/* A stick with a manifest and `count` files: file 0 is the payload, the rest data (`.DAT`, which the runner never
+ * calls: only <stem>.BIN names are payloads). */
 static struct manifest_build good_manifest;
-static const char *const names[6] = {"\\SP11\\STATE.BIN", "\\SP11\\DATA1.BIN", "\\SP11\\DATA2.BIN",
-                                     "\\SP11\\DATA3.BIN", "\\SP11\\DATA4.BIN", "\\SP11\\DATA5.BIN"};
+static const char *const names[6] = {"\\SP11\\STATE.BIN", "\\SP11\\DATA1.DAT", "\\SP11\\DATA2.DAT",
+                                     "\\SP11\\DATA3.DAT", "\\SP11\\DATA4.DAT", "\\SP11\\DATA5.DAT"};
 static uint8_t *good_data[6];
 static uint64_t good_sizes[6] = {2000, 5000, 4096, 4097, 1, 100};
 
-static void good_stick(struct fake_volume *v, unsigned count)
+/* The same, with the files carrying the names given (file i holds the bytes of file i above). */
+static void named_stick(struct fake_volume *v, const char *const paths[], unsigned count)
 {
     for (unsigned i = 0; i < count; i++) {
         good_data[i] = blob(good_sizes[i], (uint8_t)(i + 1));
-        add_file(v, names[i], good_data[i], good_sizes[i]);
+        add_file(v, paths[i], good_data[i], good_sizes[i]);
     }
     /* The manifest holds its own copies of the digests; the file entries own their blobs. */
     uint8_t *copies[6];
     for (unsigned i = 0; i < count; i++) copies[i] = good_data[i];
-    manifest_make(&good_manifest, count, names, copies, good_sizes);
+    manifest_make(&good_manifest, count, paths, copies, good_sizes);
     uint8_t *man = malloc(good_manifest.size);
     memcpy(man, good_manifest.bytes, good_manifest.size);
     add_file(v, Q1N1_PAYLOAD_MANIFEST_PATH, man, good_manifest.size);
+}
+static void good_stick(struct fake_volume *v, unsigned count)
+{
+    named_stick(v, names, count);
 }
 static struct fake_entry *entry_named(struct fake_volume *v, const char *path)
 {
@@ -638,7 +644,7 @@ static int suite_memory(void)
 {
     world_reset();
     good_stick(&volume[0], 5);
-    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.count == 5);
+    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.count == 5 && loaded.code_count == 1);
     /* Five files, the table and the stack: seven allocations, nothing else. */
     CHECK(alloc_calls == 7 && alloc_count == 7 && live_allocations() == 7);
     for (unsigned i = 0; i < 5; i++) {
@@ -680,7 +686,7 @@ static int suite_memory(void)
             CHECK(alloc_log[i].base + alloc_log[i].pages * 4096 <= alloc_log[j].base ||
                   alloc_log[j].base + alloc_log[j].pages * 4096 <= alloc_log[i].base);
     q1n1_payload_release(&bs, &loaded);
-    CHECK(live_allocations() == 0 && bad_frees == 0 && loaded.count == 0 && loaded.table_base == 0);
+    CHECK(live_allocations() == 0 && bad_frees == 0 && loaded.count == 0 && loaded.code_count == 0 && loaded.table_base == 0);
 
     /* A failure at each allocation frees what came before it: the files, then the table, then the stack. */
     for (unsigned at = 1; at <= 4; at++) {
@@ -704,6 +710,114 @@ static int suite_memory(void)
     q1n1_payload_release(&bs, &loaded);
     q1n1_payload_release(&bs, &loaded);
     CHECK(alloc_calls == 0 && bad_frees == 0);
+    return 0;
+}
+
+/* ---- kinds -------------------------------------------------------------------------------------------- */
+
+/* The kind of every file of a stick, as the allocation types say it: 1 payload, 2 data. */
+static int kinds_are(const unsigned want[], unsigned count)
+{
+    if (loaded.count != count) return 0;
+    for (unsigned i = 0; i < count; i++) {
+        const struct fake_allocation *a = allocation_at(loaded.file[i].base);
+        if (loaded.file[i].memory_type != want[i] || !a || a->type != want[i]) return 0;
+    }
+    return 1;
+}
+
+static int suite_kinds(void)
+{
+    /* The rule on its own: <stem>.BIN in any case is a payload and nothing else is, so a data file can never be
+     * called by being named like a payload in part. The stem must not be empty, and the last component of the
+     * path decides. */
+    static const struct { const char *path; int code; } rule[] = {
+        {"\\SP11\\STATE.BIN", 1}, {"\\SP11\\state.bin", 1}, {"\\SP11\\State.Bin", 1}, {"\\SP11\\sTaTe.bIn", 1},
+        {"\\SP11\\A.BIN", 1}, {"\\SP11\\SUB\\X.BIN", 1}, {"\\SP11\\A.B.BIN", 1}, {"\\A.BIN", 1},
+        {"\\SP11\\X.TXT\\Y.BIN", 1},
+        {"\\SP11\\DATA.DAT", 0}, {"\\SP11\\X.BIN.TXT", 0}, {"\\SP11\\X.BINX", 0}, {"\\SP11\\XBIN", 0}, {"\\SP11\\BIN", 0},
+        {"\\SP11\\X.BI", 0}, {"\\SP11\\.BIN", 0}, {"\\.BIN", 0}, {"\\SP11\\SUB.BIN\\X.TXT", 0}, {"\\SP11\\X BIN", 0},
+        {"\\SP11\\X-BIN", 0}, {"\\SP11\\X_BIN", 0}, {"BIN", 0}, {".BIN", 0}, {"", 0},
+    };
+    for (unsigned i = 0; i < sizeof rule / sizeof rule[0]; i++) {
+        if (q1n1_payload_path_is_code(rule[i].path) != rule[i].code) fprintf(stderr, "kind of '%s': want %d\n", rule[i].path, rule[i].code);
+        CHECK(q1n1_payload_path_is_code(rule[i].path) == rule[i].code);
+    }
+
+    /* Mixed order: the kind follows the name, not the index, and the types the firmware was asked for follow the kind. */
+    static const char *const mixed[5] = {"\\SP11\\A.BIN", "\\SP11\\B.DAT", "\\SP11\\C.bin", "\\SP11\\D.TXT", "\\SP11\\E.Bin"};
+    world_reset();
+    named_stick(&volume[0], mixed, 5);
+    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.count == 5 && loaded.code_count == 3);
+    CHECK(kinds_are((const unsigned[]){1, 2, 1, 2, 1}, 5));
+    for (unsigned i = 0; i < 5; i++) {
+        const struct q1n1_payload_file *f = &loaded.file[i];
+        CHECK(q1n1_payload_file_is_code(f) == (i == 0 || i == 2 || i == 4));
+        CHECK(!memcmp((void *)(uintptr_t)f->base, good_data[i], good_sizes[i]));      /* every file is read whatever it is */
+        CHECK(strstr(loaded.note[i], i == 0 || i == 2 || i == 4 ? " TYPE=1" : " TYPE=2") != NULL);
+    }
+    /* The table is the same for both kinds, so a payload finds data and other payloads alike. */
+    const struct q1n1_preload_cache *cache = (const void *)(uintptr_t)loaded.table_base;
+    CHECK(cache->count == 5);
+    for (unsigned i = 0; i < 5; i++) CHECK(q1n1_preload_verify(cache, i) == 1 && !strcmp(cache->files[i].file.path, mixed[i]));
+    q1n1_payload_release(&bs, &loaded);
+    CHECK(live_allocations() == 0 && loaded.code_count == 0);
+
+    /* All five files may be payloads: the limit is on files, not on kinds. Any case of the extension counts. */
+    static const char *const all_code[5] = {"\\SP11\\A.BIN", "\\sp11\\b.bin", "\\SP11\\C.Bin", "\\SP11\\D.bIN", "\\SP11\\E.bin"};
+    world_reset();
+    named_stick(&volume[0], all_code, 5);
+    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.count == 5 && loaded.code_count == 5);
+    CHECK(kinds_are((const unsigned[]){1, 1, 1, 1, 1}, 5));
+    world_reset();
+    named_stick(&volume[0], names, 6);
+    CHECK(prepare() == Q1N1_PAYLOAD_E_TOO_MANY_FILES && alloc_calls == 0);
+    static const char *const six_code[6] = {"\\SP11\\A.BIN", "\\SP11\\B.BIN", "\\SP11\\C.BIN", "\\SP11\\D.BIN", "\\SP11\\E.BIN", "\\SP11\\F.BIN"};
+    world_reset();
+    named_stick(&volume[0], six_code, 6);
+    CHECK(prepare() == Q1N1_PAYLOAD_E_TOO_MANY_FILES && diag.got == 6 && diag.expected == 5 && alloc_calls == 0 && live_allocations() == 0);
+
+    /* Names that merely look like a payload's are data: only file 0's rule would otherwise save them. */
+    static const char *const lookalikes[5] = {"\\SP11\\X.BIN", "\\SP11\\Y.BIN.TXT", "\\SP11\\Z.BINX", "\\SP11\\BIN", "\\SP11\\.BIN"};
+    world_reset();
+    named_stick(&volume[0], lookalikes, 5);
+    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.code_count == 1);
+    CHECK(kinds_are((const unsigned[]){1, 2, 2, 2, 2}, 5));
+
+    /* File 0 must be a payload: a manifest that starts with data is refused before anything is allocated, whatever
+     * follows it, and without opening a single file but the manifest. */
+    static const char *const starts_with_data[][2] = {
+        {"\\SP11\\STATE.DAT", "\\SP11\\B.BIN"}, {"\\SP11\\state.dat", "\\SP11\\B.BIN"}, {"\\SP11\\X.BINX", "\\SP11\\B.BIN"},
+        {"\\SP11\\BIN", "\\SP11\\B.BIN"}, {"\\SP11\\.BIN", "\\SP11\\B.BIN"}, {"\\SP11\\X.BIN.TXT", "\\SP11\\B.BIN"},
+    };
+    for (unsigned i = 0; i < sizeof starts_with_data / sizeof starts_with_data[0]; i++) {
+        world_reset();
+        named_stick(&volume[0], starts_with_data[i], 2);
+        int err = prepare();
+        if (err != Q1N1_PAYLOAD_E_FILE0_NOT_BIN) fprintf(stderr, "file 0 '%s': got %d\n", starts_with_data[i][0], err);
+        CHECK(err == Q1N1_PAYLOAD_E_FILE0_NOT_BIN);
+        CHECK(alloc_calls == 0 && live_allocations() == 0 && volume[0].file_opens == 1 && open_handles == 0);
+        CHECK(loaded.count == 0 && loaded.code_count == 0);
+    }
+    char text[200];
+    q1n1_payload_refusal_line(Q1N1_PAYLOAD_E_FILE0_NOT_BIN, &diag, text, sizeof text);
+    CHECK(!strcmp(text, "PAYLOAD REFUSED=FILE0_NOT_BIN"));
+    CHECK(strcmp(q1n1_payload_err_name(Q1N1_PAYLOAD_E_FILE0_NOT_BIN), "UNKNOWN") != 0);
+    /* The count rule is checked first, so that six files that start with data are told what they are first told. */
+    static const char *const six_data_first[6] = {"\\SP11\\A.DAT", "\\SP11\\B.BIN", "\\SP11\\C.BIN", "\\SP11\\D.BIN", "\\SP11\\E.BIN", "\\SP11\\F.BIN"};
+    world_reset();
+    named_stick(&volume[0], six_data_first, 6);
+    CHECK(prepare() == Q1N1_PAYLOAD_E_TOO_MANY_FILES);
+    /* A lone data file is no stick either. */
+    static const char *const lone_data[1] = {"\\SP11\\A.DAT"};
+    world_reset();
+    named_stick(&volume[0], lone_data, 1);
+    CHECK(prepare() == Q1N1_PAYLOAD_E_FILE0_NOT_BIN && alloc_calls == 0);
+    /* And a lone payload in any case is a stick. */
+    static const char *const lone_code[1] = {"\\SP11\\a.bin"};
+    world_reset();
+    named_stick(&volume[0], lone_code, 1);
+    CHECK(prepare() == Q1N1_PAYLOAD_OK && loaded.count == 1 && loaded.code_count == 1);
     return 0;
 }
 
@@ -763,7 +877,7 @@ int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"volume", suite_volume}, {"manifest", suite_manifest}, {"files", suite_files}, {"memory", suite_memory},
-        {"lines", suite_lines},
+        {"kinds", suite_kinds}, {"lines", suite_lines},
     };
     unsigned ran = 0;
     for (unsigned i = 0; i < sizeof suites / sizeof suites[0]; i++) {

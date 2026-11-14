@@ -6,15 +6,18 @@
     python3 tools/test-q1n1-sp11-payload.py
 
 Runs, under ASan and UBSan:
-  * Native: the four native programs, each built from the real sources --
+  * Native: the native programs, each built from the real sources --
     tools/test-q1n1-sp11-payload-load.c (the volume-only loader against a fake firmware: ConnectController
     and every other call outside the loader's list is a tripwire, a manifest on a second volume is never
-    read, nothing is written), -plan.c (declared ranges, the memory-map rules slbounce applies, the text
-    layer, the ABI layout), -run.c (the EL2 sequence, the second hash, the ops and the load32 policy) and
-    -state.c (the reference payload against a scripted register file);
+    read, nothing is written; which files are payloads by name), -plan.c (declared ranges, the memory-map
+    rules slbounce applies, the text layer, the ABI layout), -run.c (the EL2 sequence for one payload, the
+    second hash, the ops and the load32 policy), -chain.c (several payloads in one boot), -state.c (the
+    reference payload against a scripted register file) and -psci.c (the psci payload against a scripted
+    register file and a scripted SMC);
   * Mutants: seeded bugs, each applied to a copy of the sources under build/, each of which the programs
     must reject (a failing, hanging or -- for the ABI -- non-compiling program catches it), against an
-    unmutated control that must pass the same way;
+    unmutated control that must pass the same way. The chain's and psci's own seeded bugs are in
+    tools/test-q1n1-sp11-payload-chain.py, which runs them through the same machinery;
   * SourceAudit: what no run can show -- SPDX lines, that the loader makes only its listed firmware calls,
     that nothing of the runner stores, that the main.c glue forwards loads only and is wholly under the
     gate, that nothing of it sits between the last GetMemoryMap and ExitBootServices, the constants shared
@@ -52,22 +55,27 @@ RUN_TIMEOUT = 120
 PROGRAMS = {
     'load': ('tools/test-q1n1-sp11-payload-load.c',
              ['sp11-payload-load.c', 'sp11-payload-plan.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'],
-             5, 13000, 'loader'),
+             6, 13000, 'loader'),
     'plan': ('tools/test-q1n1-sp11-payload-plan.c', ['sp11-payload-plan.c', 'sp11-payload-text.c'], 6, 20000, 'plan'),
     'run': ('tools/test-q1n1-sp11-payload-run.c',
             ['sp11-payload-run.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'], 5, 140, 'run'),
+    'chain': ('tools/test-q1n1-sp11-payload-chain.c',
+              ['sp11-payload-run.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'], 6, 220, 'chain'),
     'state': ('tools/test-q1n1-sp11-payload-state.c', ['sp11-payload-text.c'], 3, 900, 'state'),
+    'psci': ('tools/test-q1n1-sp11-payload-psci.c', ['sp11-payload-text.c'], 7, 90000, 'psci'),
 }
+# The programs that test a payload's own source, built natively with a scripted register file (and SMC).
+HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c'}
 # What a copy of the tree needs: the runner, its dependencies, the survey's text file (the panel layout the
 # runner copies is compared with it) and the payload sources.
 UEFI_COPIED = sorted(p.name for p in UEFI.glob('sp11-payload*')) + [
     'preload.c', 'preload.h', 'sha256.c', 'sha256.h', 'efi.h', 'sp11-ebs-ranges.h', 'sp11-fbgop.c', 'sp11-fbgop.h',
     'sp11-stk-text.c', 'sp11-stk-survey.h']
-PAYLOADS_COPIED = ['payload-util.h', 'state.c']
+PAYLOADS_COPIED = ['payload-util.h', 'state.c', 'psci.c']
 
 NEW_SOURCES = sorted(UEFI.glob('sp11-payload*')) + sorted(PAYLOADS.glob('*')) + sorted(
     (ROOT / 'tools').glob('test-q1n1-sp11-payload*')) + sorted((ROOT / 'tools').glob('sp11_payload_*')) + sorted(
-    (ROOT / 'tools' / 'testdata').glob('sp11-payload-fixture-*'))
+    (ROOT / 'tools' / 'testdata').glob('sp11-payload-*'))
 
 
 def run(cmd, cwd=ROOT, timeout=None, **kw):
@@ -89,10 +97,10 @@ def build_program(name, uefi, payloads, out_dir, relaxed=False):
     out_dir.mkdir(parents=True, exist_ok=True)
     test_c, libs = PROGRAMS[name][:2]
     binary = out_dir / f'test-{name}'
-    flags = ['-I', str(uefi), '-I', str(payloads), '-DQ1N1_PAYLOAD_HOST_TEST=1'] if name == 'state' else ['-I', str(uefi)]
+    flags = ['-I', str(uefi), '-I', str(payloads), '-DQ1N1_PAYLOAD_HOST_TEST=1'] if name in HOST_PAYLOADS else ['-I', str(uefi)]
     objects = [str((Path(uefi) / lib).resolve()) for lib in libs]
-    if name == 'state':
-        objects.append(str((Path(payloads) / 'state.c').resolve()))
+    if name in HOST_PAYLOADS:
+        objects.append(str((Path(payloads) / HOST_PAYLOADS[name]).resolve()))
     if name == 'plan':
         survey = Path(uefi) / 'sp11-stk-text.c'
         if survey.is_file():
@@ -175,7 +183,7 @@ class Native(unittest.TestCase):
 # a change to the source that moves a target is reported as a stale mutant and not as a survivor.
 # (name, file below the copy's root, [(needle, replacement)], programs that must reject it, build error that
 # counts as rejecting it). The programs are listed in the order they are tried.
-ALL = ['load', 'plan', 'run', 'state']
+ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci']
 LOAD = 'uefi/sp11-payload-load.c'
 PLAN = 'uefi/sp11-payload-plan.c'
 RUNC = 'uefi/sp11-payload-run.c'
@@ -206,7 +214,7 @@ MUTANTS = [
     ('loader-leaves-the-last-page-unzeroed', LOAD, [(
         '    zero((uint8_t *)(uintptr_t)entry->base + bytes, entry->alloc - bytes);\n', '')], ['load'], None),
     ('loader-allocates-the-payload-as-data', LOAD, [(
-        'entry->memory_type = index == 0 ? Q1N1_PAYLOAD_TYPE_CODE : Q1N1_PAYLOAD_TYPE_DATA;',
+        'entry->memory_type = q1n1_payload_path_is_code(want->path) ? Q1N1_PAYLOAD_TYPE_CODE : Q1N1_PAYLOAD_TYPE_DATA;',
         'entry->memory_type = Q1N1_PAYLOAD_TYPE_DATA;')], ['load'], None),
     ('loader-release-leaks-the-stack', LOAD, [(
         '    if (loaded->stack_base) bs->free_pages(loaded->stack_base, loaded->stack_alloc / PAGE_BYTES);\n', '')],
@@ -294,13 +302,13 @@ MUTANTS = [
     ('plan-map-reports-the-wrong-range', PLAN, [('        *failing = r;\n', '        *failing = 0;\n')], ['plan'], None),
     # -- the EL2 half: the second hash, the order, the ops
     ('run-skips-the-second-hash', RUNC, [(
-        '    if (!q1n1_payload_verify_in_place(loaded)) {', '    if (0) {')], ['run'], None),
+        '    if (!q1n1_payload_verify_in_place(loaded, index)) {', '    if (0) {')], ['run'], None),
     ('run-names-the-call-after-making-it', RUNC, [(
-        '    emit_line(env, &line);\n    uint64_t value = env->call(loaded->file[0].base, &args, args.stack_base + args.stack_size);\n',
-        '    uint64_t value = env->call(loaded->file[0].base, &args, args.stack_base + args.stack_size);\n    emit_line(env, &line);\n')],
+        '        emit_line(env, &line);\n        uint64_t value = env->call(file->base, &args, args.stack_base + args.stack_size);\n',
+        '        uint64_t value = env->call(file->base, &args, args.stack_base + args.stack_size);\n        emit_line(env, &line);\n')],
      ['run'], None),
     ('run-calls-without-cache-maintenance', RUNC, [(
-        '    env->sync_code(loaded->file[0].base, loaded->file[0].alloc);\n', '')], ['run'], None),
+        '        env->sync_code(file->base, file->alloc);\n', '')], ['run'], None),
     ('run-does-not-check-the-table-count', RUNC, [(
         '    if (table->count != loaded->count) return 0;\n', '')], ['run'], None),
     ('run-does-not-check-the-table-digest', RUNC, [('        if (different) return 0;', '        if (0) return 0;')], ['run'], None),
@@ -330,21 +338,21 @@ MUTANTS = [
         '    while (line[n] && n < Q1N1_PAYLOAD_LINE_MAX) {', '    while (line[n] && n < Q1N1_PAYLOAD_LINE_MAX + 40) {')], ['run'], None),
     ('run-does-not-check-the-stack-guard', RUNC, [('intact &= guard[i] == GUARD_PATTERN;', 'intact &= 1;')], ['run'], None),
     ('run-an-empty-load-is-not-refused', RUNC, [(
-        '    if (!loaded->count || !loaded->stack_base) {', '    if (0) {')], ['run'], None),
+        '    if (!loaded->count || !loaded->stack_base || !code) {', '    if (0) {')], ['run'], None),
     ('run-passes-the-wrong-stack-top', RUNC, [(
-        'env->call(loaded->file[0].base, &args, args.stack_base + args.stack_size);',
-        'env->call(loaded->file[0].base, &args, args.stack_base);')], ['run'], None),
+        'env->call(file->base, &args, args.stack_base + args.stack_size);',
+        'env->call(file->base, &args, args.stack_base);')], ['run'], None),
     ('run-passes-the-wrong-abi-version', RUNC, [(
         '    args.version = Q1N1_PAYLOAD_ABI_VERSION;', '    args.version = Q1N1_PAYLOAD_ABI_VERSION + 1;')], ['run'], None),
     ('run-does-not-clear-the-arguments', RUNC, [(
         '    for (size_t i = 0; i < sizeof args; i++) raw[i] = 0;', '    for (size_t i = 0; i < sizeof args; i++) raw[i] = 0xa5;')],
      ['run'], None),
-    ('run-drops-the-return-value', RUNC, [('    result->retval = value;', '    result->retval = 0;')], ['run'], None),
+    ('run-drops-the-return-value', RUNC, [('        done->retval = value;', '        done->retval = 0;')], ['run'], None),
     ('run-reports-a-hash-refusal-as-success', RUNC, [(
         '        result->status = Q1N1_PAYLOAD_RUN_HASH;', '        result->status = Q1N1_PAYLOAD_RUN_OK;')], ['run'], None),
     ('run-calls-a-payload-that-failed-its-hash', RUNC, [(
-        '        result->status = Q1N1_PAYLOAD_RUN_HASH;\n        return result->status;\n',
-        '        result->status = Q1N1_PAYLOAD_RUN_HASH;\n')], ['run'], None),
+        '            emit_chain_stopped(env, index, "HASH_AT_EL2");\n            return result->status;\n',
+        '            emit_chain_stopped(env, index, "HASH_AT_EL2");\n')], ['run'], None),
     # -- text, ABI, and the reference payload
     ('text-hex-in-lower-case', TEXT, [(
         '    do { digits[n++] = "0123456789ABCDEF"[value & 15]; value >>= 4; } while (value);',

@@ -8,22 +8,26 @@
 Builds the runner (SP11=1 PAYLOAD=1, fixture USB and stage tables as the other SP11 suites do), the
 reference payload `state`, five test payloads (tools/testdata/sp11-payload-fixture-*.c, built with the
 Makefile's own flags) and two copies of the runner with one edit each, lays each out as the stick is laid out
-(SP11\\Q1N1-PAYLOAD.EFI, SP11\\PAYLOAD.MAN, SP11\\STATE.BIN) and boots QEMU's EDK2 shell on it, up to seventeen
-boots at three at a time. `virtualization=on` gives the runner a real EL2, so the whole path runs: the loader,
-the declared ranges, a real ExitBootServices, the second hash, the cache maintenance, the call on the payload
-stack, the ops (including a guarded load that really faults and recovers) and the return. `virtualization=off`
-gives EL1: the runner must print PAYLOAD SKIPPED=NOT_AT_EL2 and call nothing.
+(SP11\\Q1N1-PAYLOAD.EFI, SP11\\PAYLOAD.MAN, SP11\\STATE.BIN and the data file SP11\\DATA.DAT, which is listed in
+the manifest and never called) and boots QEMU's EDK2 shell on it, up to seventeen boots at three at a time.
+`virtualization=on` gives the runner a real EL2, so the whole path runs: the loader, the declared ranges, a real
+ExitBootServices, the second hash, the cache maintenance, the call on the payload stack, the ops (including a
+guarded load that really faults and recovers) and the return. `virtualization=off` gives EL1: the runner must
+print PAYLOAD SKIPPED=NOT_AT_EL2 and call nothing. The chain (several payloads in one boot, its stop conditions,
+the per-payload budgets and the `psci` payload) is in test-q1n1-sp11-payload-qemu-chain.py, which reuses the
+helpers of this file.
 
 What it proves: the full flow for `state`, with every register it prints equal to the one q1n1's own page prints;
 every refusal before ExitBootServices -- no manifest, a bad manifest, a hash mismatch, six files, a path outside
 \\SP11\\, a manifest that is only on a second volume, and a declared table that does not pass the memory map --
 returns EFI_ABORTED to the Shell with a PAYLOAD line and never prints "Leaving firmware now"; that the declared
 variable is taken back after a late refusal; that no file of either volume changes; that the budgets, the load32
-policy and the stack guard behave on the real call path; that a payload that never returns is named by the last
-line; and that a payload that faults reaches q1n1's fault page. The panel: QEMU's ramfb is 800x600 at most, the
-page fills it and the region (which is computed for the unit's far larger panel) has no rows, so the stock run
-draws nothing on QEMU; a copy that forces a region onto the screen shows that the drawing path renders the lines.
-What QEMU cannot show is the real region on the unit's panel (hardware NOT RUN).
+policy and the stack guard (a payload that overwrites it ends the chain) behave on the real call path; that a
+payload that never returns is named by the last line; and that a payload that faults reaches q1n1's fault page.
+The panel: QEMU's ramfb is 800x600 at most, the page fills it and the region (which is computed for the unit's
+far larger panel) has no rows, so the stock run draws nothing on QEMU; a copy that forces a region onto the screen
+shows that the drawing path renders the lines. What QEMU cannot show is the real region on the unit's panel
+(hardware NOT RUN).
 
 QEMU and its EDK2 are a model, not the Surface: its firmware, memory map and EL2 entry differ, and slbounce is
 absent, so ExitBootServices here is the real one and nothing about the scoped sweep is exercised. Evidence:
@@ -51,6 +55,15 @@ import sp11_payload_testlib as lib  # noqa: E402
 BUILD = ROOT / 'build' / 'sp11-payload-qemu'
 ENV = lib.ENV
 GUID = '1A3C9E02-7B6F-4D81-9C2E-535031314552'
+SP11_VARS = ['SP11=1', 'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixture.c',
+             'SP11_STAGE_TABLE_C=tools/testdata/sp11-stage-table-fixture.c']
+# The one edit that forces the payload page onto QEMU's 800x600 screen (file, needle, replacement): the region computed
+# for the unit's far larger panel has no rows there, so the stock runner draws nothing under QEMU.
+DRAW_EDIT = ('platform/uefi/main.c',
+             '    q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);\n',
+             '    q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);\n'
+             '    payload_page.placement = Q1N1_PAYLOAD_REGION_RIGHT;\n    payload_page.scale = fb.scale;\n'
+             '    payload_page.col0 = 14;\n    payload_page.row0 = 1;\n    payload_page.rows = 28;\n')
 PINNED_SHELL = os.environ.get('SP11_UEFI_SHELL')
 FONT_LINE = re.compile(r'[A-Z0-9 :\-./=?()_]{1,100}')
 STATE_KEYS = ['CURRENTEL', 'MIDR_EL1', 'MPIDR_EL1', 'ID_AA64MMFR0_EL1', 'ID_AA64MMFR1_EL1', 'ID_AA64MMFR2_EL1',
@@ -179,8 +192,7 @@ class PayloadQemu(unittest.TestCase):
             raise unittest.SkipTest('no EDK2 aarch64 firmware (set Q1N1_EDK2_CODE)')
         shutil.rmtree(BUILD, ignore_errors=True)
         BUILD.mkdir(parents=True)
-        fixtures = ['SP11=1', 'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixture.c',
-                    'SP11_STAGE_TABLE_C=tools/testdata/sp11-stage-table-fixture.c']
+        fixtures = SP11_VARS
         out = BUILD / 'out'
         done = subprocess.run(['make', '-f', 'platform/uefi/Makefile', f'OUT={out.relative_to(ROOT)}', '-j4', 'PAYLOAD=1']
                               + fixtures + ['payload-runner', 'payloads'], cwd=ROOT, env=ENV, capture_output=True, text=True)
@@ -195,12 +207,7 @@ class PayloadQemu(unittest.TestCase):
         # the page fills it, and the real region (computed for the unit's panel, which is far larger) has no rows.
         cls.variant = cls._variant('refuse', 'platform/uefi/sp11-payload-plan.c', '#define ATTRIBUTE_WB (UINT64_C(1) << 3)',
                                    '#define ATTRIBUTE_WB (UINT64_C(1) << 4)', fixtures)
-        cls.drawn = cls._variant(
-            'draw', 'platform/uefi/main.c',
-            '    q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);\n',
-            '    q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);\n'
-            '    payload_page.placement = Q1N1_PAYLOAD_REGION_RIGHT;\n    payload_page.scale = fb.scale;\n'
-            '    payload_page.col0 = 14;\n    payload_page.row0 = 1;\n    payload_page.rows = 28;\n', fixtures)
+        cls.drawn = cls._variant('draw', *DRAW_EDIT, fixtures)
         cls.fixture = {}
         for name in ('lines', 'loads', 'overflow', 'hang', 'fault'):
             built, _, flat = lib.build_payload(ROOT / 'tools' / 'testdata' / f'sp11-payload-fixture-{name}.c', BUILD / 'fixtures', name=name)
@@ -232,11 +239,11 @@ class PayloadQemu(unittest.TestCase):
     @classmethod
     def _boots(cls):
         data = bytes(range(251)) * 20
-        good = stick(cls.state, [('DATA.BIN', data)])
+        good = stick(cls.state, [('DATA.DAT', data)])
         decoy = stick(cls.state)
         boots = [
-            Boot('ok', good, script(), shot_after=2, marker='PAYLOAD OPS'),
-            Boot('draw', good, script(), shot_after=2, marker='PAYLOAD OPS', image=cls.drawn),
+            Boot('ok', good, script(), shot_after=2, marker='PAYLOAD DONE'),
+            Boot('draw', good, script(), shot_after=2, marker='PAYLOAD DONE', image=cls.drawn),
             Boot('el1', good, script(), el2=False, marker='PAYLOAD SKIPPED=NOT_AT_EL2'),
             Boot('preflight', stick(cls.state), script(options=''), el2=False),
             Boot('noman', {}, script()),
@@ -249,14 +256,14 @@ class PayloadQemu(unittest.TestCase):
             Boot('variant', good, script(before=f'setvar Q1N1Sp11EbsRanges -guid {GUID} -bs =01\necho CONTROL_BEGIN\n'
                                          f'dmpstore -guid {GUID}\necho CONTROL_END\n',
                                          after=f'echo AFTER_BEGIN\ndmpstore -guid {GUID}\necho AFTER_END\n'), image=cls.variant),
-            Boot('lines', stick(cls.fixture['lines']), script(), marker='PAYLOAD OPS'),
-            Boot('loads', stick(cls.fixture['loads']), script(), marker='PAYLOAD OPS'),
-            Boot('overflow', stick(cls.fixture['overflow']), script(), marker='PAYLOAD OPS'),
+            Boot('lines', stick(cls.fixture['lines']), script(), marker='PAYLOAD DONE'),
+            Boot('loads', stick(cls.fixture['loads']), script(), marker='PAYLOAD DONE'),
+            Boot('overflow', stick(cls.fixture['overflow']), script(), marker='PAYLOAD CHAIN STOPPED'),
             Boot('hang', stick(cls.fixture['hang']), script(), marker='PAYLOAD CALL', shot_after=6),
             Boot('fault', stick(cls.fixture['fault']), script(), marker='PAYLOAD CALL', shot_after=6),
         ]
         if PINNED_SHELL and Path(PINNED_SHELL).is_file():
-            boots.append(Boot('pinned', good, script(), pinned=True, marker='PAYLOAD OPS'))
+            boots.append(Boot('pinned', good, script(), pinned=True, marker='PAYLOAD DONE'))
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             done = list(pool.map(lambda b: run_boot(b, cls.runner, cls.firmware), boots))
         return {b.name: b for b in done}
@@ -274,13 +281,13 @@ class PayloadQemu(unittest.TestCase):
     # -- the whole flow ---------------------------------------------------------------------------------------------
     def check_happy_path(self, name):
         text = self.text(name)
-        self.assert_marker(name, 'PAYLOAD OPS')
+        self.assert_marker(name, 'PAYLOAD DONE')
         before, after = text.split('EL2 CONFIRMED AFTER EXITBOOTSERVICES', 1)
         digest = sha(self.state)[:16].upper()
         # Before the bounce, on the firmware console: what was loaded and that the table passed.
         self.assertRegex(before, rf'PAYLOAD LOADED INDEX=0 BASE=0X[0-9A-F]+ BYTES={len(self.state)} SHA={digest} TYPE=1')
         self.assertRegex(before, r'PAYLOAD LOADED INDEX=1 BASE=0X[0-9A-F]+ BYTES=5020 SHA=[0-9A-F]{16} TYPE=2')
-        self.assertIn('PAYLOAD READY FILES=2 RANGES=5', before)
+        self.assertIn('PAYLOAD READY FILES=2 RANGES=5 CODE=1', before)
         self.assertLess(before.index('PAYLOAD READY'), before.index('Leaving firmware now'))
         self.assertIn('SP11 EBS: set_variable=0x0 ranges=5 chunk=0x100000', before)
         rows = re.findall(r'SP11 EBS: r(\d+) (\w+) base=0x[0-9A-F]+ size=0x[0-9A-F]+ desc=(\d+) type=(\d+) attr=(0x[0-9A-F]+) '
@@ -297,11 +304,11 @@ class PayloadQemu(unittest.TestCase):
         self.assertEqual([line for line in lines if line.startswith('PAYLOAD LOADED')], [
             line for line in self.payload_lines(before) if line.startswith('PAYLOAD LOADED')], 'the notes are replayed unchanged')
         at = lines.index('PAYLOAD VERIFY=OK')
-        self.assertEqual(lines[at + 1], f'PAYLOAD CALL {digest}')
+        self.assertEqual(lines[at + 1], f'PAYLOAD CALL 0 {digest}')
         state = [line for line in lines[at + 2:] if line.startswith('PAYLOAD STATE ')]
         self.assertEqual([line.split('=')[0][len('PAYLOAD STATE '):] for line in state], STATE_KEYS)
-        self.assertEqual(lines[-3:], ['PAYLOAD RETURN=0X0', 'PAYLOAD STACK=OK',
-                                      'PAYLOAD OPS LOADS=0 FAULTS=0 REFUSED=0 LINES=21 DROPPED=0'])
+        self.assertEqual(lines[-1], 'PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=21 DROPPED=0')
+        self.assertEqual(sum(line.startswith('PAYLOAD CALL ') for line in lines), 1, 'the data file is not called')
         for line in lines:
             self.assertRegex(line, FONT_LINE, line)
         self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
@@ -341,7 +348,7 @@ class PayloadQemu(unittest.TestCase):
     def test_at_el1_the_runner_says_so_and_calls_nothing(self):
         self.assert_marker('el1', 'PAYLOAD SKIPPED=NOT_AT_EL2')
         before, after = self.text('el1').split('EL2 NOT REACHED - STILL IN EL1', 1)
-        self.assertIn('PAYLOAD READY FILES=2 RANGES=5', before)
+        self.assertIn('PAYLOAD READY FILES=2 RANGES=5 CODE=1', before)
         self.assertNotIn('PAYLOAD CALL', after)
         self.assertNotIn('PAYLOAD STATE', self.text('el1'))
         self.assertNotIn('SYNCHRONOUS EXCEPTION', self.text('el1'))
@@ -408,38 +415,38 @@ class PayloadQemu(unittest.TestCase):
         lines = self.payload_lines(self.text('lines'))
         fixture = [line for line in self.text('lines').split('\n') if line.startswith('FIXTURE LINE ')]
         self.assertEqual(fixture, [f'FIXTURE LINE 0X{i:X}' for i in range(40)])
-        self.assertEqual(lines[-3:], ['PAYLOAD RETURN=0X1234', 'PAYLOAD STACK=OK',
-                                      'PAYLOAD OPS LOADS=0 FAULTS=0 REFUSED=0 LINES=40 DROPPED=5'])
+        self.assertEqual(lines[-1], 'PAYLOAD DONE INDEX=0 RETURN=0X1234 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=40 DROPPED=5')
 
     def test_load32_answers_each_case_on_the_real_call_path_and_survives_a_fault(self):
         text = self.text('loads')
-        self.assert_marker('loads', 'PAYLOAD OPS')
+        self.assert_marker('loads', 'PAYLOAD DONE')
         want = ['FIXTURE LOAD OWN=0X0 WORD=0XD503245F', 'FIXTURE LOAD ALIGN=0X2 WORD=0XA5A5A5A5',
                 'FIXTURE LOAD RANGE=0X3 WORD=0XA5A5A5A5', 'FIXTURE LOAD OUT=0X4 WORD=0XA5A5A5A5',
                 'FIXTURE LOAD FAULT=0X6 WORD=0XA5A5A5A5', 'FIXTURE LOAD AFTER=0X0 WORD=0XD503245F']
         got = [line for line in text.split('\n') if line.startswith('FIXTURE LOAD ')]
         self.assertEqual(got, want)
-        self.assertEqual(self.payload_lines(text)[-3:], ['PAYLOAD RETURN=0X0', 'PAYLOAD STACK=OK',
-                                                         'PAYLOAD OPS LOADS=3 FAULTS=1 REFUSED=3 LINES=6 DROPPED=0'])
+        self.assertEqual(self.payload_lines(text)[-1],
+                         'PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=3 FAULTS=1 REFUSED=3 LINES=6 DROPPED=0')
         self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
 
-    def test_a_payload_that_writes_the_bottom_of_its_stack_is_told_so(self):
+    def test_a_payload_that_writes_the_bottom_of_its_stack_is_told_so_and_stops_the_chain(self):
         text = self.text('overflow')
-        self.assert_marker('overflow', 'PAYLOAD OPS')
-        self.assertEqual(self.payload_lines(text)[-3:], ['PAYLOAD RETURN=0X7', 'PAYLOAD STACK=OVERFLOW',
-                                                         'PAYLOAD OPS LOADS=0 FAULTS=0 REFUSED=0 LINES=1 DROPPED=0'])
+        self.assert_marker('overflow', 'PAYLOAD CHAIN STOPPED')
+        self.assertEqual(self.payload_lines(text)[-2:], [
+            'PAYLOAD DONE INDEX=0 RETURN=0X7 STACK=OVERFLOW LOADS=0 FAULTS=0 REFUSED=0 LINES=1 DROPPED=0',
+            'PAYLOAD CHAIN STOPPED INDEX=0 REASON=STACK_OVERFLOW'])
 
     def test_a_payload_that_never_returns_is_named_by_the_last_line(self):
         text = self.text('hang')
         self.assert_marker('hang', 'PAYLOAD CALL')
         lines = self.payload_lines(text.split('EL2 CONFIRMED AFTER EXITBOOTSERVICES', 1)[1])
-        self.assertEqual(lines[-1], f'PAYLOAD CALL {sha(self.fixture["hang"])[:16].upper()}')
-        self.assertNotIn('PAYLOAD RETURN', text)
+        self.assertEqual(lines[-1], f'PAYLOAD CALL 0 {sha(self.fixture["hang"])[:16].upper()}')
+        self.assertNotIn('PAYLOAD DONE', text)
 
     def test_a_payload_that_faults_lands_in_q1ns_fault_page(self):
         text = self.text('fault')
         self.assert_marker('fault', 'PAYLOAD CALL')
-        self.assertNotIn('PAYLOAD RETURN', text)
+        self.assertNotIn('PAYLOAD DONE', text)
         width, height, pixels = self.runs['fault'].shot
         quiet = self.runs['hang'].shot
         top = pixels[(2 * width + width // 2) * 3:(2 * width + width // 2) * 3 + 3]
