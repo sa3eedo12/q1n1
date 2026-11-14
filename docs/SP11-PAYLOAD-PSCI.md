@@ -4,15 +4,17 @@
 `payloads/psci.c` is one payload of the stick payload runner described in [SP11-PAYLOAD.md](SP11-PAYLOAD.md): the
 manifest and the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-boot), ABI v1 and the
 [line catalogue](SP11-PAYLOAD.md#line-catalogue) are defined there and not repeated. Evidence labels as there: VERIFIED,
-OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; hardware NOT RUN.**
+OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; ran once on the unit (boot 5).**
 
 `payloads/psci.c` asks the firmware's PSCI implementation what it supports, with `smc #0` at EL2, and prints the
-answers. It is the first payload that is not MRS-only, so it is deliberately narrow. **EXPERIMENTAL; hardware NOT
-RUN**: nothing here says what the unit's firmware answers, or whether it answers at all.
+answers. It is the first payload that is not MRS-only, so it is deliberately narrow. **It ran once on the unit**
+(2026-11-14, boot 5; one unit, one boot): the firmware answered every SMC, with PSCI and SMCCC v1.1, CPU 0 ON and the
+eleven others OFF (OBSERVED; [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)). What those answers mean for the port
+stays INFERRED.
 
 **The conduit.** The unit's FADT has ARM_BOOT_ARCH_FLAGS 0x1: PSCI_COMPLIANT = 1, PSCI_USE_HVC = 0, so the PSCI
 conduit is SMC (OBSERVED). That an SMC issued from q1n1's EL2 context, after the Secure-Launch bounce, reaches the
-firmware's PSCI at all is UNKNOWN until this runs (the FADT describes what an operating system should use).
+firmware's PSCI is OBSERVED too (boot 5; it was UNKNOWN, the FADT describing what an operating system should use).
 
 **What it may issue.** Exactly five function ids, through **one** helper (`smc_query`), which is the only place an
 `smc` appears in the source and, a test counts, the only `smc` instruction in the binary. The helper takes a kind of
@@ -105,7 +107,8 @@ under its own `NEXT SMCCC` line: whatever a PSCI-only firmware does with it, the
 page. The helper is `static noinline`, not `static inline`: an inline copy at each call site would put several
 `smc` instructions into the binary, and the build test demands exactly one.
 
-**What each answer would mean for the port** (INFERRED; none of it is measured):
+**What each answer would mean for the port** (INFERRED; boot 5's answers are in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md),
+and nothing that follows from them was tried):
 
 | Question | Line | An answer | What it would mean |
 | --- | --- | --- | --- |
@@ -119,7 +122,7 @@ page. The helper is `static noinline`, not `static inline`: an inline copy at ea
 | | | `:ON` | running or parked by the firmware: `CPU_ON` would answer `ALREADY_ON(-4)`; another mechanism would be needed |
 | | | `:ON_PENDING` | a power-up is under way; ask again |
 | | | `INVALID_PARAMETERS(-2)` | PSCI does not know that MPIDR: the MADT and PSCI disagree, or the conduit is not the platform's |
-| Boot CPU sanity | `0X0=` | `0X0:ON` | expected (INFERRED: the CPU executing is on); anything else puts the whole table in doubt |
+| Boot CPU sanity | `0X0=` | `0X0:ON` | expected (INFERRED: the CPU executing is on; boot 5 printed `0X0=0X0:ON`, OBSERVED); anything else puts the whole table in doubt |
 | Can PSCI reset the unit? | `SYSTEM_RESET` | `=0X0` | a PSCI reset exists, a possible deliberate way back to the firmware instead of a power cycle: using it would be a separate, authorized change, it is never called here |
 | | | `NOT_SUPPORTED(-1)` | there is none |
 | Which SMCCC? | `SMCCC_VERSION` | `V1.1` or later | the conduit speaks SMCCC 1.1+ |
@@ -135,8 +138,12 @@ conduit, the decode, the group order, that the 22 lines and the `NEXT` lines fit
 `state` then `psci` run to the end in one boot. It proves **nothing** about the unit: its firmware, whether it
 answers after the bounce, the MPIDRs it knows. A different QEMU may answer differently and the test then fails
 rather than adapting; if `smc` had faulted, q1n1's fault page would have named it and the chain would have stopped
-there.
+there. The unit's answers differ from QEMU's (`MIGRATE_INFO_TYPE` -1 against 2, `SMCCC_VERSION` v1.1 against -1, the
+eleven others OFF against -2): they are in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md).
 
-**Status.** EXPERIMENTAL. Hardware NOT RUN: no value of this payload has been OBSERVED on the unit. INFERRED: the
-boot CPU is ON. UNKNOWN: whether the firmware answers an SMC from this context, and everything else the payload
-would print.
+**Status.** EXPERIMENTAL. Ran once on the unit (boot 5; one unit, one boot): 15 lines, no fault, every SMC answered
+([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)). OBSERVED: the firmware answers an SMC from this context, PSCI and SMCCC
+v1.1, the boot CPU is ON and the eleven others OFF, and the `PSCI_FEATURES` answers. INFERRED: that a 0 from
+`PSCI_FEATURES` means implemented (the PSCI specification was not re-read), and what any answer means for the port.
+UNKNOWN: what `CPU_ON`, `CPU_OFF`, `CPU_SUSPEND`, `SYSTEM_OFF` and `SYSTEM_RESET` would do here (the payload cannot issue
+them), and whether a second boot answers the same.

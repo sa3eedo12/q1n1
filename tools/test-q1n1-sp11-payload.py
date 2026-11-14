@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Native tests, seeded-bug mutants and source audits for the Surface Pro 11 stick payload runner
-(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md and the per-payload documents docs/SP11-PAYLOAD-STATE.md,
--PSCI.md, -TIMER.md and -USBSMMU.md).
+(platform/uefi/sp11-payload-*, payloads/, docs/SP11-PAYLOAD.md, the per-payload documents docs/SP11-PAYLOAD-STATE.md,
+-PSCI.md, -TIMER.md and -USBSMMU.md, and the results document docs/SP11-PAYLOAD-RESULTS.md).
 
     python3 tools/test-q1n1-sp11-payload.py
 
@@ -24,8 +24,8 @@ Runs, under ASan and UBSan:
   * SourceAudit: what no run can show -- SPDX lines, that the loader makes only its listed firmware calls,
     that nothing of the runner stores, that the main.c glue forwards loads only and is wholly under the
     gate, that nothing of it sits between the last GetMemoryMap and ExitBootServices, the constants shared
-    with slbounce, that the documentation's ABI table is the compiled one, that every document (the main one and the
-    per-payload ones) starts with its licence line and stays within the size limit, and that no machine identifier is
+    with slbounce, that the documentation's ABI table is the compiled one, that every document (the main one, the per-payload
+    ones and the results) starts with its licence line and stays within the size limit, and that no machine identifier is
     in any new file.
 
 SLBOUNCE_SP11_DIR (the paired slbounce fork) adds the comparison of the runner's memory-map verdicts with
@@ -48,7 +48,8 @@ DOC_TIMER = ROOT / 'docs' / 'SP11-PAYLOAD-TIMER.md'
 DOC_PSCI = ROOT / 'docs' / 'SP11-PAYLOAD-PSCI.md'
 DOC_STATE = ROOT / 'docs' / 'SP11-PAYLOAD-STATE.md'
 DOC_USBSMMU = ROOT / 'docs' / 'SP11-PAYLOAD-USBSMMU.md'
-DOCS = [DOC, DOC_TIMER, DOC_PSCI, DOC_STATE, DOC_USBSMMU]
+DOC_RESULTS = ROOT / 'docs' / 'SP11-PAYLOAD-RESULTS.md'
+DOCS = [DOC, DOC_TIMER, DOC_PSCI, DOC_STATE, DOC_USBSMMU, DOC_RESULTS]
 BUILD = ROOT / 'build' / 'sp11-payload-test'
 LLVM = ('/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin', '/opt/homebrew/bin')
 ENV = dict(os.environ, PATH=os.pathsep.join(LLVM + (os.environ.get('PATH', ''),)), PYTHONDONTWRITEBYTECODE='1')

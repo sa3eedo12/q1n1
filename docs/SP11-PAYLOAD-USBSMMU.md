@@ -6,9 +6,11 @@ manifest and the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payl
 [line catalogue](SP11-PAYLOAD.md#line-catalogue) are defined there and not repeated. It is the read-only follow-up ("S0b") of
 the S0 survey boot of the SP11 stick study (`docs/SP11-STICK-LOG.md` section 12 of the Snapintosh tree): it answers, with
 **loads only**, whether an EL2 xHCI driver may let the xHC DMA into memory of its own, and where, without one write to the
-SMMU. Evidence labels as there: VERIFIED (the architecture or a pinned file says so), OBSERVED (S0 showed it, once),
-INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; hardware NOT RUN:** nothing of this payload is OBSERVED on
-the unit; the values printed below are S0's where they are labelled so and a fixture's everywhere else.
+SMMU. Evidence labels as there: VERIFIED (the architecture or a pinned file says so), OBSERVED (S0 or boot 5 showed it, once),
+INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; ran once on the unit (boot 5, one unit, one boot):** 213 loads,
+no fault, no hang; what it printed is in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md). The blocks printed below are
+the host test's fixtures, with S0's values where they are labelled so and a fixture's everywhere else; they are not boot 5's
+lines.
 
 ## What it answers
 
@@ -18,7 +20,7 @@ S0 (OBSERVED once, 2026-11-14) read these at EL2, after the bounce, with loads o
 `0x18` before; the cause of HCE is UNKNOWN. The firmware's xHCI structures are intact in RAM (DCBAA `0xCF412000`, event ring
 segment table `0xCF415240`, event dequeue pointer `0xCF414CB8`, three slots behind a hub). `apps_smmu` (`0x15000000`, size
 `0x100000`) has `ID0` `0x7C017E9A` and `sCR0` `0x230406`; the streams `0x1420` (U0) and `0x1460` (U1) match stream match
-registers 3 and 4, both S2CR TYPE translate into **context bank 3, which nobody has read**. That is the open question
+registers 3 and 4, both S2CR TYPE translate into **context bank 3, which nobody had read then**. That is the open question
 (stop criterion SC2 of the study), and this payload reads what can decide it:
 
 1. what context bank 3 is (type, format, control, tables) and whether the walk of its stage-1 tables is possible;
@@ -26,21 +28,26 @@ registers 3 and 4, both S2CR TYPE translate into **context bank 3, which nobody 
    in software for a handful of probe addresses; an EL2 xHCI driver may place its arena where the walk says it is mapped;
 3. what the HCE tail looks like (the whole of `USBSTS`, the DWC3 bus-error address, the last event TRBs, the SMMU's fault
    registers), to look for its cause;
-4. the topology of the **direct** connection the operator uses next: the firmware's slot contexts, with the stick plugged in
+4. the topology of the **direct** connection (boot 5's): the firmware's slot contexts, with the stick plugged in
    without a hub.
+
+Boot 5 (the direct topology, one boot) answered the first question only: context bank 3 is `NESTED` with stage 1 off, so the
+walk of its stage-1 tables is not possible and the second question is undecided. HCE was clear and the firmware's rings were
+not there (`DCBAAP` 0), so the third and fourth had nothing to read, apart from a fault record of the bank whose meaning is
+UNKNOWN ([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md#payload-usbsmmu-boot-5)).
 
 ## What it reads, and in what order
 
-The groups are ordered by what a reset would cost: first what S0 proved readable, then RAM, then the registers nobody read,
-then the walk. A `NEXT` line is printed **before** each group that reads something the unit has not been read for yet, so the
-last line on the panel names what hung. A hang or reset in a context bank register is not recovered by anything here.
+The groups are ordered by what a reset would cost: first what S0 proved readable, then RAM, then the registers nobody had
+read, then the walk. A `NEXT` line is printed **before** each group that reads something the unit has not been read for yet,
+so the last line on the panel names what hung. A hang or reset in a context bank register is not recovered by anything here.
 
 | Group | `NEXT` line | Reads | Why here |
 | --- | --- | --- | --- |
 | U0 | `NEXT U0` | the xHC registers of U0 and U1, then DWC3 of U0 | S0 read all of them but `GBUSERRADDR1` and `GDBGLTSSM` |
 | SMMU | `NEXT SMMU` | `sCR0`, `ID0`, `ID1`, `ID2`, `sGFSR`, then `sGFAR` and `sGFSYNR0` to `2` only if `sGFSR` is not zero; the stream match registers up to `NUMSMRG`, then the S2CR of the entry each stream matched | S0 read all but `ID1`, `ID2`, `sGFAR`, `sGFSYNR` |
 | RINGS | `NEXT RINGS` | `ERSTSZ`, `ERSTBA`, `ERDP`; then RAM only: the first segment table entry, the event TRBs, the DCBAA entries 1 to 8 and the device contexts | S0 read `ERSTBA`, `ERDP`, the DCBAA and the device contexts; new here: `ERSTSZ`, the segment table entry and the event TRBs; every RAM load is preceded by the memory-map check |
-| CB | `NEXT CB<n>` | `CBAR`, `CBA2R` (global space 1), then the bank's own page: `SCTLR`, `TCR`, `TCR2`, `TTBR0`, `MAIR0`, `MAIR1`, `TTBR1`, `FSR` (`FAR`, `FSYNR0` only if `FSR` is not zero) | **never read on the unit**: the one real risk |
+| CB | `NEXT CB<n>` | `CBAR`, `CBA2R` (global space 1), then the bank's own page: `SCTLR`, `TCR`, `TCR2`, `TTBR0`, `MAIR0`, `MAIR1`, `TTBR1`, `FSR` (`FAR`, `FSYNR0` only if `FSR` is not zero) | **never read on the unit before boot 5**: the one real risk (boot 5 read it: no fault, no hang) |
 | WALK | `NEXT WALK` | RAM only: the translation table descriptors, four levels at most | after the bank's registers |
 
 The banks are the ones the two streams' S2CR name (expected: 3, for both), never any other, and never one at or past `NUMCB`.
@@ -66,7 +73,9 @@ other, nothing in RAM is read after the bank's registers and `WALK UNSUPPORTED` 
 
 VERIFIED = the architecture or a pinned file says so: the xHCI 1.2 specification and q1n1's own `platform/uefi/xhci.c`, the
 pinned Linux files (`arm-smmu.h`, `core.h`, `hamoa.dtsi` of the Snapintosh tree's `build/sp11-stick-log/refs/`) and the
-SMMUv2 architecture. OBSERVED only for what S0 saw. The page of a context bank is `(NUMPAGE + n) * PAGESIZE` from the window
+SMMUv2 architecture. OBSERVED only for what S0 or boot 5 saw: the Evidence column says which, and "never read on the unit" means
+neither read it (boot 5's lines are in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)). The page of a context bank is
+`(NUMPAGE + n) * PAGESIZE` from the window
 base (`arm-smmu.h`: `ARM_SMMU_CB(s, n) = numpage + n`), `NUMPAGE = 2^(NUMPAGENDXB + 1)`, `PAGESIZE` 4 KiB or, with `ID1.PAGESIZE`,
 64 KiB; global space 1 is one `PAGESIZE` up.
 
@@ -83,36 +92,36 @@ base (`arm-smmu.h`: `ARM_SMMU_CB(s, n) = numpage + n`), `NUMPAGE = 2^(NUMPAGENDX
 | `OP_DCBAAP` | `0x30` | xHC operational, 64-bit | VERIFIED (`xhci.c`); S0 OBSERVED `0xCF412000` |
 | `OP_CONFIG` | `0x38` | xHC operational | VERIFIED (MaxSlotsEn 7:0; `xhci.c`); S0 OBSERVED `0x40` on U0 (the firmware's), `0x0` on U1 |
 | `OP_PORTSC(n)` | `0x400 + 0x10 * (n - 1)` | xHC port registers, n = 1, 2 | VERIFIED (CCS 0, PED 1, PLS 8:5, speed 13:10; `xhci.c` has CCS and PED); S0 OBSERVED `0xE03` and `0x81203` |
-| `RT_ERSTSZ` | `0x28` | from RTSOFF: interrupter 0 + `0x08` | VERIFIED (`xhci.c`: ir0 + `ERSTSZ` 8, interrupter 0 at +`0x20`); never read on the unit |
+| `RT_ERSTSZ` | `0x28` | from RTSOFF: interrupter 0 + `0x08` | VERIFIED (`xhci.c`: ir0 + `ERSTSZ` 8, interrupter 0 at +`0x20`); boot 5 OBSERVED `0x0` |
 | `RT_ERSTBA` | `0x30` | from RTSOFF: interrupter 0 + `0x10` | VERIFIED (`xhci.c`); S0 OBSERVED `0xCF415240` |
 | `RT_ERDP` | `0x38` | from RTSOFF: interrupter 0 + `0x18` | VERIFIED (`xhci.c`; bits 3:0 are the segment index and EHB); S0 OBSERVED `0xCF414CB8` |
 | `DWC3_GCTL` | `0xc110` | DWC3 of U0 | VERIFIED (`core.h:102`); S0 OBSERVED `PRTCAPDIR` 1 (host mode) |
 | `DWC3_GSTS` | `0xc118` | DWC3 of U0 | VERIFIED (`core.h:104`); S0 OBSERVED `CURMOD` 1 (host) |
 | `DWC3_GSNPSID` | `0xc120` | DWC3 of U0 | VERIFIED (`core.h:106`); S0 OBSERVED `0x33313130` |
 | `DWC3_GBUSERRADDR0` | `0xc130` | DWC3 of U0 | VERIFIED (`core.h:110`); S0 OBSERVED no latched bus error |
-| `DWC3_GBUSERRADDR1` | `0xc134` | DWC3 of U0 | VERIFIED (`core.h:111`); never read on the unit |
-| `DWC3_GDBGLTSSM` | `0xc164` | DWC3 of U0 | VERIFIED (`core.h:123`); never read on the unit |
+| `DWC3_GBUSERRADDR1` | `0xc134` | DWC3 of U0 | VERIFIED (`core.h:111`); boot 5 OBSERVED 0 (`BERR=0X0`, no latched bus error) |
+| `DWC3_GDBGLTSSM` | `0xc164` | DWC3 of U0 | VERIFIED (`core.h:123`); boot 5 OBSERVED `0x9CC20026` |
 | `SMMU_SCR0` | `0x00` | apps_smmu global space 0 | VERIFIED (`arm-smmu.h`: USFCFG 10, EXIDENABLE 3, CLIENTPD 0); S0 OBSERVED `0x230406` |
 | `SMMU_ID0` | `0x20` | global space 0 | VERIFIED (NUMSMRG 7:0, EXIDS 8, NUMSIDB 12:9); S0 OBSERVED `0x7C017E9A` |
-| `SMMU_ID1` | `0x24` | global space 0 | VERIFIED (PAGESIZE 31, NUMPAGENDXB 30:28, NUMS2CB 23:16, NUMCB 7:0); never read on the unit |
-| `SMMU_ID2` | `0x28` | global space 0 | VERIFIED; printed raw only; never read on the unit |
+| `SMMU_ID1` | `0x24` | global space 0 | VERIFIED (PAGESIZE 31, NUMPAGENDXB 30:28, NUMS2CB 23:16, NUMCB 7:0); boot 5 OBSERVED `0x6000005F` |
+| `SMMU_ID2` | `0x28` | global space 0 | VERIFIED; printed raw only; boot 5 OBSERVED `0x5222` |
 | `SMMU_GFAR` | `0x40` | global space 0, 64-bit | VERIFIED by the SMMUv2 architecture (not in the pinned header); only if `sGFSR` is not zero; never read on the unit |
 | `SMMU_GFSR` | `0x48` | global space 0 | VERIFIED (`arm-smmu.h`); S0 OBSERVED 0 |
 | `SMMU_GFSYNR0` | `0x50` | global space 0 (`+4` and `+8`: `sGFSYNR1` and `2`) | VERIFIED (`arm-smmu.h`); only if `sGFSR` is not zero; never read on the unit |
 | `SMMU_SMR(n)` | `0x800 + 4n` | global space 0, n below `NUMSMRG` (at most 256) | VERIFIED (`arm-smmu.h`; valid bit 31, mask 31:16, id 15:0); S0 OBSERVED entries 3 and 4 matching |
 | `SMMU_S2CR(n)` | `0xc00 + 4n` | global space 0, for the entries the streams matched | VERIFIED (`arm-smmu.h`; TYPE 17:16, CBNDX 7:0); S0 OBSERVED translate, bank 3 |
-| `GR1_CBAR(n)` | `4n` | global space 1 | VERIFIED (`arm-smmu.h`; TYPE 17:16: 0 stage 2, 1 stage 1 with stage 2 bypass, 2 with stage 2 fault, 3 nested); never read on the unit |
-| `GR1_CBA2R(n)` | `0x800 + 4n` | global space 1 | VERIFIED (`arm-smmu.h`; VA64 bit 0); never read on the unit |
-| `CB_SCTLR` | `0x00` | context bank n | VERIFIED (`arm-smmu.h`; M bit 0); never read on the unit |
-| `CB_TCR2` | `0x10` | context bank n | VERIFIED (`arm-smmu.h`); printed raw; never read on the unit |
-| `CB_TTBR0` | `0x20` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`; ASID 63:48, base 47:0); never read on the unit |
-| `CB_TTBR1` | `0x28` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`); never read on the unit |
-| `CB_TCR` | `0x30` | context bank n | VERIFIED (`arm-smmu.h`: T0SZ 5:0, EPD0 7, TG0 15:14, EPD1 23); never read on the unit |
-| `CB_MAIR0` | `0x38` | context bank n | VERIFIED (`arm-smmu.h`); never read on the unit |
-| `CB_MAIR1` | `0x3c` | context bank n | VERIFIED (`arm-smmu.h`); printed only when not zero; never read on the unit |
-| `CB_FSR` | `0x58` | context bank n | VERIFIED (`arm-smmu.h`); never read on the unit |
-| `CB_FAR` | `0x60` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`); only if `FSR` is not zero; never read on the unit |
-| `CB_FSYNR0` | `0x68` | context bank n | VERIFIED (`arm-smmu.h`); only if `FSR` is not zero; never read on the unit |
+| `GR1_CBAR(n)` | `4n` | global space 1 | VERIFIED (`arm-smmu.h`; TYPE 17:16: 0 stage 2, 1 stage 1 with stage 2 bypass, 2 with stage 2 fault, 3 nested); boot 5 OBSERVED `0x35E03` (bank 3) |
+| `GR1_CBA2R(n)` | `0x800 + 4n` | global space 1 | VERIFIED (`arm-smmu.h`; VA64 bit 0); boot 5 OBSERVED `0x1` (bank 3) |
+| `CB_SCTLR` | `0x00` | context bank n | VERIFIED (`arm-smmu.h`; M bit 0); boot 5 OBSERVED `0xE0` (bank 3) |
+| `CB_TCR2` | `0x10` | context bank n | VERIFIED (`arm-smmu.h`); printed raw; boot 5 OBSERVED `0x60` (bank 3) |
+| `CB_TTBR0` | `0x20` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`; ASID 63:48, base 47:0); boot 5 OBSERVED `0x0` (bank 3) |
+| `CB_TTBR1` | `0x28` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`); boot 5 OBSERVED `0x0` (bank 3) |
+| `CB_TCR` | `0x30` | context bank n | VERIFIED (`arm-smmu.h`: T0SZ 5:0, EPD0 7, TG0 15:14, EPD1 23); boot 5 OBSERVED `0x0` (bank 3) |
+| `CB_MAIR0` | `0x38` | context bank n | VERIFIED (`arm-smmu.h`); boot 5 OBSERVED `0x0` (bank 3) |
+| `CB_MAIR1` | `0x3c` | context bank n | VERIFIED (`arm-smmu.h`); printed only when not zero; boot 5 OBSERVED no `MAIR1=` on the page (INFERRED: it read 0) |
+| `CB_FSR` | `0x58` | context bank n | VERIFIED (`arm-smmu.h`); boot 5 OBSERVED `0x400` (bank 3; bit 10 is not in the pinned header: meaning UNKNOWN) |
+| `CB_FAR` | `0x60` | context bank n, 64-bit | VERIFIED (`arm-smmu.h`); only if `FSR` is not zero; boot 5 OBSERVED `0x953FDF7CF7F7` (bank 3; meaning UNKNOWN) |
+| `CB_FSYNR0` | `0x68` | context bank n | VERIFIED (`arm-smmu.h`); only if `FSR` is not zero; boot 5 OBSERVED `0x46005D` (bank 3; meaning UNKNOWN) |
 <!-- /usbsmmu-registers -->
 
 Not read on purpose: `PAR` (`0x50` of a bank, the result of an address translation operation), `RESUME`, the TLB and ATS
@@ -127,8 +136,9 @@ windows, with the gate on, on the same image.
 Lines are `KEY=0X..` style, upper case, in the page font, at most 100 characters, prefixed `PAYLOAD USBSMMU `. A value below
 10 is one digit; a larger one is `0X` and the fewest hex digits; indices (slot, endpoint, bank, match register) are decimal.
 At any EL but 2 the payload prints `PAYLOAD USBSMMU SKIPPED_NOT_AT_EL2` and nothing else. Both blocks are the host test's
-fixture with S0's values where S0 read them (below). The first has the stick plugged in **directly** (the topology the
-operator uses next, a fixture: one slot, route 0); the second has S0's topology with the hub, which costs two probes.
+fixture with S0's values where S0 read them (below). The first has the stick plugged in **directly** (boot 5's topology, here
+a fixture that assumes the firmware's rings are intact, which boot 5 did not find: one slot, route 0); the second has S0's
+topology with the hub, which costs two probes. Boot 5's own lines are in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md).
 
 OBSERVED by S0 in them (`docs/SP11-STICK-LOG.md` section 12 of the Snapintosh tree): xHCI 1.10 with 64 slots, 2 ports and
 64-byte contexts, `CAPLENGTH` `0x20`; on U0 `USBCMD` 0, `USBSTS` `0x1019`, `CRCR` 0, `DCBAAP`, `CONFIG` `0x40`, `PORTSC1`,
@@ -252,7 +262,7 @@ dropped and counted in `CUTS`, never cut in half, and a 25th line is never emitt
 | WALK: `NEXT WALK`, two to seven probes, the summary (or one or two `UNSUPPORTED` lines) | 4 to 9 |
 
 In a chain, `usbsmmu` costs its 24 lines and the runner's three: [the planning table](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-boot)
-carries the maximum as a row and the chain `psci.bin usbsmmu.bin timer.bin` fits the unit's 89 rows.
+carries the maximum as a row and boot 4's chain `psci.bin usbsmmu.bin timer.bin` fits the unit's 89 rows.
 
 ## What the outcomes mean for the next step
 
@@ -263,7 +273,7 @@ carries the maximum as a row and the chain `psci.bin usbsmmu.bin timer.bin` fits
 | --- | --- | --- |
 | `TYPE=S1_S2BYP` or `TYPE=S1_S2FLT`, `VA64=1`, `M=1`, `EPD0=0`, the `WALK` lines | a stage-1 AArch64 bank with TTBR0 walks on: the walk below applies | read the probes |
 | `WALK UNSUPPORTED ALL_ZERO CBAR=0X0 CBA2R=0X0 SCTLR=0X0 TCR=0X0 TTBR0=0X0` | every raw register of the bank reads zero: INFERRED RAZ/WI (a bank the non-secure world cannot see, or one nobody programmed), or the reads returned zeros for another reason; UNKNOWN who programs it although S2CR says TRANSLATE. This is not a statement that the bank translates nothing (that is `M0`) and not yet SC2 | UNKNOWN: decide with the S1 No-Op or by other means |
-| `WALK UNSUPPORTED STAGE2_ONLY` or `NESTED` | stage 2 is involved; its tables are not walked here (INFERRED: they belong to whoever owns stage 2, the hypervisor); the `CB` lines print the raw `CBAR`, `CBA2R`, `SCTLR`, `TCR`, `TCR2`, `TTBR0` and `MAIR0`; UNKNOWN whether the arena is mapped | UNKNOWN: a stage-2 walker payload (VTCR-style `TCR`: T0SZ 5:0, SL0 7:6, TG0 15:14, PASize 18:16; descriptors as stage 1 but MemAttr 5:2, S2AP 7:6) or the S1 No-Op decides; SC2 applies only if a later walk shows the arena unmapped or the tables in memory the map does not call usable RAM |
+| `WALK UNSUPPORTED STAGE2_ONLY` or `NESTED` | stage 2 is involved; its tables are not walked here (INFERRED: they belong to whoever owns stage 2, the hypervisor); the `CB` lines print the raw `CBAR`, `CBA2R`, `SCTLR`, `TCR`, `TCR2`, `TTBR0` and `MAIR0`; UNKNOWN whether the arena is mapped; `NESTED` was reached on the unit in boot 5 (stage 1 off, and `NUMS2CB` is 0 there: [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md#payload-usbsmmu-boot-5)) and the verdict stays UNKNOWN | UNKNOWN: a stage-2 walker payload (VTCR-style `TCR`: T0SZ 5:0, SL0 7:6, TG0 15:14, PASize 18:16; descriptors as stage 1 but MemAttr 5:2, S2AP 7:6) or the S1 No-Op decides; SC2 applies only if a later walk shows the arena unmapped or the tables in memory the map does not call usable RAM |
 | `WALK UNSUPPORTED M0 TRANSLATES_NOTHING INFERRED=BYPASS_LIKE` | the bank's stage 1 is off: it translates nothing (INFERRED: DMA passes untranslated; UNKNOWN for `S1_S2FLT`, which may fault everything) | only an attempted DMA tells (the S1 No-Op); a fault there is SC2 |
 | `WALK UNSUPPORTED VA64_0`, `EPD0`, `TG0_RESERVED`, `T0SZ_RANGE`, `TTBR0_MISALIGNED` | a format the walk does not model; the raw `CBAR`, `CBA2R`, `SCTLR`, `TCR`, `TTBR0` are printed | decode by hand from them; UNKNOWN until then |
 | `WALK UNSUPPORTED NOT_READ`, or `FAULT AT=<register>` in the CB lines | a register of the bank could not be read: the bank is not readable at EL2 (INFERRED: owned by the secure world); what it maps is UNKNOWN | UNKNOWN: read-only evidence ends here; only an attempted DMA (the S1 No-Op, which needs A1) can tell; SC2 applies only if that shows the DMA refused or redirected |
@@ -298,14 +308,22 @@ UNKNOWN until they say):
 | none of them | UNKNOWN: nothing this payload reads explains HCE; the controller may only need a reset, which this payload does not do |
 <!-- /usbsmmu-hce -->
 
+Boot 5 (the direct topology) read `USBSTS` `0x11` on U0, with HCE clear: S0's HCE was not reproduced and its cause stays
+UNKNOWN. Of the rows above only the one for a non-zero `CB3 FSR=` has its trigger there (`FSR` `0x400`, with `FAR` and
+`FSYNR0`); bit 10 is not in the pinned header's list, so what that record means is UNKNOWN, and the row's reading, a
+translation fault, is not established by it ([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md#payload-usbsmmu-boot-5)).
+
 ## In a chain
 
-It goes after `psci` and before `timer`: `psci.bin usbsmmu.bin timer.bin`. It may hang or reset the board at `NEXT CB<n>`
-(UNKNOWN, hardware NOT RUN), so `timer`, which may stall the board too, goes **last**. The planning table counts `psci` 30,
-this payload 24, `timer` 16, the runner's three lines per payload and one per file:
-(3 + 1) + 3 x 3 + 30 + 24 + 16 = 83 lines, six under the unit's 89 rows. `state` is left out of the unit's chain because
-all four need (4 + 1) + 3 x 4 + 22 + 30 + 24 + 16 = 109 lines: past the 89 rows (QEMU's page has no such limit, and the
-QEMU test runs all four).
+It goes after `psci`: `psci.bin usbsmmu.bin`, the chain boot 5 ran. It may hang or reset the board at `NEXT CB<n>` (it did
+not in boot 5, one boot; UNKNOWN for any other state of the unit), and `timer`, which stalled the board in boot 4, does **not**
+go behind it: a stall hides every earlier line of its chain unless the screen is photographed within seconds, so `timer` runs
+alone (see "Order" in [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-boot)). Boot 4 ran
+`psci.bin usbsmmu.bin timer.bin`. The planning table counts `psci` 30, this payload 24, `timer` 16, the runner's three lines
+per payload and one per file:
+(3 + 1) + 3 x 3 + 30 + 24 + 16 = 83 lines, six under the unit's 89 rows (boot 4's panel held 58). `state` is left out of the
+unit's chain because all four need (4 + 1) + 3 x 4 + 22 + 30 + 24 + 16 = 109 lines: past the 89 rows (QEMU's page has no
+such limit, and the QEMU test runs all four).
 
 ## What QEMU shows
 
@@ -349,6 +367,8 @@ the memory-map checks on real descriptors or the walk, which only the host test 
   one MRS); and runs the manifest tool and the runner's validator on `psci usbsmmu timer`.
 * `tools/test-q1n1-sp11-payload-usbsmmu-doc.py`: this document and its pointers in `SP11-PAYLOAD.md` against the source, the
   host test's own dump of the two fixtures above and each other, with seeded mistakes in the documents.
+* `tools/test-q1n1-sp11-payload-results-doc.py`: the register table's boot 5 values against the page of boot 5 in
+  `SP11-PAYLOAD-RESULTS.md`, and that document's own consistency.
 * `tools/test-q1n1-sp11-payload-qemu-usbsmmu.py`: the chains above under QEMU, with the lines of "What QEMU shows".
 
 ## Limits

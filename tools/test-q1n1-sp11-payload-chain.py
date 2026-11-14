@@ -692,9 +692,12 @@ class DocAgreement(unittest.TestCase):
         self.assertIn(f'with {len(DOC_MUTANTS)} seeded mistakes in the document', ' '.join(tests.split()))
 
     def test_the_document_says_what_the_status_is(self):
-        for text in (self.doc, self.psci_doc):
-            for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
-                self.assertIn(word, text)
+        # `state` is still NOT RUN, so the main document still says so; `psci` ran once on the unit (boot 5).
+        for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'The runner ran on the unit', 'one unit, one boot', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
+            self.assertIn(word, self.doc)
+        for word in ('EXPERIMENTAL', 'Ran once on the unit (boot 5; one unit, one boot)', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
+            self.assertIn(word, self.psci_doc)
+        self.assertNotRegex(' '.join(self.psci_doc.split()), r'(?i)hardware (qualified|passed)')
 
 
 def _replace(old, new, count=1):
@@ -728,6 +731,8 @@ DOC_MUTANTS = [
     ('a-decode-name-is-wrong', _replace('`INVALID_PARAMETERS(-2)`', '`INVALID_PARAMETER(-2)`', count=-1)),
     ('the-suffix-is-another-case', _replace('`<stem>.BIN`', '`<stem>.bin`', count=-1)),
     ('the-hardware-status-is-claimed', _replace('hardware NOT RUN', 'hardware qualified', count=-1)),
+    ('the-runner-run-is-widened-to-a-distribution', _replace('one unit, one boot', 'every unit', count=-1)),
+    ('the-psci-run-is-claimed-qualified', _replace('Ran once on the unit (boot 5; one unit, one boot)', 'Qualified on the unit (boot 5)')),
     ('a-planned-payload-maximum-is-wrong', _replace('| `psci`, at most | 30 |', '| `psci`, at most | 29 |')),
     ('a-planned-payload-row-is-forgotten', _replace('| `timer`, at most | 16 |\n', '')),
     ('the-usbsmmu-row-is-forgotten', _replace('| `usbsmmu`, at most | 24 |\n', '')),
@@ -744,7 +749,7 @@ class DocMutants(unittest.TestCase):
     """The agreement tests above must be able to fail: each seeded mistake in either document is refused by one."""
     # The mistakes in the tables that moved to docs/SP11-PAYLOAD-PSCI.md; every other one is in docs/SP11-PAYLOAD.md.
     IN_PSCI_DOC = {'a-function-id-is-wrong', 'a-sixth-function-id-appears', 'the-features-are-in-another-order', 'a-feature-is-forgotten',
-                   'an-affinity-is-wrong', 'a-decode-name-is-wrong'}
+                   'an-affinity-is-wrong', 'a-decode-name-is-wrong', 'the-psci-run-is-claimed-qualified'}
 
     @staticmethod
     def outcome(text=None, psci_text=None):

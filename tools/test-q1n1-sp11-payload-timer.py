@@ -478,7 +478,11 @@ class TimerDocAgreement(unittest.TestCase):
         for name in ('CNTVOFF_EL2', 'CNTPOFF_EL2'):
             self.assertIn('INFERRED', evidence[name])
             self.assertIn('VERIFIED register', evidence[name])
-        self.assertIn('UNKNOWN', evidence['CNTFRQ_EL0'])
+        self.assertIn('UNKNOWN', evidence['CNTFRQ_EL0'])            # this payload's own reading of it was never seen
+        self.assertIn("the unit's value is OBSERVED: 0x124F800 (19.2 MHz)", evidence['CNTFRQ_EL0'])
+        self.assertEqual(0x124F800, 19_200_000)
+        self.assertIn("boot 3's T03 read it at EL2: 0 (OBSERVED), so it is not the culprit of boot 4's stop", evidence['CNTVOFF_EL2'])
+        self.assertIn('the leading suspect (INFERRED, not tested directly', evidence['CNTPOFF_EL2'])
         self.assertIn('Oryon X1', evidence['CNTVOFF_EL2'])
         self.assertIn('ECV >= 2', evidence['CNTPOFF_EL2'])
         self.assertIn('OBSERVED', evidence['ID_AA64MMFR0_EL1'])
@@ -540,12 +544,17 @@ class TimerDocAgreement(unittest.TestCase):
                        f'{NUMBER_WORDS[rows - worst]} rows to spare', f'{small} at most, fits'):
             self.mentions(phrase)
 
-    def test_the_documents_put_timer_last_wherever_they_give_an_order(self):
+    def test_the_documents_run_timer_alone_and_put_it_last_when_it_is_chained(self):
+        self.mentions('**Run it alone.**')
+        self.mentions('A stall hides **every earlier line of its chain** unless the screen is photographed within seconds')
+        self.mentions('`timer.bin` is the **only** payload of its stick')
         self.mentions('`timer.bin` goes **last**')
         self.mentions('`state.bin psci.bin timer.bin`')
         chain = self.main[self.main.index('## The chain'):self.main.index('## Payload ABI v1')]
         self.mentions('**Order.** A payload that may stall the board goes **last**', chain)
-        self.mentions('`timer` is one (`state.bin psci.bin timer.bin`, never `timer.bin` first)', chain)
+        self.mentions('(`state.bin psci.bin timer.bin`, never `timer.bin` first)', chain)
+        self.mentions('but a stall costs more than the lines after it: once the board resets, **every earlier line of the same chain**', chain)
+        self.mentions('So `timer` runs **alone**, in a boot of its own: `timer.bin` is the only payload of that stick', chain)
         stick = self.main[self.main.index('## On the stick'):self.main.index('## The manifest')]
         self.assertRegex(stick, r'state\.bin\s+\S*psci\.bin\s+\S*timer\.bin')
         self.assertRegex(stick, r'\| `SP11\\TIMER\.BIN` \|[^\n]*manifest index 2, \*\*last\*\*')
@@ -553,8 +562,9 @@ class TimerDocAgreement(unittest.TestCase):
     def test_the_main_document_points_at_this_one_from_its_stub_the_catalogue_and_the_tests(self):
         start = self.main.index('## Payload `timer`')
         stub = self.main[start:self.main.index('\n## ', start)]
-        for phrase in ('goes **last** in a chain', '[SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md)', 'EXPERIMENTAL; hardware NOT RUN',
-                       'nothing of it is OBSERVED on the unit'):
+        for phrase in ('runs **alone** on the unit', '[SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md)',
+                       'EXPERIMENTAL; ran once on the unit (boot 4) and did not return', 'INFERRED from a line count',
+                       'its lines were never read'):
             self.mentions(phrase, stub)
         catalogue = self.main[self.main.index('## Line catalogue'):self.main.index('## Failure modes')]
         self.mentions('| `PAYLOAD TIMER ...` |', catalogue)
@@ -568,11 +578,12 @@ class TimerDocAgreement(unittest.TestCase):
         self.mentions('`timer` `MRS` of its twelve registers and no barrier', tests)
 
     def test_this_document_says_why_it_exists_where_it_goes_and_what_is_known(self):
-        for word in ('EXPERIMENTAL; hardware NOT RUN', 'Hardware NOT RUN', 'UNKNOWN', 'INFERRED', 'OBSERVED', 'VERIFIED',
-                     'It may stall the whole board', 'goes **last**'):
+        for word in ('EXPERIMENTAL; ran once on the unit (boot 4) and did not return',
+                     'Ran once on the unit (boot 4; one unit, one boot) and did not return', 'UNKNOWN', 'INFERRED', 'OBSERVED', 'VERIFIED',
+                     'It may stall the whole board', '**Run it alone.**', 'goes **last**'):
             self.mentions(word)
-        self.mentions('the unit\'s CNTFRQ_EL0 (until it is read)')
-        self.mentions('INFERRED and untested: that SCR_EL3.ECVEn = 0 explains a CNTPOFF_EL2 stall')
+        self.mentions("the unit's CNTFRQ_EL0 is 0x124F800, 19.2 MHz")
+        self.mentions('INFERRED, not tested directly: that SCR_EL3.ECVEn = 0 explains a CNTPOFF_EL2 stall')
 
     def test_both_documents_start_with_their_licence_line_and_stay_within_the_size_limit(self):
         for name, text in (('SP11-PAYLOAD.md', self.main), ('SP11-PAYLOAD-TIMER.md', self.doc)):
@@ -626,8 +637,8 @@ TIMER_DOC_MUTANTS = [
     ('a-register-row-is-forgotten', _replace('| `CNTHP_CTL_EL2` | `S3_4_C14_C2_1` | SAFE | as above |\n', '')),
     ('a-thirteenth-register-appears', _replace('<!-- /timer-registers -->', '| `CNTKCTL_EL1` | `S3_0_C14_C1_0` | SAFE | VERIFIED |\n<!-- /timer-registers -->')),
     ('the-hazard-rows-are-swapped', _swap('| `CNTVOFF_EL2` | `S3_4_C14_C0_3`', '| `CNTPOFF_EL2` | `S3_4_C14_C0_6`')),
-    ('a-hazard-is-called-verified-not-inferred', _replace('the leading suspect (INFERRED, untested)', 'the leading suspect (VERIFIED)')),
-    ('the-frequency-is-claimed-observed', _replace("the unit's value is UNKNOWN", "the unit's value is OBSERVED")),
+    ('a-hazard-is-called-verified-not-inferred', _replace('the leading suspect (INFERRED, not tested directly', 'the leading suspect (VERIFIED')),
+    ('the-frequency-is-called-unknown-again', _replace("the unit's value is OBSERVED: 0x124F800", "the unit's value is UNKNOWN: 0x124F800")),
     ('the-hazard-lines-are-swapped-in-the-printed-block', _swap('PAYLOAD TIMER NEXT CNTVOFF_EL2', 'PAYLOAD TIMER NEXT CNTPOFF_EL2')),
     ('the-next-line-before-cntpoff-is-forgotten', _replace('PAYLOAD TIMER NEXT CNTPOFF_EL2', 'PAYLOAD TIMER CNTPOFF_EL2=0X..')),
     ('the-ecv-below-two-line-has-a-less-than-sign', _replace('CNTPOFF_EL2 N/A (ECV BELOW 2)', 'CNTPOFF_EL2 N/A (ECV<2)', count=-1)),
@@ -640,11 +651,14 @@ TIMER_DOC_MUTANTS = [
     ('the-qemu-total-is-wrong', _replace('72 lines under QEMU', '70 lines under QEMU')),
     ('the-line-count-is-wrong', _replace('16 lines when ECV >= 2, 15 below, 1 off EL2 (', '17 lines when ECV >= 2, 16 below, 1 off EL2 (')),
     ('the-docs-put-timer-first', _replace('`timer.bin` goes **last**', '`timer.bin` goes **first**')),
-    ('hardware-is-claimed-run', _replace('Hardware NOT RUN: nothing of this payload is OBSERVED on the unit', 'Hardware run: all of this payload is OBSERVED on the unit')),
+    ('hardware-is-claimed-run', _replace('and did not return. INFERRED from the line count,', 'and returned. OBSERVED from the line count,')),
     ('a-printed-line-is-over-a-hundred-characters', _replace('PAYLOAD TIMER DONE\n```', 'PAYLOAD TIMER DONE ' + 'X' * 90 + '\n```')),
     ('a-key-is-renamed', _replace('POLL_ADVANCED=0X1', 'POLL_MOVED=0X1')),
-    ('the-frequency-is-said-to-be-known', _replace('UNKNOWN until read', 'known: 19.2 MHz')),
-    ('the-ecv-explanation-is-called-observed', _replace('INFERRED and untested: that SCR_EL3.ECVEn = 0', 'OBSERVED: that SCR_EL3.ECVEn = 0')),
+    ('the-frequency-is-wrong', _replace('0x124F800 (19.2 MHz)', '0x16E3600 (19.2 MHz)')),
+    ('the-ecv-explanation-is-called-observed', _replace('directly: that SCR_EL3.ECVEn = 0 explains', 'directly: OBSERVED: that SCR_EL3.ECVEn = 0 explains')),
+    ('cntvoff-is-called-the-culprit-again', _replace("so it is not the culprit of boot 4's stop", "so it is the culprit of boot 4's stop")),
+    ('timer-is-allowed-to-share-a-boot', _replace('`timer.bin` is the **only** payload of its stick', '`timer.bin` is the **last** payload of its stick')),
+    ('the-cost-of-a-stall-is-forgotten', _replace('**every earlier line of its chain**', '**no earlier line of its chain**')),
     ('the-licence-line-is-gone', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
     ('the-links-back-name-a-file-that-does-not-exist', _replace('](SP11-PAYLOAD.md', '](SP11-PAYLOAD-OLD.md', count=-1)),
     ('an-anchor-of-this-document-does-not-resolve', _replace('SP11-PAYLOAD.md#line-catalogue', 'SP11-PAYLOAD.md#line-catalog')),
@@ -654,13 +668,16 @@ TIMER_DOC_MUTANTS = [
 MAIN_DOC_MUTANTS = [
     ('the-chain-order-paragraph-is-weakened', _replace('**Order.** A payload that may stall the board goes **last**', '**Order.** A payload that may stall the board goes **anywhere**')),
     ('the-order-example-puts-timer-first', _replace('(`state.bin psci.bin timer.bin`, never `timer.bin` first)', '(`timer.bin psci.bin state.bin`)')),
+    ('the-order-paragraph-lets-timer-share-a-boot', _replace('So `timer` runs **alone**', 'So `timer` runs **behind the others**')),
+    ('the-order-paragraph-forgets-the-reset', _replace('**every earlier line of the same chain**', '**no earlier line of the same chain**')),
     ('the-stick-row-is-renamed', _replace('| `SP11\\TIMER.BIN` |', '| `SP11\\TIMER.EXE` |')),
     ('the-stick-row-is-not-last', _replace('manifest index 2, **last**: it may stall the board', 'manifest index 2')),
     ('the-catalogue-row-is-gone', _replace('| `PAYLOAD TIMER ...` |', '| `PAYLOAD CLOCK ...` |')),
     ('the-mutant-count-is-wrong', _replace(f'{len(MUTANTS)} seeded-bug mutants', f'{len(MUTANTS) - 1} seeded-bug mutants')),
     ('the-order-breaker-count-is-wrong', _replace(f'{len(ORDER_BREAKERS)} that break the compiled order', f'{len(ORDER_BREAKERS) - 1} that break the compiled order')),
     ('the-stub-lost-its-pointer', _replace('[SP11-PAYLOAD-TIMER.md](SP11-PAYLOAD-TIMER.md). EXPERIMENTAL', 'SP11-PAYLOAD-TIMER.md. EXPERIMENTAL')),
-    ('the-stub-claims-the-hardware-ran', _replace('SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware NOT RUN: nothing of it is OBSERVED on the unit.', 'SP11-PAYLOAD-TIMER.md). EXPERIMENTAL; hardware run: all of it is OBSERVED on the unit.')),
+    ('the-stub-claims-the-hardware-ran', _replace('EXPERIMENTAL; ran once on the unit (boot 4) and did not return: INFERRED', 'EXPERIMENTAL; ran once on the unit (boot 4) and returned: OBSERVED')),
+    ('the-stub-forgets-that-timer-runs-alone', _replace('so it runs **alone** on the unit', 'so it goes **last** on the unit')),
     ('the-catalogue-anchor-does-not-resolve', _replace('SP11-PAYLOAD-TIMER.md#what-it-prints', 'SP11-PAYLOAD-TIMER.md#what-it-says')),
     ('the-tests-row-forgot-the-eighth-program', _replace('eight native programs', 'seven native programs')),
     ('the-build-row-forgot-the-timer-allow-list', _replace('`timer` `MRS` of its twelve registers and no barrier; ', '')),

@@ -3,16 +3,17 @@
 """The documents of the usbsmmu payload and of the payload runner against the source and each other: docs/SP11-PAYLOAD-USBSMMU.md
 (registers, evidence labels, printed lines, numbers, reason names, decision tables), the pointers to it in docs/SP11-PAYLOAD.md
 (the stub, the catalogue row, the Tests rows, the stick row, the build line, the allow-list sentence, the order rule) and the
-links, anchors, licence lines and sizes of all five payload documents.
+links, anchors, licence lines and sizes of all the payload documents and of docs/SP11-PAYLOAD-RESULTS.md.
 
     python3 tools/test-q1n1-sp11-payload-usbsmmu-doc.py
 
-  * UsbsmmuDocAgreement: the register table is the source's enums and macros, its offsets and (S0's) evidence; the two printed
-    blocks are what the host test of tools/test-q1n1-sp11-payload-usbsmmu.c dumps (`dump hub`, `dump direct`), line for line;
-    every number and reason name is the source's; the decision tables answer every outcome the payload can print; the QEMU
+  * UsbsmmuDocAgreement: the register table is the source's enums and macros, its offsets and (S0's or boot 5's) evidence; the two
+    printed blocks are what the host test of tools/test-q1n1-sp11-payload-usbsmmu.c dumps (`dump hub`, `dump direct`), line for
+    line; every number and reason name is the source's; the decision tables answer every outcome the payload can print; the QEMU
     block is the one tools/test-q1n1-sp11-payload-qemu-usbsmmu.py asserts.
   * UsbsmmuDocMutants: seeded mistakes in either document, each of which an agreement test must refuse.
-    (The planning table of "The chain" is checked in tools/test-q1n1-sp11-payload-chain.py.)
+    (The planning table of "The chain" is checked in tools/test-q1n1-sp11-payload-chain.py, the page of boot 5 that
+    docs/SP11-PAYLOAD-RESULTS.md records in tools/test-q1n1-sp11-payload-results-doc.py.)
 
 Writes only under build/. Hardware: NOT RUN. Evidence: EXPERIMENTAL (host model only)."""
 import ast
@@ -42,8 +43,9 @@ own = load_module('sp11_payload_usbsmmu_for_doc', ROOT / 'tools' / 'test-q1n1-sp
 SOURCE = ROOT / 'payloads' / 'usbsmmu.c'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
 DOC_USBSMMU = ROOT / 'docs' / 'SP11-PAYLOAD-USBSMMU.md'
+DOC_RESULTS = ROOT / 'docs' / 'SP11-PAYLOAD-RESULTS.md'
 DOCS = {name: ROOT / 'docs' / name for name in ('SP11-PAYLOAD.md', 'SP11-PAYLOAD-STATE.md', 'SP11-PAYLOAD-PSCI.md',
-                                                 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md')}
+                                                 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md', 'SP11-PAYLOAD-RESULTS.md')}
 PAGE_FONT = re.compile(r'^[A-Z0-9 :\-./=?()_]*$')
 PREFIX = 'PAYLOAD USBSMMU '
 # What the S0 survey read on the unit (OBSERVED, once, 2026-11-14; the survey's own register lists and section 12 of the stick log):
@@ -51,6 +53,11 @@ PREFIX = 'PAYLOAD USBSMMU '
 OBSERVED_BY_S0 = {'CAP_CAP0', 'CAP_HCSPARAMS1', 'CAP_HCCPARAMS1', 'CAP_RTSOFF', 'OP_USBCMD', 'OP_USBSTS', 'OP_CRCR', 'OP_DCBAAP',
                   'OP_CONFIG', 'OP_PORTSC(n)', 'RT_ERSTBA', 'RT_ERDP', 'DWC3_GCTL', 'DWC3_GSTS', 'DWC3_GSNPSID', 'DWC3_GBUSERRADDR0',
                   'SMMU_SCR0', 'SMMU_ID0', 'SMMU_GFSR', 'SMMU_SMR(n)', 'SMMU_S2CR(n)'}
+# What boot 5 read on the unit and S0 had not (OBSERVED once, 2026-11-14; the page is in docs/SP11-PAYLOAD-RESULTS.md, whose values the
+# register table repeats: tools/test-q1n1-sp11-payload-results-doc.py compares them). The registers of neither set (`sGFAR` and
+# `sGFSYNR`, read only after a global fault; there was none) were never read on the unit.
+OBSERVED_IN_BOOT5 = {'RT_ERSTSZ', 'DWC3_GBUSERRADDR1', 'DWC3_GDBGLTSSM', 'SMMU_ID1', 'SMMU_ID2', 'GR1_CBAR(n)', 'GR1_CBA2R(n)', 'CB_SCTLR',
+                     'CB_TCR2', 'CB_TTBR0', 'CB_TTBR1', 'CB_TCR', 'CB_MAIR0', 'CB_MAIR1', 'CB_FSR', 'CB_FAR', 'CB_FSYNR0'}
 # Every word the payload prints as a reason or a status, which the document must explain.
 REASONS = ['UNREADABLE', 'ALL_ONES', 'ZERO', 'NOT_XHCI', 'U0_NOT_READ', 'NO_XHC', 'NO_STREAMS', 'NO_BANK', 'NO_ERST', 'BAD_SIZE',
            'NO_TRANSLATING_STREAM_BELOW_NCB', 'UNSUPPORTED_EXID', 'S2CR_UNREAD', 'NOMATCH', 'NO_DCBAAP', 'DCBAAP_MISALIGNED',
@@ -137,12 +144,16 @@ class UsbsmmuDocAgreement(unittest.TestCase):
             for n in (1, 2, 5, 9):
                 self.assertEqual(eval(formula, {'__builtins__': {}}, {'n': n}), eval(macros[name], {'__builtins__': {}}, {'n': n}), name)
 
-    def test_only_what_s0_read_is_called_observed_and_everything_else_is_verified(self):
+    def test_only_what_s0_or_boot_5_read_is_called_observed_and_everything_else_is_verified(self):
         for name, _, _, evidence in self.table():
             with self.subTest(register=name):
                 self.assertIn('VERIFIED', evidence)
                 if name in OBSERVED_BY_S0:
                     self.assertIn('S0 OBSERVED', evidence)
+                    self.assertNotIn('never read on the unit', evidence)
+                elif name in OBSERVED_IN_BOOT5:
+                    self.assertIn('boot 5 OBSERVED', evidence)
+                    self.assertNotIn('S0 OBSERVED', evidence, 'S0 read no register of this row')
                     self.assertNotIn('never read on the unit', evidence)
                 else:
                     self.assertIn('never read on the unit', evidence)
@@ -309,7 +320,7 @@ class UsbsmmuDocAgreement(unittest.TestCase):
         self.assertEqual(order[:3], ['NOT_READ', 'ALL_ZERO', 'STAGE2_ONLY'], 'an all-zero bank is told before its zero TYPE reads as stage 2')
 
     def test_the_group_table_says_what_s0_did_not_read_in_the_register_tables_own_words(self):
-        unread = {name for name, _, _, evidence in self.table() if 'never read on the unit' in evidence}
+        unread = {name for name, _, _, evidence in self.table() if 'S0 OBSERVED' not in evidence}
         groups = {name: why for name, why in re.findall(r'^\| (U0|SMMU|RINGS|CB|WALK) \| `NEXT [^`]+` \| .+? \| (.+) \|$', self.doc, re.M)}
         self.assertEqual(sorted(groups), ['CB', 'RINGS', 'SMMU', 'U0', 'WALK'])
         alias = {'CONFIG': 'OP_CONFIG', 'GBUSERRADDR1': 'DWC3_GBUSERRADDR1', 'GDBGLTSSM': 'DWC3_GDBGLTSSM', 'ID1': 'SMMU_ID1', 'ID2': 'SMMU_ID2',
@@ -365,16 +376,17 @@ class UsbsmmuDocAgreement(unittest.TestCase):
             self.assertIn(f'"{key}"', self.code)
 
     def test_the_doc_says_what_the_status_is_and_what_nothing_here_can_prove(self):
-        for word in ('EXPERIMENTAL; hardware NOT RUN', 'VERIFIED', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'UNIMPLEMENTED',
-                     'nothing of this payload is OBSERVED on the unit', 'the cause of HCE is UNKNOWN', 'nothing recovers it',
+        for word in ('EXPERIMENTAL; ran once on the unit (boot 5, one unit, one boot)', 'VERIFIED', 'OBSERVED', 'INFERRED', 'UNKNOWN',
+                     'UNIMPLEMENTED', 'they are not boot 5\'s lines', 'the cause of HCE is UNKNOWN', 'nothing recovers it',
                      'proves nothing about the unit\'s windows', 'NEXT CB<n>', 'SC2'):
             self.mentions(word)
         self.mentions('A hang or reset in a context bank register is not recovered by anything here.')
         self.assertNotRegex(self.flat, r'(?i)hardware (run|qualified|passed)\b(?! NOT)')
 
-    def test_it_goes_between_psci_and_timer_and_says_why(self):
-        self.mentions('It goes after `psci` and before `timer`: `psci.bin usbsmmu.bin timer.bin`.')
-        self.mentions('so `timer`, which may stall the board too, goes **last**')
+    def test_it_goes_after_psci_and_timer_does_not_go_behind_it_and_says_why(self):
+        self.mentions('It goes after `psci`: `psci.bin usbsmmu.bin`, the chain boot 5 ran.')
+        self.mentions('and `timer`, which stalled the board in boot 4, does **not** go behind it')
+        self.mentions('so `timer` runs alone')
         self.assertNotRegex(self.flat, r'timer\.bin usbsmmu\.bin')
 
     def test_the_qemu_block_is_what_the_qemu_test_asserts_and_the_doc_says_what_it_proves(self):
@@ -391,12 +403,12 @@ class UsbsmmuDocAgreement(unittest.TestCase):
         self.assertRegex(stick, r'\| `SP11\\USBSMMU\.BIN` \|[^\n]*between `psci` and `timer`')
         self.mentions('`psci.bin usbsmmu.bin timer.bin` (manifest indexes 0, 1, 2;', stick)
         chain = self.main[self.main.index('## The chain'):self.main.index('## Payload ABI v1')]
-        self.mentions('so it goes after `psci` and before `timer` (`psci.bin usbsmmu.bin timer.bin`)', chain)
+        self.mentions('so it goes after `psci` and gets no payload that may stall behind it', chain)
         self.mentions('| `usbsmmu`, at most | 24 |', chain)
         start = self.main.index('## Payload `usbsmmu`')
         stub = self.main[start:self.main.index('\n## ', start)]
-        for phrase in ('between `psci` and `timer`', '[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)', 'EXPERIMENTAL; hardware NOT RUN',
-                       'nothing of it is OBSERVED on the unit', 'may hang the board'):
+        for phrase in ('goes after `psci`', '[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)', 'EXPERIMENTAL; ran once on the unit (boot 5)',
+                       'so the walk did not run', 'may hang the board'):
             self.mentions(phrase, stub)
         catalogue = self.main[self.main.index('## Line catalogue'):self.main.index('## Failure modes')]
         self.mentions('| `PAYLOAD USBSMMU ...` | page | the `usbsmmu` payload\'s lines, at most 24 ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md#what-it-prints)) |', catalogue)
@@ -421,21 +433,32 @@ class UsbsmmuDocAgreement(unittest.TestCase):
                 self.assertLess(len(text.encode('utf-8')), 50 * 1024)
                 self.assertLess(len(text.splitlines()), 1500)
         self.assertEqual(lib.link_problems(texts, ROOT / 'docs'), [])
-        for name in ('SP11-PAYLOAD-STATE.md', 'SP11-PAYLOAD-PSCI.md', 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md'):
+        for name in ('SP11-PAYLOAD-STATE.md', 'SP11-PAYLOAD-PSCI.md', 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md', 'SP11-PAYLOAD-RESULTS.md'):
             self.assertTrue(any(t.startswith(name) for t in lib.LINK.findall(texts['SP11-PAYLOAD.md'])), f'the main document does not link {name}')
             self.assertTrue(any(t.startswith('SP11-PAYLOAD.md') for t in lib.LINK.findall(texts[name])), f'{name} does not link back')
+        for name in ('SP11-PAYLOAD-PSCI.md', 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md'):
+            self.assertTrue(any(t.startswith('SP11-PAYLOAD-RESULTS.md') for t in lib.LINK.findall(texts[name])), f'{name} does not link the results')
+            self.assertTrue(any(t.startswith(name) for t in lib.LINK.findall(texts['SP11-PAYLOAD-RESULTS.md'])), f'the results do not link {name}')
 
     def test_the_state_and_psci_sections_moved_out_of_the_main_document_and_left_a_stub(self):
-        for heading, name, marker in (('## Reference payload `state`', 'SP11-PAYLOAD-STATE.md', '<!-- registers -->'),
-                                      ('## Payload `psci`', 'SP11-PAYLOAD-PSCI.md', '<!-- psci-ids -->')):
+        for heading, name, marker, status in (
+                ('## Reference payload `state`', 'SP11-PAYLOAD-STATE.md', '<!-- registers -->', 'EXPERIMENTAL; hardware NOT RUN'),
+                ('## Payload `psci`', 'SP11-PAYLOAD-PSCI.md', '<!-- psci-ids -->', 'EXPERIMENTAL; ran once on the unit (boot 5)')):
             with self.subTest(section=heading):
                 start = self.main.index(heading)
                 stub = self.main[start:self.main.index('\n## ', start)]
                 self.assertIn(f'({name})', stub)
-                self.assertIn('EXPERIMENTAL; hardware NOT RUN', stub)
+                self.assertIn(status, stub)
                 self.assertLess(len(stub), 800, 'a stub, not the section')
                 self.assertNotIn(marker, self.main)
                 self.assertIn(marker, DOCS[name].read_text(encoding='utf-8'))
+
+    def test_the_nested_row_says_it_was_reached_on_the_unit_with_nums2cb_0_and_keeps_its_verdict(self):
+        row = next(row for row in self.rows_of('usbsmmu-outcomes') if 'NESTED' in row)
+        for phrase in ('`NESTED` was reached on the unit in boot 5', '`NUMS2CB` is 0 there', 'the verdict stays UNKNOWN',
+                       'UNKNOWN whether the arena is mapped', 'SP11-PAYLOAD-RESULTS.md#payload-usbsmmu-boot-5'):
+            self.assertIn(phrase, ' '.join(row.split()))
+        self.assertNotIn('**SC2**', row)
 
 
 def _replace(old, new, count=1):
@@ -469,7 +492,10 @@ USBSMMU_DOC_MUTANTS = [
     ('a-register-row-is-invented', _replace('<!-- /usbsmmu-registers -->', '| `CB_PAR` | `0x50` | context bank n | VERIFIED |\n<!-- /usbsmmu-registers -->')),
     ('a-formula-is-wrong', _replace('| `SMMU_SMR(n)` | `0x800 + 4n` |', '| `SMMU_SMR(n)` | `0x800 + 8n` |')),
     ('a-register-is-renamed', _replace('| `CB_TTBR1` |', '| `CB_TTBR2` |')),
-    ('an-unread-register-is-called-observed', _replace('M bit 0); never read on the unit |', 'M bit 0); S0 OBSERVED |')),
+    ('an-unread-register-is-called-observed', _replace('only if `sGFSR` is not zero; never read on the unit |', 'only if `sGFSR` is not zero; S0 OBSERVED |')),
+    ('a-boot-5-register-is-called-unread', _replace('boot 5 OBSERVED `0x6000005F`', 'never read on the unit')),
+    ('a-boot-5-register-is-called-observed-by-s0', _replace('boot 5 OBSERVED `0xE0` (bank 3)', 'S0 OBSERVED `0xE0` (bank 3)')),
+    ('a-boot-5-register-is-forgotten-in-the-evidence', _replace('| VERIFIED (`core.h:123`); boot 5 OBSERVED `0x9CC20026` |', '| VERIFIED (`core.h:123`) |')),
     ('an-observed-register-is-called-unread', _replace('S0 OBSERVED `0x7C017E9A`', 'never read on the unit')),
     ('config-is-called-never-read', _replace('S0 OBSERVED `0x40` on U0 (the firmware\'s), `0x0` on U1', 'never read on the unit')),
     ('a-register-lost-its-evidence-label', _replace('| `OP_CONFIG` | `0x38` | xHC operational | VERIFIED (MaxSlotsEn 7:0; `xhci.c`); S0 OBSERVED',
@@ -521,7 +547,12 @@ USBSMMU_DOC_MUTANTS = [
     ('the-order-puts-usbsmmu-after-timer', _replace('`psci.bin usbsmmu.bin timer.bin`', '`psci.bin timer.bin usbsmmu.bin`', count=-1)),
     ('the-chain-total-is-wrong', _replace('= 83 lines', '= 84 lines')),
     ('the-four-payload-total-is-wrong', _replace('= 109 lines', '= 108 lines')),
-    ('hardware-is-claimed-run', _replace('**EXPERIMENTAL; hardware NOT RUN:**', '**hardware run:**')),
+    ('hardware-is-claimed-run', _replace('**EXPERIMENTAL; ran once on the unit (boot 5, one unit, one boot):**', '**EXPERIMENTAL; hardware run:**')),
+    ('the-one-boot-is-widened-to-the-unit-class', _replace('(boot 5, one unit, one boot)', '(boot 5, every unit)')),
+    ('the-fixtures-are-called-the-units-lines', _replace("they are not boot 5's", "they are boot 5's")),
+    ('timer-is-put-behind-usbsmmu-again', _replace('`timer`, which stalled the board in boot 4, does **not**', '`timer`, which may stall the board too, goes **last**, and does')),
+    ('the-nested-row-forgets-nums2cb', _replace('`NUMS2CB` is 0 there', '`NUMS2CB` is unknown there')),
+    ('the-nested-row-claims-a-verdict', _replace('and the verdict stays UNKNOWN', 'and the verdict is **SC2**')),
     ('the-recovery-claim-appears', _replace('A hang or reset in a context bank register is not recovered by anything here.', 'A hang is recovered.')),
     ('the-qemu-claim-is-widened', _replace('proves nothing about the unit\'s windows', 'proves the unit\'s windows', count=-1)),
     ('the-licence-line-is-gone', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
@@ -530,13 +561,16 @@ USBSMMU_DOC_MUTANTS = [
 ]
 MAIN_DOC_MUTANTS = [
     ('the-stub-lost-its-pointer', _replace('[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL', 'SP11-PAYLOAD-USBSMMU.md. EXPERIMENTAL')),
-    ('the-stub-claims-the-hardware-ran', _replace('[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; hardware NOT RUN:', '[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; hardware run:')),
+    ('the-stub-claims-the-hardware-ran', _replace('[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; ran once on the unit (boot 5)', '[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; hardware qualified')),
+    ('the-psci-stub-claims-a-qualification', _replace('EXPERIMENTAL; ran once on the unit (boot 5): the firmware answered', 'EXPERIMENTAL; qualified on the unit: the firmware answered')),
+    ('the-state-stub-claims-a-run', _replace('EXPERIMENTAL; hardware NOT RUN: the payload has not run on the unit', 'EXPERIMENTAL; ran once on the unit: the payload has not run on the unit')),
+    ('the-main-document-forgets-the-results', _replace('[SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)', 'SP11-PAYLOAD-RESULTS.md', count=-1)),
     ('the-stub-forgets-the-hang', _replace('It may hang the board at the\nfirst context bank register', 'It reads the\nfirst context bank register')),
     ('the-catalogue-row-is-gone', _replace('| `PAYLOAD USBSMMU ...` |', '| `PAYLOAD USB ...` |')),
     ('the-catalogue-anchor-does-not-resolve', _replace('SP11-PAYLOAD-USBSMMU.md#what-it-prints', 'SP11-PAYLOAD-USBSMMU.md#what-it-says')),
     ('the-stick-row-is-renamed', _replace('| `SP11\\USBSMMU.BIN` |', '| `SP11\\USBSMMU.EXE` |')),
     ('the-stick-chain-note-is-gone', _replace('`psci.bin usbsmmu.bin timer.bin` (manifest indexes 0, 1, 2;', '`psci.bin usbsmmu.bin timer.bin` (')),
-    ('the-order-paragraph-puts-usbsmmu-last', _replace('so it goes after `psci` and before `timer` (`psci.bin usbsmmu.bin timer.bin`)', 'so it goes last (`psci.bin timer.bin usbsmmu.bin`)')),
+    ('the-order-paragraph-puts-usbsmmu-last', _replace('`psci` and gets no payload that may stall behind it', '`timer` and goes last of its chain')),
     ('the-planning-row-is-wrong', _replace('| `usbsmmu`, at most | 24 |', '| `usbsmmu`, at most | 23 |')),
     ('the-build-line-forgot-usbsmmu', _replace('{state,psci,usbsmmu,timer}.bin', '{state,psci,timer}.bin')),
     ('the-allow-list-sentence-forgot-usbsmmu', _replace('; `usbsmmu` `MRS` of CurrentEL, no barrier and no `smc`.', '.')),
