@@ -8,7 +8,9 @@
  *
  * Entry is at offset 0 of the file, x0 = a, SP = the top of the payload stack described by a. It
  * returns in x0 and q1n1 prints the value. The payload follows AAPCS64 and calls into q1n1 only through
- * a->ops.
+ * a->ops. A manifest may list several payloads: the runner calls them one after the other in one boot,
+ * each with its own payload_base and payload_size and a fresh budget of ops, and nothing else in `a`
+ * differs between them.
  *
  * This header is shared by the runner (a PE image), the payloads (bare-metal ELF) and the host tests,
  * so it is freestanding (stdint and stddef only) and has no gate: it only declares the contract.
@@ -83,7 +85,7 @@ struct q1n1_payload_args {
     uint64_t map_base;          /* the final UEFI memory map ExitBootServices was given */
     uint64_t map_size;          /* bytes */
     uint64_t map_stride;        /* descriptor size in bytes */
-    uint64_t preload_table;     /* a struct q1n1_preload_cache (preload.h): file 0 is this payload */
+    uint64_t preload_table;     /* a struct q1n1_preload_cache (preload.h): this payload is the entry whose base is payload_base */
     uint64_t preload_size;
     uint64_t stack_base;        /* the payload stack, [stack_base, stack_base + stack_size) */
     uint64_t stack_size;

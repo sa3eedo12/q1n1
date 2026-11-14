@@ -45,6 +45,7 @@ const char *q1n1_payload_err_name(int err)
     case Q1N1_PAYLOAD_E_MANIFEST_IO: return "MANIFEST_IO";
     case Q1N1_PAYLOAD_E_MANIFEST_BAD: return "MANIFEST_BAD";
     case Q1N1_PAYLOAD_E_TOO_MANY_FILES: return "TOO_MANY_FILES";
+    case Q1N1_PAYLOAD_E_FILE0_NOT_BIN: return "FILE0_NOT_BIN";
     case Q1N1_PAYLOAD_E_BAD_PATH: return "BAD_PATH";
     case Q1N1_PAYLOAD_E_FILE_OPEN: return "FILE_OPEN";
     case Q1N1_PAYLOAD_E_FILE_SIZE: return "FILE_SIZE";
@@ -77,6 +78,18 @@ static int equal_nocase(const char *a, const char *b)
         if (fold((unsigned char)*a) != fold((unsigned char)*b)) return 0;
         if (!*a) return 1;
     }
+}
+
+/* The kind is decided by the file name alone, the last component of the path: <stem>.BIN is a payload
+ * and anything else is data, so a name that merely contains or starts with it (X.BIN.TXT, BIN, .BIN) is
+ * data. A file that is not called can only be misread, never run. */
+int q1n1_payload_path_is_code(const char *path)
+{
+    size_t length = 0, name = 0;
+    for (; path[length]; length++)
+        if (path[length] == '\\') name = length + 1;
+    if (length < name + 5) return 0;
+    return equal_nocase(path + length - 4, ".BIN");
 }
 
 static void wide(char16 *dst, const char *src)
@@ -222,6 +235,9 @@ static int check_manifest(struct q1n1_payload_diag *diag)
         }
     }
     diag->index = 0;
+    /* The chain starts at file 0, so a manifest whose first entry is data has nothing to call. Asked after
+     * the rules about where a file may be, which are the more serious. */
+    if (!q1n1_payload_path_is_code(manifest.files[0].path)) return Q1N1_PAYLOAD_E_FILE0_NOT_BIN;
     return Q1N1_PAYLOAD_OK;
 }
 
@@ -271,13 +287,14 @@ static int load_file(struct efi_boot_services *bs, struct efi_file *root, struct
     struct q1n1_payload_file *entry = &out->file[index];
     entry->bytes = bytes;
     entry->alloc = (bytes + PAGE_BYTES - 1) & ~(PAGE_BYTES - 1);
-    entry->memory_type = index == 0 ? Q1N1_PAYLOAD_TYPE_CODE : Q1N1_PAYLOAD_TYPE_DATA;
+    entry->memory_type = q1n1_payload_path_is_code(want->path) ? Q1N1_PAYLOAD_TYPE_CODE : Q1N1_PAYLOAD_TYPE_DATA;
     int err = allocate(bs, entry->memory_type, entry->alloc, &entry->base, diag);
     if (err) {
         file->close(file);
         return err;
     }
     out->count = index + 1;     /* from here on release() frees it */
+    out->code_count += q1n1_payload_file_is_code(entry);
     status = read_exact(file, (void *)(uintptr_t)entry->base, bytes, &got);
     file->close(file);
     if (status) {

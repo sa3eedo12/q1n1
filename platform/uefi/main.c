@@ -1516,7 +1516,8 @@ static int payload_guarded(int kind, uint64_t dst, uint64_t src, uint64_t size)
     return kind == Q1N1_PAYLOAD_G_COPY32 ? live_guarded(0, dst, src, size) : 1;
 }
 
-/* After the page is drawn, at EL2: verifies the payload where it now is and calls it. */
+/* After the page is drawn, at EL2: runs the chain, which verifies each payload where it now is and calls
+ * it, in manifest order. */
 static void sp11_payload_el2_run(void)
 {
     struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter};
@@ -1534,9 +1535,9 @@ static void payload_console(struct efi_system_table *st, const char *line)
     firmware_out(st, "\n");
 }
 
-/* Before ExitBootServices: finds, checks and loads the payload from the volume this image came from.
- * Prints one PAYLOAD line on the firmware console and returns non-success, with nothing bounced, when it
- * cannot. */
+/* Before ExitBootServices: finds, checks and loads the payloads and data files from the volume this image
+ * came from. Prints one PAYLOAD line on the firmware console and returns non-success, with nothing
+ * bounced, when it cannot. */
 static efi_status sp11_payload_prepare(struct efi_system_table *st, struct efi_loaded_image *image)
 {
     struct q1n1_payload_diag diag;
@@ -1636,7 +1637,7 @@ void q1n1_main(void)
 #endif
 #if Q1N1_SP11_PAYLOAD
     /* Likewise: the runner's lines go in the survey's region, beside or below the page, which it leaves as
-     * it is. At EL1 nothing is called: the payload is written for EL2. */
+     * it is. At EL1 nothing is called: the payloads are written for EL2. */
     if (el == 2) sp11_payload_el2_run();
     else out("PAYLOAD SKIPPED=NOT_AT_EL2\n");
 #endif
@@ -1805,6 +1806,7 @@ static efi_status sp11_payload_precheck(struct efi_system_table *st, uint64_t ma
     q1n1_payload_line_begin(&ready, "PAYLOAD READY");
     q1n1_payload_line_dec(&ready, "FILES", payload_loaded.count);
     q1n1_payload_line_dec(&ready, "RANGES", sp11_declared.count);
+    q1n1_payload_line_dec(&ready, "CODE", payload_loaded.code_count);
     q1n1_payload_note(&payload_loaded, ready.buf);
     payload_console(st, ready.buf);
     return 0;

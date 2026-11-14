@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* Surface Pro 11 stick payload runner (docs/SP11-PAYLOAD.md): load reviewed EL2 test code from the boot
  * stick before ExitBootServices, declare it to the paired slbounce's scoped sweep, and call it at EL2
- * after the bounce, without rebuilding q1n1 and without a host link.
+ * after the bounce, without rebuilding q1n1 and without a host link. A manifest may list several
+ * payloads (entries named <stem>.BIN, in any case); they are called one after the other in manifest
+ * order, each verified again right before its call, and every other entry is data that is never called.
  *
  * Opt-in twice over. Q1N1_SP11_PAYLOAD (default 0) needs SNAP_PLATFORM_SP11=1 and cannot be combined
  * with Q1N1_SP11_STK_SURVEY: each is its own image and its own --el2 flow. With the gate at 0 every file
@@ -47,9 +49,10 @@
 
 /* ---- The stick: where the runner looks, and nowhere else ---------------------------------------- */
 
-/* On the volume the image was loaded from, in Q1N1PLD1 format (preload.h). File 0 is the payload,
- * further files are data a payload can find through the preload table. Deliberately not the A16's
- * \Snapintosh\q1n1-preload.bin: a stick prepared for one flow is never read by the other. */
+/* On the volume the image was loaded from, in Q1N1PLD1 format (preload.h). An entry whose file name is
+ * <stem>.BIN (any case) is a payload and is called; any other entry is data a payload can find through
+ * the preload table. File 0 must be a payload. Deliberately not the A16's \Snapintosh\q1n1-preload.bin:
+ * a stick prepared for one flow is never read by the other. */
 #define Q1N1_PAYLOAD_MANIFEST_PATH "\\SP11\\PAYLOAD.MAN"
 /* Every file the manifest lists must be below this directory (compared without regard to case). */
 #define Q1N1_PAYLOAD_DIR "\\SP11\\"
@@ -65,9 +68,11 @@
 /* The largest file the runner accepts at the chunk cap q1n1 declares (1 MiB): 256 MiB. */
 #define Q1N1_PAYLOAD_MAX_FILE_BYTES ((uint64_t)Q1N1_PAYLOAD_SWEEP_MAX_OPS << 20)
 
-/* UEFI memory types for AllocatePages. The payload is code: the firmware marks LoaderCode executable
+/* UEFI memory types for AllocatePages. A payload is code: the firmware marks LoaderCode executable
  * (q1n1.efi itself runs from it, and so does a chainloaded stage) and may mark LoaderData
- * no-execute, which would fault the call. Data files are LoaderData. slbounce sweeps both. */
+ * no-execute, which would fault the call. Data files are LoaderData. slbounce sweeps both. The memory
+ * type is what tells the two kinds apart after loading: a file is called exactly when it is in
+ * LoaderCode. */
 #define Q1N1_PAYLOAD_TYPE_CODE 1u
 #define Q1N1_PAYLOAD_TYPE_DATA 2u
 #define Q1N1_PAYLOAD_ALLOCATE_ANY_PAGES 0u
@@ -92,6 +97,7 @@ enum {
     Q1N1_PAYLOAD_E_MANIFEST_IO,     /* its size or its contents could not be read */
     Q1N1_PAYLOAD_E_MANIFEST_BAD,    /* q1n1_preload_manifest_valid refused it, or it is too large */
     Q1N1_PAYLOAD_E_TOO_MANY_FILES,  /* more files than there are declared ranges to put them in */
+    Q1N1_PAYLOAD_E_FILE0_NOT_BIN,   /* file 0 is not named <stem>.BIN, so there is nothing to call */
     Q1N1_PAYLOAD_E_BAD_PATH,        /* a file outside \SP11\, or the manifest itself */
     Q1N1_PAYLOAD_E_FILE_OPEN,
     Q1N1_PAYLOAD_E_FILE_SIZE,       /* not the size the manifest says, or not a plain file */
@@ -105,18 +111,27 @@ enum {
 };
 const char *q1n1_payload_err_name(int err);
 
+/* Which kind a manifest entry is, decided by its file name alone: <stem>.BIN, in any case, is a payload
+ * (code, called) and every other name is data (never called). The stem must not be empty. */
+int q1n1_payload_path_is_code(const char *path);
+
 /* What was loaded. Lives in q1n1's own image, which is the first range declared. */
 struct q1n1_payload_file {
     uint64_t base;          /* AllocatePages result, page aligned */
     uint64_t bytes;         /* the file's size, as the manifest has it */
     uint64_t alloc;         /* bytes rounded up to whole pages: the range declared to the sweep */
-    uint32_t memory_type;   /* Q1N1_PAYLOAD_TYPE_CODE for file 0, Q1N1_PAYLOAD_TYPE_DATA for the rest */
+    uint32_t memory_type;   /* Q1N1_PAYLOAD_TYPE_CODE for a payload (<stem>.BIN), Q1N1_PAYLOAD_TYPE_DATA for the rest */
     uint32_t reserved;
     uint8_t sha256[32];     /* what the file hashed to, equal to the manifest's */
 };
+/* A loaded file is called exactly when it is in LoaderCode. */
+static inline int q1n1_payload_file_is_code(const struct q1n1_payload_file *file)
+{
+    return file->memory_type == Q1N1_PAYLOAD_TYPE_CODE;
+}
 struct q1n1_payload_loaded {
     uint32_t count;
-    uint32_t reserved;
+    uint32_t code_count;    /* how many of the files are payloads: at least one, and file 0 is one */
     struct q1n1_payload_file file[Q1N1_PAYLOAD_MAX_FILES];
     uint64_t table_base, table_alloc;   /* a struct q1n1_preload_cache: the payload finds its files in it */
     uint64_t stack_base, stack_alloc;   /* the payload's stack: not declared, nothing is written to it before the bounce */
@@ -258,28 +273,41 @@ struct q1n1_payload_platform {
     uint32_t fb_width, fb_height, fb_stride, fb_format;
 };
 enum {
-    Q1N1_PAYLOAD_RUN_OK = 0,
-    Q1N1_PAYLOAD_RUN_NO_PAYLOAD,    /* nothing was loaded */
-    Q1N1_PAYLOAD_RUN_HASH,          /* the payload no longer hashes to its manifest entry: not called */
+    Q1N1_PAYLOAD_RUN_OK = 0,        /* every payload was called and came back, whatever it returned */
+    Q1N1_PAYLOAD_RUN_NO_PAYLOAD,    /* nothing was loaded, or there is no payload among the files */
+    Q1N1_PAYLOAD_RUN_HASH,          /* a payload no longer hashes to its manifest entry: not called, chain stopped */
+    Q1N1_PAYLOAD_RUN_STACK,         /* a payload overwrote its stack guard: the chain stopped after it */
 };
-struct q1n1_payload_result {
-    int status;
-    uint64_t retval;
+/* What one payload did: the numbers of its PAYLOAD DONE line. */
+struct q1n1_payload_call_result {
+    uint32_t index;             /* its manifest entry */
     int stack_ok;               /* the guard words at the low end of the stack are intact */
+    uint64_t retval;
     unsigned lines, dropped;    /* lines the payload put on the panel, and lines past its budget */
     unsigned loads, faults, refused;
 };
-/* Replays the notes, verifies the payload again where it now is (through the table and against what
- * was hashed before the bounce), makes it executable, prints PAYLOAD CALL <hash prefix>, calls it, and
- * prints what came back. A payload that does not verify is not called. */
+struct q1n1_payload_result {
+    int status;
+    uint32_t stopped;           /* the manifest entry the chain stopped at (RUN_HASH and RUN_STACK) */
+    uint32_t called;            /* payloads called and come back, in order: call[0 .. called - 1] */
+    struct q1n1_payload_call_result call[Q1N1_PAYLOAD_MAX_FILES];
+};
+/* Replays the notes, then runs the chain: for each payload in manifest order, verifies it again where it
+ * now is (through the table and against what was hashed before the bounce), makes its pages executable,
+ * arms the stack guard words, prints PAYLOAD CALL <index> <hash prefix>, calls it with its own base and
+ * size, and prints PAYLOAD DONE for what came back. Data entries are never called. The payload's budgets
+ * (lines, loads) start again for every call. The chain stops, with one PAYLOAD CHAIN STOPPED line, at a
+ * payload that does not verify (it is not called) or that overwrote its stack guard; what a payload
+ * returns never stops it. A payload that hangs or faults ends the boot, named by the last line. */
 int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_payload_loaded *loaded,
                      const struct q1n1_payload_platform *platform, struct q1n1_payload_result *result);
 /* The policy of the load32 op, pure. 0 or one of Q1N1_PAYLOAD_LOAD_E_*. */
 int q1n1_payload_load32_check(uint64_t addr, const uint32_t *out, uint64_t stack_base, uint64_t stack_size,
                               unsigned loads_done);
-/* The payload's file 0 hashes, where it is, to the digest in the table and to the one measured before
- * the bounce. 1 when it does. */
-int q1n1_payload_verify_in_place(const struct q1n1_payload_loaded *loaded);
+/* Payload `index` (a file in LoaderCode) hashes, where it is, to the digest in the table and to the one
+ * measured before the bounce, and the table still describes every file the runner loaded. 1 when it does.
+ * Only this payload is hashed: a data file can be gigabytes and nothing calls it. */
+int q1n1_payload_verify_in_place(const struct q1n1_payload_loaded *loaded, uint32_t index);
 
 /* sp11-payload-call.S, EL2 only. q1n1_payload_call calls entry(args) with SP at stack_top, keeping
  * q1n1's callee-saved registers and SP safe. q1n1_payload_sync_code cleans the data cache and
