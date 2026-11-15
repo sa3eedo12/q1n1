@@ -120,6 +120,17 @@ POLICIES = {
               'bytes': 20480, 'forbid': {'dmb', 'sb', 'sev', 'sevl'},
               'allow': {'msr': {'vbar_el2', 'daifset'}, 'dc': {'civac', 'ivac'}, 'wfe': {''}}},
 }
+# el2mem and hashbig (the memory-map and hashing payloads): MRS of a few registers, exactly the AT form S1E2R (an AT of any other
+# kind is refused), the ISB that must follow it, no other barrier, no SMC. `read_only` adds the memory discipline of
+# tools/sp11_payload_memcheck.py: every store through the payload's own stack and every load through the stack, the image, the
+# arguments or a pointer they hold; `bulk_reads` (hashbig only) lets loads use any base, for the one file it hashes in place.
+EL2MEM_REGISTERS = {
+    'currentel', 'cntfrq_el0', 'par_el1', 'id_aa64mmfr1_el1', 's3_0_c0_c5_1', 's3_0_c0_c6_2', 's3_0_c0_c4_2', 'aidr_el1',
+    'revidr_el1', 'mdcr_el2', 'mdscr_el1', 'oslsr_el1', 'icc_sre_el2'}
+POLICIES['el2mem'] = {'registers': EL2MEM_REGISTERS, 'smc': 0, 'bytes': 16384, 'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'},
+                      'allow': {'at': {'s1e2r'}}, 'read_only': True}
+POLICIES['hashbig'] = {'registers': {'currentel', 'cntfrq_el0', 'par_el1'}, 'smc': 0, 'bytes': 12288,
+                       'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'}, 'allow': {'at': {'s1e2r'}}, 'read_only': True, 'bulk_reads': True}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}
@@ -150,16 +161,31 @@ ALLOW_WORDS = {
 }
 SYSTEM_REGISTER_ALIASES = {'id_aa64mmfr3_el1': 's3_0_c0_c7_3', 'id_aa64mmfr4_el1': 's3_0_c0_c7_4', 'ttbr1_el2': 's3_4_c2_c0_1',
                            'cntvoff_el2': CNTVOFF_EL2, 'cntpoff_el2': CNTPOFF_EL2}
+# AT S1E2R for the el2mem and hashbig policies: SYS #4, C7, C8, #0 (every Xt), the only AT the `allow` key can name.
+ALLOW_WORDS[('at', 's1e2r')] = ('sys', 0xffffffe0, 0xd50c7800)
+# The ID registers el2mem reads by encoding, which a disassembler may print by name.
+SYSTEM_REGISTER_ALIASES.update({'id_aa64dfr1_el1': 's3_0_c0_c5_1', 'id_aa64isar2_el1': 's3_0_c0_c6_2', 'id_aa64pfr2_el1': 's3_0_c0_c4_2'})
 # Every spelling of a timer offset: a policy that reads one of them once names it too.
 OFFSET_NAMES = {CNTVOFF_EL2: ('cntvoff_el2', CNTVOFF_EL2), CNTPOFF_EL2: ('cntpoff_el2', CNTPOFF_EL2)}
+
+
+def _memcheck():
+    """tools/sp11_payload_memcheck.py, imported by its path next to this file: the memory discipline of the policy keys
+    `read_only` and `bulk_reads`, which no older policy has."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('sp11_payload_memcheck', Path(__file__).with_name('sp11_payload_memcheck.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     """Everything in a payload's code that `policy` does not allow, as sentences; an empty list means it is clean.
     Reads the disassembly of the ELF (every mnemonic, every MRS register, every SMC and its immediate, the timer
     offsets) and, independently, every aligned word of the flat binary's code by encoding. The optional policy keys
-    `allow`, `smc_ids` and `single_reads` (see POLICIES) widen what is allowed in exact forms only; a policy without them
-    is checked as it always was."""
+    `allow`, `smc_ids` and `single_reads` (see POLICIES) widen what is allowed in exact forms only, and `read_only` and
+    `bulk_reads` add the memory discipline of tools/sp11_payload_memcheck.py; a policy without them is checked as it
+    always was."""
     problems = []
     dis = run(['llvm-objdump', '-d', '--no-show-raw-insn', str(elf)])
     if dis.returncode:
@@ -168,6 +194,8 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     for undecodable in ('<unknown>', '.inst'):
         if undecodable in text:
             problems.append(f'the disassembly holds {undecodable}: a word that is not a known instruction')
+    if policy.get('read_only') or policy.get('bulk_reads'):
+        problems += _memcheck().memory_violations(text, policy)
     found = (re.match(r'\s+[0-9a-f]+:\s+(\S+)\s*(.*)$', line) for line in text.splitlines())
     instructions = [(m.group(1).lower(), m.group(2)) for m in found if m]
     mnemonics = {m for m, _ in instructions}

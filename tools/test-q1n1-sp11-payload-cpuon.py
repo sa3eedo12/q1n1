@@ -567,7 +567,7 @@ class CpuonEngine(unittest.TestCase):
     def test_the_older_policies_do_not_use_the_new_keys(self):
         for name in OLD_POLICIES:
             self.assertFalse({'allow', 'smc_ids', 'single_reads'} & set(lib.POLICIES[name]), name)
-        self.assertEqual(set(lib.POLICIES), set(OLD_POLICIES) | {'cpuon'})
+        self.assertLessEqual(set(OLD_POLICIES) | {'cpuon'}, set(lib.POLICIES))
         self.assertEqual(lib.POLICIES['state']['registers'], lib.STATE_REGISTERS)
 
     def test_the_new_engine_answers_exactly_as_the_old_on_every_corpus_binary_under_every_older_policy(self):

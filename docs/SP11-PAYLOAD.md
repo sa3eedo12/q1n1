@@ -20,7 +20,10 @@ lost: its right-hand column was not photographed), `usbsmmu` ran once (boot 5), 
 (INFERRED: it stopped at its CNTPOFF_EL2 read; it is not run in a chain again), `cpuon` ran three times, alone (boot 7 and steps 2
 and 3 of [the restart probe](SP11-PAYLOAD-RESULTS.md#the-restart-probe)): it started the eleven secondaries (every report that
 reached the page says EL2) and each was seen OFF again, and the board restarted by itself after two of the three runs, for a reason
-and at a time that are UNKNOWN ([SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md#the-restart)), and `state` is **hardware NOT RUN**.
+and at a time that are UNKNOWN ([SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md#the-restart)), and `state` is **hardware NOT RUN**,
+as are the two read-only memory payloads `el2mem` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md): what EL2's stage-1 map reaches
+and the registers a monitor reads at launch) and `hashbig` ([SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md): how fast EL2 hashes
+the biggest loaded file, and where the firmware put it).
 Facts about the unit are labelled where they are used.
 
 ## Build
@@ -399,6 +402,7 @@ the run under the pinned UEFI Shell).
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu.py` | `usbsmmu` ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)): the ten suites of its host test (scripted MMIO windows, RAM and memory map, the walk against independently built page tables, an abort at every load, hostile registers, the line and load budgets), 83 seeded-bug mutants and an unmutated control, the source audit of what it may touch, the allow-list on `usbsmmu.bin` (23 seeded bad binaries) and on the other policies, the manifest tool and the runner's validator on `psci usbsmmu timer` |
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu-doc.py` | the payload documents against the source and each other (registers and their evidence labels, the printed blocks against the host test's own dump, numbers, reason names, decision tables, the QEMU block, links and anchors, licence lines and sizes of these documents and of the results document, the pointers in this document, the moved `state` and `psci` stubs), with 89 seeded mistakes in the documents |
 | `python3 tools/test-q1n1-sp11-payload-results-doc.py` | [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md): the page of boot 5 (its line counts, its decoded numbers), the register table's boot 5 values against it, the timer inference against the line counts and the timer document's printed lines, the claims (one unit, at most four boots of any payload; the inferences labelled; the restart's cause and times UNKNOWN, no window; the read-only control), the runner lines quoted for `cpuon` against the cpuon document's page, licence line, size and links, with 24 seeded mistakes in the two documents |
+| `python3 tools/test-q1n1-sp11-payload-el2mem.py`, `-hashbig.py`, `-memcheck.py`, `-mmu-doc.py`, `-qemu-el2mem.py` | `el2mem` and `hashbig` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md#tests), [SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md#tests)): the host programs over a modelled machine under ASan and UBSan, their seeded-bug mutants, the memory-discipline check of `tools/sp11_payload_memcheck.py` on the binaries, the two documents against the sources, and the QEMU/EDK2 boots |
 | `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 
 The default-off proof (`PayloadDefaultOff`): with the gate at 0 every runner file compiles to an object with no
@@ -501,7 +505,8 @@ is UNIMPLEMENTED and, on the unit, UNKNOWN beyond what `psci` answered.
 2. **A payload that is the EL2 monitor and receives preloaded guest images.** The images are the data files 1-4,
    already loaded, hash-checked before the bounce, declared to the sweep and found through `preload_table`. It
    needs: a post-bounce `verify(index)` op for a data file (`q1n1_preload_verify` exists; only the payloads, the
-   files named `.BIN`, are hashed at EL2 today, because a data file can be hundreds of megabytes); to take over
+   files named `.BIN`, are hashed at EL2 today, because a data file can be hundreds of megabytes; [`hashbig`](SP11-PAYLOAD-HASHBIG.md)
+   measures what hashing one in place costs, hardware NOT RUN); to take over
    `VBAR_EL2` and never return (a payload that does not return is already named by the `PAYLOAD CALL` line, and
    ends the chain); the memory map (already in `a`) to decide what is free, including q1n1's own image, table and
    stack; and, for guests over 256 MiB, either several files or a larger chunk budget in slbounce, which needs a
