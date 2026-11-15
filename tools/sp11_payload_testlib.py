@@ -116,6 +116,18 @@ POLICIES = {
     'timer': {'registers': TIMER_REGISTERS, 'smc': 0, 'bytes': 4096, 'timer_offsets': True,
               'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
     'usbsmmu': {'registers': {'currentel'}, 'smc': 0, 'bytes': 20480, 'forbid': {'isb', 'dsb', 'dmb', 'sb'}},
+    # `cnthctl` writes one register, CNTHCTL_EL2, and only `msr cnthctl_el2, xN` (docs/SP11-PAYLOAD-CNTHCTL.md): ISB is the only barrier.
+    'cnthctl': {'registers': {'currentel', 'hcr_el2', 'id_aa64mmfr0_el1', 'cntfrq_el0', 'cnthctl_el2'}, 'smc': 0, 'bytes': 4096,
+                'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'}, 'allow': {'msr': {'cnthctl_el2'}}},
+    # `el1trap` runs a five-instruction stub at EL1 (docs/SP11-PAYLOAD-EL1TRAP.md): the four registers of the excursion and the three
+    # the exception machinery changes may be written, in those forms only; ERET, three HVC immediates, DC CIVAC and IC IVAU are its
+    # own; DSB and ISB are its barriers. The registers read are its context, its handler's and the stub's four.
+    'el1trap': {'registers': {'currentel', 'hcr_el2', 'id_aa64mmfr0_el1', 'id_aa64pfr0_el1', 'cntfrq_el0', 'cnthctl_el2', 'daif', 'spsel',
+                              'sctlr_el1', 'vbar_el1', 'vbar_el2', 'spsr_el2', 'elr_el2', 'esr_el2', 'far_el2', 'cntpct_el0', 'esr_el1',
+                              'elr_el1', 'far_el1', 'cntvct_el0', 'cntv_ctl_el0'}, 'smc': 0, 'bytes': 16384,
+                'forbid': {'dmb', 'sb', 'sev', 'sevl'},
+                'allow': {'msr': {'hcr_el2', 'cnthctl_el2', 'sctlr_el1', 'vbar_el1', 'vbar_el2', 'spsr_el2', 'elr_el2'},
+                          'hvc': {'#0', '#0x1', '#0x2'}, 'eret': {''}, 'dc': {'civac'}, 'ic': {'ivau'}}},
     'cpuon': {'registers': CPUON_REGISTERS, 'single_reads': {CNTVOFF_EL2}, 'smc': 3, 'smc_ids': CPUON_SMC_IDS,
               'bytes': 20480, 'forbid': {'dmb', 'sb', 'sev', 'sevl'},
               'allow': {'msr': {'vbar_el2', 'daifset'}, 'dc': {'civac', 'ivac'}, 'wfe': {''}}},
@@ -153,6 +165,17 @@ BARRIER_WORDS = {'isb': (0xfffff0ff, 0xd50330df), 'dsb': (0xfffff0ff, 0xd503309f
 # and the mask and value of exactly that form (every register of Rt is any). Independent of the disassembler: a word of such a
 # class that is not one of these is a violation whatever the disassembler calls it.
 ALLOW_WORDS = {
+    ('eret', ''): ('eret', 0xffffffff, 0xd69f03e0),
+    ('hvc', '#0'): ('hvc', 0xffffffff, 0xd4000002),                     # HVC #imm16: 0xd4000002 | imm16 << 5
+    ('hvc', '#0x1'): ('hvc', 0xffffffff, 0xd4000022),
+    ('hvc', '#0x2'): ('hvc', 0xffffffff, 0xd4000042),
+    ('ic', 'ivau'): ('sys', 0xffffffe0, 0xd50b7520),                    # SYS #3, C7, C5, #1
+    ('msr', 'cnthctl_el2'): ('msr-register', 0xffffffe0, 0xd51ce100),   # S3_4_C14_C1_0
+    ('msr', 'elr_el2'): ('msr-register', 0xffffffe0, 0xd51c4020),       # S3_4_C4_C0_1
+    ('msr', 'hcr_el2'): ('msr-register', 0xffffffe0, 0xd51c1100),       # S3_4_C1_C1_0
+    ('msr', 'sctlr_el1'): ('msr-register', 0xffffffe0, 0xd5181000),     # S3_0_C1_C0_0
+    ('msr', 'spsr_el2'): ('msr-register', 0xffffffe0, 0xd51c4000),      # S3_4_C4_C0_0
+    ('msr', 'vbar_el1'): ('msr-register', 0xffffffe0, 0xd518c000),      # S3_0_C12_C0_0
     ('msr', 'vbar_el2'): ('msr-register', 0xffffffe0, 0xd51cc000),      # S3_4_C12_C0_0
     ('msr', 'daifset'): ('msr-immediate', 0xfffff0ff, 0xd50340df),      # PSTATE.DAIFSet, any 4-bit immediate
     ('dc', 'civac'): ('sys', 0xffffffe0, 0xd50b7e20),                   # SYS #3, C7, C14, #1

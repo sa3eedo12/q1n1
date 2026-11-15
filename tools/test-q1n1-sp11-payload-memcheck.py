@@ -347,7 +347,11 @@ READS = {'mrs-cntvoff': 'S3_4_C14_C0_3', 'mrs-cntpoff': 'S3_4_C14_C0_6', 'mrs-mi
 # The three registers the engine now spells by encoding: the base engine says their name where this one says s3_0_c0_cN_M, in the one
 # sentence that lists the registers read. The verdict is the same, and so is every other sentence.
 SPELLED = {'mrs-dfr1', 'mrs-isar2', 'mrs-pfr2'}
-NEW_TABLE_ENTRIES = {'ALLOW_WORDS': {('at', 's1e2r')}, 'SYSTEM_REGISTER_ALIASES': {'id_aa64dfr1_el1', 'id_aa64isar2_el1', 'id_aa64pfr2_el1'}}
+# The ALLOW_WORDS rows the later payloads (cnthctl, el1trap) add: exact forms of the instructions they alone may hold.
+TIMER_ALLOW_WORDS = {('eret', ''), ('hvc', '#0'), ('hvc', '#0x1'), ('hvc', '#0x2'), ('ic', 'ivau'), ('msr', 'cnthctl_el2'),
+                     ('msr', 'elr_el2'), ('msr', 'hcr_el2'), ('msr', 'sctlr_el1'), ('msr', 'spsr_el2'), ('msr', 'vbar_el1')}
+NEW_TABLE_ENTRIES = {'ALLOW_WORDS': {('at', 's1e2r')} | TIMER_ALLOW_WORDS,
+                     'SYSTEM_REGISTER_ALIASES': {'id_aa64dfr1_el1', 'id_aa64isar2_el1', 'id_aa64pfr2_el1'}}
 
 
 def asm(text, clobbers='"memory"'):

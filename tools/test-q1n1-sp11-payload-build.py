@@ -20,6 +20,10 @@
     `make payloads` reproducible and running the check, and a payload with an absolute relocation fails the
     Makefile's build. The allow-list is tools/sp11_payload_testlib.py's, which tools/test-q1n1-sp11-payload-chain.py,
     -timer.py and -usbsmmu.py also run against seeded-bad builds.
+    Every payload of that list is built and checked by the same tests; `cnthctl` (MRS of five registers, `msr cnthctl_el2` only)
+    and `el1trap` (the EL1 excursion: seven MSR forms, three HVC immediates, ERET, DC CIVAC, IC IVAU, no SMC) are each also
+    refused under every other payload's policy, and tools/test-q1n1-sp11-payload-cnthctl.py and -el1trap.py run them against
+    seeded-bad builds.
   * ToolMutants: seeded bugs in the two tools, each of which ManifestTool or ElfCheck must reject (the same
     classes are run against the mutated copy through Q1N1_PAYLOAD_TOOLS_DIR), and an unmutated control.
   * PayloadDefaultOff: with Q1N1_SP11_PAYLOAD at 0 (the default) every file of the runner compiles to nothing,
@@ -424,6 +428,17 @@ class PayloadBinary(unittest.TestCase):
                 self.assertFalse(offsets & self.POLICY[other]['registers'])
                 problems = lib.binary_violations(timer_elf, timer_flat, self.POLICY[other], READELF())
                 self.assertTrue(any('the code names' in p for p in problems), 'the timer binary must be refused under this policy')
+        self.assertEqual(self.POLICY['cnthctl']['smc'], 0)
+        self.assertEqual(self.POLICY['cnthctl']['allow'], {'msr': {'cnthctl_el2'}})
+        self.assertEqual(self.POLICY['el1trap']['smc'], 0)
+        self.assertEqual(self.POLICY['el1trap']['allow']['hvc'], {'#0', '#0x1', '#0x2'})
+        self.assertEqual(self.POLICY['el1trap']['allow']['eret'], {''})
+        older = ('state', 'psci', 'timer', 'usbsmmu', 'cpuon')
+        for name, others in (('cnthctl', older), ('el1trap', older + ('cnthctl',))):
+            for other in others:
+                with self.subTest(payload=name, refused_under=other):
+                    self.assertTrue(lib.binary_violations(*self.bins[name], self.POLICY[other], READELF()),
+                                    f'the {name} binary must be refused under the {other} policy')
 
     def test_make_payloads_is_reproducible(self):
         again = BUILD / 'binary-again'
