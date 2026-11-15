@@ -4,13 +4,15 @@
 `payloads/psci.c` is one payload of the stick payload runner described in [SP11-PAYLOAD.md](SP11-PAYLOAD.md): the
 manifest and the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-boot), ABI v1 and the
 [line catalogue](SP11-PAYLOAD.md#line-catalogue) are defined there and not repeated. Evidence labels as there: VERIFIED,
-OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; ran once on the unit (boot 5).**
+OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; ran in four boots on the unit, OBSERVED on a page in three (one unit).**
 
 `payloads/psci.c` asks the firmware's PSCI implementation what it supports, with `smc #0` at EL2, and prints the
-answers. It is the first payload that is not MRS-only, so it is deliberately narrow. **It ran once on the unit**
-(2026-11-14, boot 5; one unit, one boot): the firmware answered every SMC, with PSCI and SMCCC v1.1, CPU 0 ON and the
-eleven others OFF (OBSERVED; [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)). What those answers mean for the port
-stays INFERRED.
+answers. It is the first payload that is not MRS-only, so it is deliberately narrow. **It ran in four boots on the unit**: boot 4
+(2026-11-14; its page was lost, the right-hand column was not photographed), boot 5 (2026-11-14) and the two boots of the restart
+control (2026-11-16; two crisp pages, at `UPTIME 224 S` and `268 S`, with the same 15 lines). OBSERVED on a page in three boots, one
+unit: the firmware answered every SMC, with PSCI and SMCCC v1.1, CPU 0 ON and the eleven others OFF
+([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md), [the control](SP11-PAYLOAD-RESULTS.md#the-restart-control)). What those
+answers mean for the port stays INFERRED.
 
 **The conduit.** The unit's FADT has ARM_BOOT_ARCH_FLAGS 0x1: PSCI_COMPLIANT = 1, PSCI_USE_HVC = 0, so the PSCI
 conduit is SMC (OBSERVED). That an SMC issued from q1n1's EL2 context, after the Secure-Launch bounce, reaches the
@@ -141,9 +143,10 @@ rather than adapting; if `smc` had faulted, q1n1's fault page would have named i
 there. The unit's answers differ from QEMU's (`MIGRATE_INFO_TYPE` -1 against 2, `SMCCC_VERSION` v1.1 against -1, the
 eleven others OFF against -2): they are in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md).
 
-**Status.** EXPERIMENTAL. Ran once on the unit (boot 5; one unit, one boot): 15 lines, no fault, every SMC answered
+**Status.** EXPERIMENTAL. Ran in four boots on the unit, OBSERVED on a page in three (one unit): boot 4's page was lost, and boot 5
+and the two boots of the restart control show the same 15 lines, no fault, every SMC answered
 ([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)). OBSERVED: the firmware answers an SMC from this context, PSCI and SMCCC
-v1.1, the boot CPU is ON and the eleven others OFF, and the `PSCI_FEATURES` answers. INFERRED: that a 0 from
-`PSCI_FEATURES` means implemented (the PSCI specification was not re-read), and what any answer means for the port.
-UNKNOWN: what `CPU_ON`, `CPU_OFF`, `CPU_SUSPEND`, `SYSTEM_OFF` and `SYSTEM_RESET` would do here (the payload cannot issue
-them), and whether a second boot answers the same.
+v1.1, the boot CPU is ON and the eleven others OFF, and the `PSCI_FEATURES` answers, the same in each of the three boots read.
+INFERRED: that a 0 from `PSCI_FEATURES` means implemented (the PSCI specification was not re-read), and what any answer means for
+the port. UNKNOWN: what `CPU_SUSPEND`, `SYSTEM_OFF` and `SYSTEM_RESET` would do here (the payload cannot issue them;
+[`cpuon`](SP11-PAYLOAD-CPUON.md) issued `CPU_ON` and `CPU_OFF` from boot 7 on).

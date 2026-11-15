@@ -4,11 +4,15 @@
 
     python3 tools/test-q1n1-sp11-payload-cpuon-doc.py
 
-What it holds the document to: the house rules (the licence line, the size limit, no machine identifier, the evidence labels, hardware
-NOT RUN); the function ids, the slot layout and the instruction inventory against the source and the built binary; the page of a
-normal run against what the host program prints; every keyword the payload can print against the document and every keyword of the
-line catalogue against the payload; the chain arithmetic against the runner's planning table and the measured most lines; the QEMU
-panel's shape (the QEMU suite compares it with a real run). Writes only under build/. Hardware: NOT RUN."""
+What it holds the document to: the house rules (the licence line, the size limit, no machine identifier, the evidence labels, the
+status: ran three times on the unit (boot 7 and two steps of the restart probe), never "hardware NOT RUN"); the function ids, the slot
+layout and the instruction inventory against the source and the built binary, whose size and digest are those the unit's page shows;
+the page of a normal run against what the host program prints; the unit's page (the crisp one of step 3) against itself (a whole
+page, its counts, the entry states and the numbers the prose quotes, step 2's `VBAR_EL2` and the three bases among them); the
+restart section's labels (its times UNKNOWN, the read-only control, no "not excluded"); every keyword the payload can print
+against the document and every keyword of the line catalogue against the payload; the chain arithmetic against the runner's
+planning table and the measured most lines; the QEMU panel's shape (the QEMU suite compares it with a real run). Writes only under
+build/. Hardware: NOT RUN (this checks a document)."""
 import importlib.util
 from pathlib import Path
 import re
@@ -67,8 +71,10 @@ class CpuonDoc(unittest.TestCase):
         self.assertLess(len(self.text.encode('utf-8')), 50 * 1024)
         for label in ('VERIFIED', 'OBSERVED', 'INFERRED', 'EXPERIMENTAL', 'UNIMPLEMENTED', 'UNKNOWN'):
             self.assertIn(label, self.text)
-        self.assertIn('hardware NOT RUN', self.text)
-        self.assertIn('no value of this payload has been OBSERVED on', self.text.replace('\n', ' '))
+        flat = ' '.join(self.text.split())
+        self.assertIn('**EXPERIMENTAL; ran three times on the unit (2026-11-15: boot 7 and steps 2 and 3 of the restart probe; one unit).**', flat)
+        for stale in ('hardware NOT RUN', 'no value of this payload has been OBSERVED'):
+            self.assertNotIn(stale, flat, 'it ran on the unit: the document must not say that it has not')
         paths = '|'.join(['/Us' + 'ers/', '/ho' + 'me/', '/Vol' + 'umes/'])
         pattern = re.compile(paths + r'|\.loc' + r'al\b|\bsae' + r'ed\b|host' + r'name|\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b', re.I)
         for number, line in enumerate(self.text.splitlines(), 1):
@@ -126,11 +132,73 @@ class CpuonDoc(unittest.TestCase):
         self.assertEqual(len(printed), 38)
         self.assertIn('(38 lines;', self.text)
 
+    def test_the_unit_page_is_a_whole_page_and_the_numbers_the_prose_quotes_are_its_own(self):
+        flat = ' '.join(self.text[self.text.index('## What the unit showed'):self.text.index('## What QEMU shows')].split())
+        page = block(self.text, 'cpuon-unit-page').replace('```', '').strip().splitlines()
+        call = next(i for i, line in enumerate(page) if line.startswith('PAYLOAD CALL '))
+        payload, done = page[call + 1:-1], page[-1]
+        self.assertEqual((len(page), call, len(payload)), (45, 3, 40), 'four runner lines, the 40 of the payload, DONE')
+        self.assertTrue(done.startswith('PAYLOAD DONE ') and all(line.startswith('PAYLOAD CPUON ') for line in payload))
+        self.assertIn(' LINES=40 ', done)
+        digest, size = re.search(r'sha256 `([0-9a-f]{64})`', flat).group(1), int(re.search(r' BYTES=(\d+) ', page[0]).group(1))
+        self.assertEqual(re.search(r' SHA=([0-9A-F]{16}) ', page[0]).group(1), digest[:16].upper())
+        self.assertIn(f'{size:,} bytes', flat)
+        wanted = 40 + int(re.search(r' SUPPRESSED=(\d+)', '\n'.join(payload)).group(1))
+        self.assertIn(f'each run wanted {wanted} lines', flat)
+        # phase 2: ten printed reports, nine register lines (and phase 1's one), six MIDR lines; the budget dropped 0X20200's register and
+        # MIDR lines, all of 0X20300 and the POWER_OFF line
+        p2 = [line for line in payload if ' P2 0X' in line]
+        registers = [line for line in payload if ' SCTLR_EL2=' in line]
+        self.assertEqual((sum(' EL=2 ' in line for line in p2), len(registers) - 1), (10, 9), 'ten printed reports, nine register lines')
+        self.assertEqual(sum('MIDR=0X511F0011/BOOT=0X512F0011' in line for line in p2), 6, 'the six printed MIDR lines')
+        self.assertEqual([sum(f' P2 {core} ' in line for line in payload) for core in ('0X20200', '0X20300')], [1, 0])
+        self.assertFalse(any(' P2 POWER_OFF ' in line for line in payload))
+        # the entry states: seven cores with HCR_EL2 0x80000000 and VBAR_EL2 0, three lines (0X100 twice, 0X10200) with 0x1488000038
+        base = int(re.search(r' BASE=0X([0-9A-F]+) ', page[0]).group(1), 16)
+        plain = [line for line in registers if line.endswith(' HCR_EL2=0X80000000 VBAR_EL2=0X0')]
+        busy = [line for line in registers if ' HCR_EL2=0X1488000038 ' in line]
+        self.assertEqual((len(plain), len(busy), len(registers)), (7, 3, 10))
+        self.assertTrue(all(' SCTLR_EL2=0X30000000 ' in line for line in registers))
+        first, again, other = (int(re.search(r'VBAR_EL2=0X([0-9A-F]+)', next(line for line in busy if key in line)).group(1), 16)
+                               for key in (' P1 0X100 ', ' P2 0X100 ', ' P2 0X10200 '))
+        self.assertEqual(first, other, 'both cores were entered from the same EL2 image')
+        self.assertEqual(again, base + 0x800, "0X100's second start reads the vectors its own stub installed at the first")
+        for quoted in (first, again, base):
+            self.assertIn(f'`0x{quoted:X}`', flat)
+        # the page is step 3's: boot 7's blurred page and step 2's crisp mid-chain photograph are carried by the prose alone
+        step_2 = 0xFFFFFFB460602800
+        self.assertNotEqual(step_2, first, 'the high-half VBAR_EL2 differs between boots')
+        for quoted in (step_2, 0xCEA8B000, 0xCE5E5000):
+            self.assertIn(f'`0x{quoted:X}`', flat)
+        self.assertIn('differs between boots (OBSERVED, two crisp values', flat)
+        self.assertNotIn('between boots is INFERRED', flat)
+        latency = [int(re.search(r'DT_US=(\d+)', line).group(1)) for line in payload if 'DT_US=' in line]
+        quick = [value for value in latency[1:] if value < 1000]
+        self.assertEqual((latency[0], len(latency), len(quick)), (45, 11, 8))
+        self.assertIn(f'eight took {min(quick)} to {max(quick)} in step 3', flat)
+
+    def test_the_restart_section_says_what_is_unknown_and_claims_no_window(self):
+        section = ' '.join(self.text[self.text.index('### The restart'):self.text.index('### What the runs did not show')].split())
+        for phrase in ('The cause and the times are UNKNOWN', 'was therefore the first heartbeat after the chain', 'is not at one fixed `UPTIME`',
+                       'alive at `UPTIME 123 S`', 'a plan cannot run unattended',
+                       # the control (psci alone): the runner flow alone is not the cause; the link to CPU_ON and CPU_OFF stays a correlation
+                       'was alive at `UPTIME 224 S` and `268 S` in two boots (OBSERVED once each; no restart reported)',
+                       'so the runner flow alone is not what restarts the board (INFERRED strongly: evidence, not proof)',
+                       'INFERRED: a correlation over five boots; the cause is UNKNOWN',
+                       'a `cpuon` variant that starts and stops ONE core only', 'a variant that leaves cores running (never `CPU_OFF`',
+                       'a film of a `cpuon` page until it restarts, to get the time'):
+            self.assertIn(phrase, section)
+        self.assertNotRegex(section, r'(?i)did not reproduce|40 to 60|no observation beyond|is not excluded|psci\.bin usbsmmu\.bin')
+        self.assertNotIn('run the read-only chain as a control', self.text)
+
     def test_the_instruction_table_is_the_binary(self):
         driver.need_tools()
         done, elf, flat = driver.Builder(driver.BUILD / 'doc-binary').build('cpuon', 'cpuon', [])
         self.assertEqual(done.returncode, 0, done.stderr)
         f = driver.facts(elf, flat)
+        unit = block(self.text, 'cpuon-unit-page')
+        self.assertEqual((f['bytes'], f['sha256']), (int(re.search(r' BYTES=(\d+) ', unit).group(1)), re.search(r'sha256\s+`([0-9a-f]{64})`', self.text).group(1)),
+                         'the unit ran another binary than this tree builds, and the document says it is this one')
         section = block(self.text, 'cpuon-instructions')
         self.assertIn('| `DC` | `CIVAC` (4 sites), `IVAC` (1 site) |', section)
         self.assertEqual((f['dc']['civac'], f['dc']['ivac']), (4, 1))

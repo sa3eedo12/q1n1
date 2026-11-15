@@ -443,7 +443,8 @@ class UsbsmmuDocAgreement(unittest.TestCase):
     def test_the_state_and_psci_sections_moved_out_of_the_main_document_and_left_a_stub(self):
         for heading, name, marker, status in (
                 ('## Reference payload `state`', 'SP11-PAYLOAD-STATE.md', '<!-- registers -->', 'EXPERIMENTAL; hardware NOT RUN'),
-                ('## Payload `psci`', 'SP11-PAYLOAD-PSCI.md', '<!-- psci-ids -->', 'EXPERIMENTAL; ran once on the unit (boot 5)')):
+                ('## Payload `psci`', 'SP11-PAYLOAD-PSCI.md', '<!-- psci-ids -->',
+                 'EXPERIMENTAL; ran in four boots on the unit, OBSERVED on a page in three (one unit)')):
             with self.subTest(section=heading):
                 start = self.main.index(heading)
                 stub = self.main[start:self.main.index('\n## ', start)]
@@ -483,6 +484,13 @@ def _drop(prefix):
         lines = doc.split('\n')
         at = next(i for i, line in enumerate(lines) if line.startswith(prefix))
         return '\n'.join(lines[:at] + lines[at + 1:])
+    return mutate
+
+
+def _unlink(target):
+    """Every link to `target`, with or without an anchor, turned into its plain text (what lib.LINK finds is what is removed)."""
+    def mutate(doc):
+        return re.sub(r'(?<!!)\[([^\]\n]+)\]\(' + re.escape(target) + r'[^)\s]*\)', r'\1', doc)
     return mutate
 
 
@@ -562,9 +570,9 @@ USBSMMU_DOC_MUTANTS = [
 MAIN_DOC_MUTANTS = [
     ('the-stub-lost-its-pointer', _replace('[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL', 'SP11-PAYLOAD-USBSMMU.md. EXPERIMENTAL')),
     ('the-stub-claims-the-hardware-ran', _replace('[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; ran once on the unit (boot 5)', '[SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md). EXPERIMENTAL; hardware qualified')),
-    ('the-psci-stub-claims-a-qualification', _replace('EXPERIMENTAL; ran once on the unit (boot 5): the firmware answered', 'EXPERIMENTAL; qualified on the unit: the firmware answered')),
+    ('the-psci-stub-claims-a-qualification', _replace('EXPERIMENTAL; ran in four boots on the unit, OBSERVED on a page in three (one unit): the firmware answered', 'EXPERIMENTAL; qualified on the unit: the firmware answered')),
     ('the-state-stub-claims-a-run', _replace('EXPERIMENTAL; hardware NOT RUN: the payload has not run on the unit', 'EXPERIMENTAL; ran once on the unit: the payload has not run on the unit')),
-    ('the-main-document-forgets-the-results', _replace('[SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)', 'SP11-PAYLOAD-RESULTS.md', count=-1)),
+    ('the-main-document-forgets-the-results', _unlink('SP11-PAYLOAD-RESULTS.md')),
     ('the-stub-forgets-the-hang', _replace('It may hang the board at the\nfirst context bank register', 'It reads the\nfirst context bank register')),
     ('the-catalogue-row-is-gone', _replace('| `PAYLOAD USBSMMU ...` |', '| `PAYLOAD USB ...` |')),
     ('the-catalogue-anchor-does-not-resolve', _replace('SP11-PAYLOAD-USBSMMU.md#what-it-prints', 'SP11-PAYLOAD-USBSMMU.md#what-it-says')),

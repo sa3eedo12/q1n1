@@ -12,11 +12,16 @@ the next measurements (secondary CPUs through PSCI, an EL2 monitor, guest images
 
 Evidence labels follow the Snapintosh `AGENTS.md`: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED,
 UNKNOWN. Everything below is **EXPERIMENTAL**: built and tested on a host and on QEMU's EDK2 (which gives the
-runner a real EL2). **The runner ran on the unit** (2026-11-14, boots 4 and 5, build `A9F00F9CCBB5`; one unit, one boot
-each, not a distribution): it loaded, re-hashed and called payloads at EL2 and their lines reached the panel. What the
-photographs showed is in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md). Per payload: `psci` ran once (boot 5),
-`usbsmmu` ran once (boot 5), `timer` ran once (boot 4) and did not return (INFERRED: it stopped at its CNTPOFF_EL2 read; it is
-not run in a chain again) and `state` is **hardware NOT RUN**. Facts about the unit are labelled where they are used.
+runner a real EL2). **The runner ran on the unit** (2026-11-14 and 2026-11-15, boots 4, 5 and 7, build `A9F00F9CCBB5`; one unit, one boot
+each of those, not a distribution): it loaded, re-hashed and called payloads at EL2 and their lines reached the panel. What the
+photographs showed is in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md). Per payload: `psci` ran in four boots and was OBSERVED on
+a page in three (boot 5 and the two boots of [the restart control](SP11-PAYLOAD-RESULTS.md#the-restart-control); boot 4's page was
+lost: its right-hand column was not photographed), `usbsmmu` ran once (boot 5), `timer` ran once (boot 4) and did not return
+(INFERRED: it stopped at its CNTPOFF_EL2 read; it is not run in a chain again), `cpuon` ran three times, alone (boot 7 and steps 2
+and 3 of [the restart probe](SP11-PAYLOAD-RESULTS.md#the-restart-probe)): it started the eleven secondaries (every report that
+reached the page says EL2) and each was seen OFF again, and the board restarted by itself after two of the three runs, for a reason
+and at a time that are UNKNOWN ([SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md#the-restart)), and `state` is **hardware NOT RUN**.
+Facts about the unit are labelled where they are used.
 
 ## Build
 
@@ -299,8 +304,8 @@ page showed.
 
 `payloads/psci.c` asks the firmware's PSCI implementation what it supports, with `smc #0` at EL2: five function ids,
 through one helper, which holds the only `smc` of the binary. All of it is in [SP11-PAYLOAD-PSCI.md](SP11-PAYLOAD-PSCI.md).
-EXPERIMENTAL; ran once on the unit (boot 5): the firmware answered every SMC from EL2 after the bounce, PSCI and SMCCC v1.1,
-CPU 0 ON and the eleven others OFF (OBSERVED once; [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)).
+EXPERIMENTAL; ran in four boots on the unit, OBSERVED on a page in three (one unit): the firmware answered every SMC from EL2 after
+the bounce, PSCI and SMCCC v1.1, CPU 0 ON and the eleven others OFF (OBSERVED; [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)).
 
 ## Payload `timer` (read-only timer and counter probe)
 
@@ -393,7 +398,7 @@ the run under the pinned UEFI Shell).
 | `python3 tools/test-q1n1-sp11-payload-qemu-timer.py` | QEMU/EDK2 at EL2: `state`, `psci`, `timer` in one boot (72 lines); `timer` copies that hang or fault on a hazardous read: the NEXT line last on the page, or q1n1's fault page |
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu.py` | `usbsmmu` ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)): the ten suites of its host test (scripted MMIO windows, RAM and memory map, the walk against independently built page tables, an abort at every load, hostile registers, the line and load budgets), 83 seeded-bug mutants and an unmutated control, the source audit of what it may touch, the allow-list on `usbsmmu.bin` (23 seeded bad binaries) and on the other policies, the manifest tool and the runner's validator on `psci usbsmmu timer` |
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu-doc.py` | the payload documents against the source and each other (registers and their evidence labels, the printed blocks against the host test's own dump, numbers, reason names, decision tables, the QEMU block, links and anchors, licence lines and sizes of these documents and of the results document, the pointers in this document, the moved `state` and `psci` stubs), with 89 seeded mistakes in the documents |
-| `python3 tools/test-q1n1-sp11-payload-results-doc.py` | [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md): the page of boot 5 (its line counts, its decoded numbers), the register table's boot 5 values against it, the timer inference against the line counts and the timer document's printed lines, the claims (one unit, one boot; the inferences labelled), licence line, size and links, with 17 seeded mistakes in the two documents |
+| `python3 tools/test-q1n1-sp11-payload-results-doc.py` | [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md): the page of boot 5 (its line counts, its decoded numbers), the register table's boot 5 values against it, the timer inference against the line counts and the timer document's printed lines, the claims (one unit, at most four boots of any payload; the inferences labelled; the restart's cause and times UNKNOWN, no window; the read-only control), the runner lines quoted for `cpuon` against the cpuon document's page, licence line, size and links, with 24 seeded mistakes in the two documents |
 | `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 
 The default-off proof (`PayloadDefaultOff`): with the gate at 0 every runner file compiles to an object with no
@@ -435,8 +440,10 @@ second hash passes), and payload lines reach the right-hand column, 58 of them a
 ## Limits
 
 * Up to five files per run, the payloads among them called once each, in manifest order, at EL2 only, on the boot
-  CPU. Secondary CPUs are neither run nor started (whether the firmware leaves them off or parked is what the
-  `AFFINITY` group of `psci` asked: OFF for all eleven, OBSERVED in boot 5; no CPU_ON was issued).
+  CPU. The runner starts no secondary CPU, and `state`, `psci`, `timer` and `usbsmmu` issue no `CPU_ON`; `cpuon` does (boot 7,
+  [SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md)) and each core it starts powers itself off with `CPU_OFF`. Whether the firmware
+  leaves the secondaries off or parked is what the `AFFINITY` group of `psci` asked: OFF for all eleven, OBSERVED in boot 5 and
+  again in boot 7.
 * At most 5 files of at most 256 MiB each (slbounce's capacity and chunk budget); no change to slbounce was made or
   is needed.
 * No persistent log: the page and the UART (when there is one) are the only outputs. 40 lines per payload, 100
@@ -477,26 +484,20 @@ second hash passes), and payload lines reach the right-hand column, 58 of them a
 
 ## What the next payloads need from this ABI
 
-The chain (several payloads in one boot) and the read-only `psci` queries now exist, and `psci` has run on the unit (boot 5:
-[SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)); `state` has not. Everything below is UNIMPLEMENTED and, on the unit,
-UNKNOWN beyond what `psci` answered.
+The chain (several payloads in one boot), the read-only `psci` queries and `cpuon` now exist; `psci` has run on the unit (boots 4 and
+5 and the restart control) and so has `cpuon` (boot 7 and the restart probe, item 1: [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)); `state` has not. Everything below but item 1
+is UNIMPLEMENTED and, on the unit, UNKNOWN beyond what `psci` answered.
 
-1. **PSCI `CPU_ON` of the secondaries into a payload-provided entry, to measure each one's arrival state.** This
-   still needs more than the chain and `psci` give. A payload can issue the `SMC` itself (it is EL2 code, and `psci`
-   shows how, with a whitelist and one helper); the conduit is SMC (OBSERVED, the FADT), and `psci` said, in boot 5, that
-   the firmware answers after the bounce, that `PSCI_FEATURES` gives `CPU_ON` a 0 (implemented: INFERRED from the PSCI
-   specification, which was not re-read) and that the 11 secondaries read as OFF (OBSERVED). What `CPU_ON` itself needs
-   is not there: `psci` must never grow it, it is a separate, reviewed change that
-   starts CPUs. A secondary starts at an entry address that must be a physical address (the payload knows
-   `payload_base`, and the payload is position independent, so `payload_base + offset` works) with
-   the MMU and caches off: the code must tolerate that, the code bytes are already clean (`sync_code`), and every
-   word the payload shares with a secondary must be written non-cacheably or cleaned and invalidated by hand. It
-   also needs memory the primary does not use: a **declared, zeroed scratch region** for per-CPU stacks and a
-   mailbox, which the runner can describe in `reserved[]` without moving any field (a payload checks `a->size`).
-   The CPU list (MPIDRs, parking addresses, PSCI conduit) comes from the ACPI tables (`psci` carries the twelve
-   MPIDRs of the unit's MADT as constants, which is only right for this unit), so the EFI configuration table's RSDP
-   pointer is the other thing to hand over. `puts` is not safe from a secondary: results go through the mailbox and
-   the primary prints them.
+1. **PSCI `CPU_ON` of the secondaries into a payload-provided entry, to measure each one's arrival state.** Done, with the ABI as it
+   is: [`cpuon`](SP11-PAYLOAD-CPUON.md), a separate, reviewed payload (`psci` never grew it), starts the eleven secondaries from
+   EL2 at an entry address inside its own image (`payload_base + offset`), cleans and invalidates by hand every word it shares with
+   a core that starts with its MMU and caches off, keeps its report slots in the stack region the runner gives it (no declared
+   scratch region was needed) and carries the twelve MPIDRs of the unit's MADT as constants, which is only right for this unit. It
+   ran three times on the unit (boot 7 and the restart probe): the secondaries reported EL2 with the MMU and caches off and went OFF
+   again, and the board restarted by itself after two of the three runs, for a reason that is UNKNOWN. What a monitor needs next (a
+   core kept running, interrupts, a guest) is UNIMPLEMENTED, and a CPU list read from the ACPI tables instead of constants needs
+   the EFI configuration table's RSDP pointer handed over. `puts` is not safe from a secondary: `cpuon`'s results go through its
+   report slots and the primary prints them.
 2. **A payload that is the EL2 monitor and receives preloaded guest images.** The images are the data files 1-4,
    already loaded, hash-checked before the bounce, declared to the sweep and found through `preload_table`. It
    needs: a post-bounce `verify(index)` op for a data file (`q1n1_preload_verify` exists; only the payloads, the

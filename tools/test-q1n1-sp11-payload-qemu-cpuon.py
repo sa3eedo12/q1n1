@@ -429,7 +429,7 @@ class CpuonQemu(unittest.TestCase):
 
     # -- what QEMU cannot show ----------------------------------------------------------------------------------------------------
     @unittest.skip('QEMU is cache coherent: a missing DC CIVAC before a start or a missing DC IVAC before a read cannot show here; '
-                   'the host model checks them and the hardware run is NOT RUN')
+                   "the host model checks them and the unit's runs (boot 7, restart-probe step 3) are the only check on real caches")
     def test_the_cache_rules_are_validated(self):
         pass
 

@@ -2,7 +2,8 @@
 /* Payload "cpuon": starts the Surface Pro 11's eleven secondary CPUs through PSCI CPU_ON, has each one report the state it was
  * entered in and power itself off with CPU_OFF, and prints what happened (docs/SP11-PAYLOAD-CPUON.md). The first payload that
  * changes the machine: a core that starts and never reports is left running, and a core that locks up may reset the board.
- * EXPERIMENTAL; hardware NOT RUN.
+ * EXPERIMENTAL; ran three times on the unit (2026-11-15: boot 7 and steps 2 and 3 of the restart probe; one unit;
+ * docs/SP11-PAYLOAD-CPUON.md, "What the unit showed").
  *
  * Order. CurrentEL first: not at EL2 it prints one line and does nothing else. Phase 0 asks AFFINITY_INFO about the eleven
  * targets and only ever starts one that answers OFF. Phase 1 is one round trip, core 0X100 alone: a NEXT line, a wait of eight
@@ -10,25 +11,27 @@
  * target that answered OFF, back to back, only after a normal phase 1 and again after a NEXT line and eight seconds.
  *
  * PSCI ids (SMCCC fast calls, Arm DEN0022 and DEN0028; the numbers are Linux's include/uapi/linux/psci.h, VERIFIED against it;
- * on the unit AFFINITY_INFO was answered and PSCI_FEATURES said CPU_ON is implemented: OBSERVED, the `psci` payload; no CPU_ON
- * has been called there):
+ * on the unit AFFINITY_INFO was answered and PSCI_FEATURES said CPU_ON is implemented: OBSERVED, the `psci` payload; this
+ * payload's own runs then had CPU_ON answered 0 twelve times and CPU_OFF take every started core OFF: OBSERVED twice, on the two
+ * finished pages, boot 7 and restart-probe step 3):
  *   CPU_ON         0xC4000003   x1 = MPIDR affinity of the target, x2 = entry address, x3 = context id = its report slot
  *   AFFINITY_INFO  0xC4000004   x1 = MPIDR affinity, x2 = 0 (the CPU itself): 0 ON, 1 OFF, 2 ON_PENDING
  *   CPU_OFF        0x84000002   only in the stub of a secondary below
  * No other id is issued. Each id is a literal in the one helper that holds its `smc`, so the build test counts the three `smc`
  * sites and reads the three ids.
  *
- * Memory. A secondary starts with its MMU and caches off (PSCI DEN0022; INFERRED, not re-read): its fetches and stores go to
- * memory and nothing snoops for it, the rule the A16 probe psci-roundtrip.S states ("scratch and report must be clean to PoC
- * before entry on a cache-off CPU"). So before the first CPU_ON the slots are zeroed (the only store the primary ever makes into
- * a slot) and the whole payload image and every slot are cleaned and invalidated to the PoC (DC CIVAC) behind a DSB SY; a slot
- * is read only after DC IVAC and DSB SY, and after the done flag was seen the whole slot is invalidated again, because a
- * prefetch may have refilled its other lines from before the stub stored. A slot owns whole cache lines (128-byte aligned, 256
- * bytes): DC IVAC drops dirty data. The stub's stores are Device-nGnRnE with the MMU off, so they are ordered and uncached; it
- * ends the report with DSB, the done flag, DSB, and its DC CIVAC over the slot is free in that state and makes the report
- * visible if the core was entered with caches on after all. QEMU is coherent and shows none of this; the host test models it.
- * The slots live in the stack the runner gives the payload, 4 KiB in (the runner's guard words are at the bottom) and far
- * below the top 16 KiB that q1n1's ops need: the page attributes of the payload image are UNKNOWN, so it is never stored into.
+ * Memory. A secondary starts with its MMU and caches off (PSCI DEN0022; OBSERVED twice, boot 7 and step 3): its fetches and
+ * stores go to memory and nothing snoops for it, the rule the A16 probe psci-roundtrip.S states ("scratch and report must be
+ * clean to PoC before entry on a cache-off CPU"). So before the first CPU_ON the slots are zeroed (the only store the primary
+ * ever makes into a slot) and the whole payload image and every slot are cleaned and invalidated to the PoC (DC CIVAC) behind a
+ * DSB SY; a slot is read only after DC IVAC and DSB SY, and after the done flag was seen the whole slot is invalidated again,
+ * because a prefetch may have refilled its other lines from before the stub stored. A slot owns whole cache lines (128-byte
+ * aligned, 256 bytes): DC IVAC drops dirty data. The stub's stores are Device-nGnRnE with the MMU off, so they are ordered and
+ * uncached; it ends the report with DSB, the done flag, DSB, and its DC CIVAC over the slot is free in that state and makes the
+ * report visible if the core was entered with caches on after all. QEMU is coherent and shows none of this; the host test
+ * models it. The slots live in the stack the runner gives the payload, 4 KiB in (the runner's guard words are at the bottom)
+ * and far below the top 16 KiB that q1n1's ops need: the page attributes of the payload image are UNKNOWN, so it is never
+ * stored into.
  *
  * The stub has no stack and never reads memory. x0 = the slot. It masks DAIF and reads CurrentEL; not at EL2 it stores CurrentEL and
  * goes to CPU_OFF. At EL2 it reads VBAR_EL2 as found and installs its own vector table before its first store (each entry records
@@ -38,14 +41,24 @@
  *
  * Registers read: CurrentEL, MPIDR_EL1, MIDR_EL1, ID_AA64MMFR0_EL1, ID_AA64ISAR0_EL1, ID_AA64PFR0_EL1, CNTFRQ_EL0 (primary and
  * stub); SCTLR_EL2, HCR_EL2, VBAR_EL2, CNTVOFF_EL2, CNTPCT_EL0, ESR_EL2, ELR_EL2, FAR_EL2 (stub). CNTVOFF_EL2 is spelled by
- * encoding, as in timer.c, and read once (OBSERVED readable on the boot CPU, the X2 test T03); CNTPOFF_EL2 is never touched (a
- * read of it never returns on this unit) and CNTHCTL_EL2.ECV is never set. Written: VBAR_EL2 and DAIF, by a stub.
+ * encoding, as in timer.c, and read once (OBSERVED readable on the boot CPU, the X2 test T03, and on the secondaries, boot 7 and
+ * step 3);
+ * CNTPOFF_EL2 is never touched (a read of it never returns on this unit) and CNTHCTL_EL2.ECV is never set. Written: VBAR_EL2
+ * and DAIF, by a stub.
  *
  * Fail closed. Every refusal comes before any CPU_ON; a CPU_ON that does not answer 0 leaves the core counted as not started;
  * a timeout is "NO_REPORT" or "NOT_OFF", never success; no CPU_ON is retried; the boot CPU is never a target; a counter that
- * does not run stops the payload before the CPU_ON, because the wait cannot be made. UNKNOWN until this runs: the EL a
- * secondary starts in (EL2 expected), what the secure monitor checks in the entry address, how long a core takes to come up,
- * and whether eleven CPU_ON calls in a row are accepted.
+ * does not run stops the payload before the CPU_ON, because the wait cannot be made.
+ *
+ * The unit's runs (2026-11-15; docs/SP11-PAYLOAD-CPUON.md): boot 7 (photographed at an angle, partly blurred), step 2 of the restart
+ * probe (its finished page was not photographed) and step 3 (filmed, crisp). OBSERVED twice, on the two finished pages: CPU_ON of
+ * one entry address (EfiLoaderCode memory below 4 GiB) was answered 0 for core 0X100 alone and for all eleven back to back; the
+ * ten secondaries whose reports reached the page started at EL2, and the nine whose register line did had SCTLR_EL2 0x30000000
+ * (MMU and caches off); CNTVOFF_EL2 read 0 on them; a core's first counter read came 45 us to about 2 ms after CPU_ON returned;
+ * every core was seen OFF after its CPU_OFF. The page reached the 40-line budget and dropped six lines (SUPPRESSED=6).
+ * Still UNKNOWN: what the secure monitor checks in an entry address beyond that kind of address, whether another unit behaves
+ * the same, anything with a core kept running or with a guest, and why the board restarted by itself, reported after boot 7 and
+ * in step 2 (times UNKNOWN; step 3 was seen alive through UPTIME 36 S).
  *
  * Lines: at most 40 (the ABI's limit), each at most 100 characters in the page font. The last six are reserved for the four
  * NEXT lines, the summary and the line saying what was not done, so a long report can never push them out. */

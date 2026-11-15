@@ -9,7 +9,10 @@ and what the document says about it, against the usbsmmu source and the other pa
     counts the lines between its `CALL` and itself; the register table of docs/SP11-PAYLOAD-USBSMMU.md gives, for every register boot 5
     read, the value on the page; the decoded numbers of the prose are what the page's raw registers decode to; the timer inference (the
     58 lines of boot 4, the 14th line of the timer payload) is the arithmetic of the page's counts and of the lines
-    docs/SP11-PAYLOAD-TIMER.md prints; the claims stay at one unit and one boot with the inferences labelled; the document has its
+    docs/SP11-PAYLOAD-TIMER.md prints; the claims stay at one unit and a few boots with the inferences labelled (the restart: cause
+    UNKNOWN, `UPTIME` counted from before the chain, the restart probe's times UNKNOWN or INFERRED and no window claimed; the restart
+    control with `psci` alone: the runner flow alone is not the cause, INFERRED strongly, and its payload and lines are boot 5's; the
+    runner lines are the ones of docs/SP11-PAYLOAD-CPUON.md); the document has its
     licence line, stays within the size limit and its links resolve; docs/SP11-PAYLOAD.md lists this suite.
   * ResultsDocMutants: seeded mistakes in the results document and in the register table of the usbsmmu document, each of which an
     agreement test must refuse.
@@ -30,6 +33,7 @@ RESULTS = DOCS / 'SP11-PAYLOAD-RESULTS.md'
 USBSMMU = DOCS / 'SP11-PAYLOAD-USBSMMU.md'
 TIMER = DOCS / 'SP11-PAYLOAD-TIMER.md'
 MAIN = DOCS / 'SP11-PAYLOAD.md'
+CPUON = DOCS / 'SP11-PAYLOAD-CPUON.md'
 SOURCE = ROOT / 'payloads' / 'usbsmmu.c'
 PAGE_FONT = re.compile(r'^[A-Z0-9 :\-./=?()_]*$')
 # Each register of the usbsmmu document's table that boot 5 read and S0 had not, with the key it has on the page. `GBUSERRADDR1` is the high
@@ -51,7 +55,7 @@ class ResultsDocAgreement(unittest.TestCase):
     def setUpClass(cls):
         cls.results = read(RESULTS) if cls.RESULTS is None else cls.RESULTS
         cls.usbsmmu = read(USBSMMU) if cls.USBSMMU is None else cls.USBSMMU
-        cls.timer, cls.main = read(TIMER), read(MAIN)
+        cls.timer, cls.main, cls.cpuon = read(TIMER), read(MAIN), read(CPUON)
         cls.code = re.sub(r'/\*.*?\*/', '', read(SOURCE), flags=re.S)
         cls.flat = ' '.join(cls.results.split())        # the paragraphs are wrapped: phrases are looked up with the wraps undone
 
@@ -145,16 +149,53 @@ class ResultsDocAgreement(unittest.TestCase):
                        f'The {stopped_after}th line the timer payload prints is `PAYLOAD TIMER NEXT CNTPOFF_EL2`'):
             self.mentions(phrase, section)
 
-    def test_the_claims_stay_at_one_unit_and_one_boot_and_the_inferences_are_labelled(self):
-        for phrase in ('**One unit, one boot each: nothing here is a distribution**', 'The `state` payload has not run on the unit: NOT RUN.',
+    def test_the_claims_stay_at_one_unit_and_few_boots_and_the_inferences_are_labelled(self):
+        for phrase in ('**One unit, at most four boots of any payload: nothing here is a distribution**',
+                       'The `state` payload has not run on the unit: NOT RUN.',
                        '**It did not return, INFERRED from a line count; its lines were never read.**',
                        'only if `psci` and `usbsmmu` printed as many lines in boot 4 as in boot 5 (not checked)',
                        'The cause stays INFERRED', 'whose verdict is UNKNOWN and stays so', 'SC2 is neither triggered nor cleared',
                        'it needs authorization A1, the first xHC register write at EL2; NOT granted', '**The cause is UNKNOWN:**',
                        'That is computed from the function (VERIFIED as a computation), not measured', 'the 89 rows are not',
-                       'a hang followed by a watchdog reset is INFERRED'):
+                       'a hang followed by a watchdog reset is INFERRED',
+                       # the restart: the cause stays UNKNOWN, UPTIME counts from before the chain, no time is known
+                       '**The cause of the restart is UNKNOWN.**', 'counts from before the chain, not from its end',
+                       'the restart came seconds after the chain ended, not 16 s later (INFERRED from the heartbeat code',
+                       '**A restart was reported in two of the three `cpuon` boots (boot 7 and step 2); their times are UNKNOWN.**',
+                       "step 2's is INFERRED, weakly, at `UPTIME` about 41 S or earlier, possibly before its chain ended",
+                       'Step 3 was OBSERVED alive through `UPTIME 36 S`', '**INFERRED: the restart is not at one fixed `UPTIME`.**',
+                       'alive at `UPTIME 123 S`', '**A plan can never run unattended.**', '(INFERRED, weak: it assumes that pace)',
+                       # the restart control (psci alone): the runner flow alone is not the cause; `cpuon` is only associated with it
+                       '**A read-only payload kept the page alive to `UPTIME 224 S` and `268 S` in two boots (OBSERVED once each).**',
+                       '**So the runner flow alone is not what restarts the board (INFERRED strongly: two boots, evidence and not proof).**',
+                       'INFERRED: a correlation over five boots, three of `cpuon` and two of `psci`; the cause is UNKNOWN',
+                       'the runner flow alone is excluded by two long holds of a read-only payload, INFERRED strongly, evidence not proof',
+                       # the high half of VBAR_EL2 differs between boots: OBSERVED in two crisp values; only the reason is INFERRED
+                       '**The upper half of `VBAR_EL2` differs between boots (OBSERVED).**',
+                       'What stays INFERRED is the reason: a randomised high-half EL2 image ran on those cores earlier; which software is unknown.',
+                       'for the high half of `VBAR_EL2`, from boot to boot (OBSERVED;'):
             self.mentions(phrase)
-        self.assertNotRegex(self.flat, r'(?i)hardware (qualified|passed)')
+        self.assertNotRegex(self.flat, r'(?i)hardware (qualified|passed)|did not reproduce|40 to 60|PLANNED, NOT RUN|\(and, INFERRED, from boot'
+                                       r'|no observation beyond `UPTIME 10 S`|alone is not excluded|read-only chains did|at most three boots')
+
+    def test_the_restart_control_ran_the_psci_payload_of_boot_5_and_printed_its_lines(self):
+        lines = self.page()
+        loaded, done = lines[0], next(line for line in lines if line.startswith('PAYLOAD DONE INDEX=0 '))
+        control = self.flat[self.flat.index('### The restart control'):self.flat.index('## Payload `timer` (boot 4)')]
+        for base in ('0XCEAB3000', '0XCDDD4000'):
+            self.mentions(re.sub(r'BASE=0X[0-9A-F]+', f'BASE={base}', loaded), control)
+        self.mentions(done[len('PAYLOAD '):], control)
+        self.assertIn(' LINES=15 ', done)
+        self.mentions('the same 15 payload lines as boot 5', control)
+
+    def test_the_runner_lines_the_results_quote_are_the_ones_of_the_cpuon_documents_page(self):
+        for line in ('PAYLOAD LOADED INDEX=0 BASE=0XCE60A000 BYTES=18056 SHA=3B4BFDA7D59F923C TYPE=1',
+                     'RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=40 DROPPED=0'):
+            self.mentions(line)
+            self.assertIn(line, self.cpuon, 'the cpuon document lacks it')
+        for quoted in ('0xCE60A000', '0xCEA8B000', '0xCE5E5000', '0xFFFFFF9CEA002800', '0xFFFFFFB460602800'):     # the three bases, the two VBAR_EL2
+            self.mentions(f'`{quoted}`')
+            self.assertIn(f'`{quoted}`', self.cpuon, 'the cpuon document lacks the base or the value')
 
     def test_the_document_starts_with_its_licence_line_stays_within_the_size_limit_and_every_link_resolves(self):
         self.assertEqual(self.results.splitlines()[0], '<!-- SPDX-License-Identifier: MIT -->')
@@ -195,9 +236,16 @@ RESULTS_DOC_MUTANTS = [
     ('the-timer-inference-loses-its-condition', _replace('only if `psci` and `usbsmmu` printed as many lines in boot 4 as in boot 5 (not checked)', 'for certain')),
     ('the-nested-verdict-is-changed', _replace('whose verdict is UNKNOWN and stays so', 'whose verdict is SC2')),
     ('the-region-capacity-is-called-measured', _replace('That is computed from the function (VERIFIED as a computation), not measured', 'That was measured on the unit')),
-    ('the-results-claim-a-distribution', _replace('**One unit, one boot each: nothing', '**Every unit behaves so: nothing')),
+    ('the-results-claim-a-distribution', _replace('**One unit, at most four boots of any payload: nothing', '**Every unit behaves so: nothing')),
     ('a-link-does-not-resolve', _replace('SP11-PAYLOAD-USBSMMU.md#what-the-outcomes-mean-for-the-next-step', 'SP11-PAYLOAD-USBSMMU.md#what-the-outcomes-mean')),
     ('the-licence-line-is-gone', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
+    ('the-restart-cause-is-called-known', _replace('**The cause of the restart is UNKNOWN.**', '**The cause of the restart is the CPU_OFF.**')),
+    ('the-restart-is-timed-from-the-wrong-start', _replace('the restart came seconds after the chain ended, not 16 s later', 'the page stayed up 16 s after the chain')),
+    ('a-restart-window-is-claimed', _replace('**INFERRED: the restart is not at one fixed `UPTIME`.**', '**The restart comes at `UPTIME` 40 to 60 S.**')),
+    ('step-3-is-seen-alive-for-longer', _replace('Step 3 was OBSERVED alive through `UPTIME 36 S`', 'Step 3 was OBSERVED alive through `UPTIME 60 S`')),
+    ('the-plain-pages-time-is-dropped', _replace('alive at `UPTIME 123 S`', 'alive for minutes', count=-1)),
+    ('step-2s-weak-inference-is-called-observed', _replace('(INFERRED, weak: it assumes that pace)', '(OBSERVED)')),
+    ('a-runner-line-differs-from-the-cpuon-page', _replace('BYTES=18056 SHA=3B4BFDA7D59F923C', 'BYTES=18057 SHA=3B4BFDA7D59F923C')),
 ]
 USBSMMU_DOC_MUTANTS = [
     ('a-boot-5-value-in-the-register-table-is-wrong', _replace('boot 5 OBSERVED `0x400` (bank 3;', 'boot 5 OBSERVED `0x401` (bank 3;')),

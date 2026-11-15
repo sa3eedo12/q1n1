@@ -59,6 +59,7 @@ TOOLS = Path(os.environ.get('Q1N1_PAYLOAD_TOOLS_DIR', ROOT / 'tools'))
 SCRATCH = BUILD / os.environ.get('Q1N1_PAYLOAD_TOOLS_TAG', 'main')
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
 DOC_PSCI = ROOT / 'docs' / 'SP11-PAYLOAD-PSCI.md'
+PSCI_RAN = 'Ran in four boots on the unit, OBSERVED on a page in three (one unit)'
 UEFI = ROOT / 'platform' / 'uefi'
 READELF = lambda: shutil.which('llvm-readelf', path=lib.ENV['PATH']) or 'llvm-readelf'  # noqa: E731
 run, have = lib.run, lib.have
@@ -692,12 +693,15 @@ class DocAgreement(unittest.TestCase):
         self.assertIn(f'with {len(DOC_MUTANTS)} seeded mistakes in the document', ' '.join(tests.split()))
 
     def test_the_document_says_what_the_status_is(self):
-        # `state` is still NOT RUN, so the main document still says so; `psci` ran once on the unit (boot 5).
+        # `state` is still NOT RUN, so the main document still says so; `psci` ran in four boots, read in three.
         for word in ('EXPERIMENTAL', 'hardware NOT RUN', 'The runner ran on the unit', 'one unit, one boot', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
             self.assertIn(word, self.doc)
-        for word in ('EXPERIMENTAL', 'Ran once on the unit (boot 5; one unit, one boot)', 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
+        for word in ('EXPERIMENTAL', PSCI_RAN, 'OBSERVED', 'INFERRED', 'UNKNOWN', 'VERIFIED'):
             self.assertIn(word, self.psci_doc)
-        self.assertNotRegex(' '.join(self.psci_doc.split()), r'(?i)hardware (qualified|passed)')
+        flat = ' '.join(self.doc.split())
+        self.assertIn('`psci` ran in four boots and was OBSERVED on a page in three', flat)
+        self.assertNotIn('`psci` ran once', flat)
+        self.assertNotRegex(' '.join(self.psci_doc.split()), r'(?i)hardware (qualified|passed)|\bran once\b')
 
 
 def _replace(old, new, count=1):
@@ -732,7 +736,7 @@ DOC_MUTANTS = [
     ('the-suffix-is-another-case', _replace('`<stem>.BIN`', '`<stem>.bin`', count=-1)),
     ('the-hardware-status-is-claimed', _replace('hardware NOT RUN', 'hardware qualified', count=-1)),
     ('the-runner-run-is-widened-to-a-distribution', _replace('one unit, one boot', 'every unit', count=-1)),
-    ('the-psci-run-is-claimed-qualified', _replace('Ran once on the unit (boot 5; one unit, one boot)', 'Qualified on the unit (boot 5)')),
+    ('the-psci-run-is-claimed-qualified', _replace(PSCI_RAN, 'Qualified on the unit (boot 5)')),
     ('a-planned-payload-maximum-is-wrong', _replace('| `psci`, at most | 30 |', '| `psci`, at most | 29 |')),
     ('a-planned-payload-row-is-forgotten', _replace('| `timer`, at most | 16 |\n', '')),
     ('the-usbsmmu-row-is-forgotten', _replace('| `usbsmmu`, at most | 24 |\n', '')),
