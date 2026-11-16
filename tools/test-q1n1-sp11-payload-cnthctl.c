@@ -218,6 +218,18 @@ static uint64_t apply(const struct world *m, uint64_t stored, unsigned nth, uint
 
 static int plausible_hz(uint64_t f) { return f >= 1000000u && f <= 1000000000u; }
 
+/* Whether the wait reads a value below its first: the model's counter is start + moved * every modulo 2^64 (moved: the reads after the
+ * stall), so it goes back when a step is negative and does not wrap below zero at the first, or when a forward counter wraps past 2^64
+ * between the first read and the last read of the wait. */
+static int counter_back(const struct world *m)
+{
+    typedef __int128 wide;
+    wide two64 = (wide)1 << 64, step = m->every >> 63 ? (wide)m->every - two64 : (wide)m->every;
+    wide limit = (wide)SECONDS * (plausible_hz(m->cntfrq) ? m->cntfrq : 19200000u), first = (wide)m->start + (m->stall ? 0 : step);
+    if (step > 0) return (first + (limit + step - 1) / step * step) / two64 != first / two64;
+    return step < 0 && (first % two64 + two64) % two64 >= -step;
+}
+
 static void oracle(const struct world *m, struct expect *e)
 {
     char a[24], b[24], c[24], d[24];
@@ -235,7 +247,7 @@ static void oracle(const struct world *m, struct expect *e)
     if (m->hctl & (ECV_BIT | EL1TVT | EL1TVCT)) { add(e, "REFUSED=OLD_HAS_BITS_12_TO_14"); return; }
     uint64_t old = m->hctl, v = (old & ~UINT64_C(3)) | EL1TVCT | EL1TVT;
     add(e, "NEXT CNTHCTL_EL2 WRITE AFTER 8 S");
-    if (m->every == 0 || m->stall >= STUCK_READS + 1) { add(e, "REFUSED=COUNTER_STUCK"); return; }
+    if (m->every == 0 || m->stall >= STUCK_READS + 1 || counter_back(m)) { add(e, "REFUSED=COUNTER_STUCK"); return; }
     uint64_t r = apply(m, old, 0, v), r2 = apply(m, r, 1, old), r3 = r2;
     e->writes[e->nwrites++] = v;
     e->writes[e->nwrites++] = old;
@@ -493,9 +505,14 @@ static int suite_clock(void)
     unit_like();
     w.stall = 1000000;                      /* a million reads on one value, then it runs: not stuck */
     CHECK(!run_checked(&ret) && ret == 0 && write_count == 2);
-    unit_like();
-    w.start = ~UINT64_C(0) - 100 * w.every; /* the counter wraps in the middle of the wait */
-    CHECK(!run_checked(&ret) && ret == 0 && write_count == 2);
+    /* A counter that goes back (or wraps) in the wait is refused where it stands: a read below the first would end the wait at once. */
+    for (unsigned i = 0; i < 4; i++) {
+        unit_like();
+        w.every = i < 2 ? -UINT64_C(1000003) : w.every;             /* counts down ... */
+        w.start = i < 2 ? UINT64_C(1) << 40 : ~UINT64_C(0) - 100 * w.every;     /* ... or up, past 2^64 in the middle of the wait */
+        w.stall = i & 1 ? 10 : 0;
+        CHECK(!run_checked(&ret) && ret == 0 && write_count == 0 && strstr(line_n(lines_n() - 1), "REFUSED=COUNTER_STUCK"));
+    }
     return 0;
 }
 

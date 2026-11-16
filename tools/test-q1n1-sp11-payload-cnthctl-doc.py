@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """docs/SP11-PAYLOAD-CNTHCTL.md against the source, the host model and the binary of the cnthctl payload, and the same agreement
-tests against 41 seeded mistakes in the document.
+tests against 43 seeded mistakes in the document.
 
     python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py
 
@@ -175,6 +175,7 @@ class CnthctlDocAgreement(unittest.TestCase):
         for word in sorted(catalogue - mine - placeholders):
             self.fail(f'{word} is in the line catalogue and nothing in the source prints it')
         self.assertIn('`NEXT CNTHCTL_EL2 WRITE AFTER 8 S`', {row[0] for row in rows(lines_block)})
+        self.assertIn('runs backwards', {row[0]: row[1] for row in rows(lines_block)}['`REFUSED=COUNTER_STUCK`'])
 
     def test_the_pages_are_what_the_host_program_prints(self):
         pages = self.pages()
@@ -208,6 +209,8 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.says('eight seconds on the runner\'s counter')
         self.says('not between 1 MHz and 1 GHz, in which case the wait uses 19.2 MHz')
         self.says('two million equal reads in a row')
+        self.says('or that runs backwards (a read below the first, which would end the wait at once)')
+        self.assertIn('if (now < start) return 0;', self.code)
         self.assertIn('NEXT CNTHCTL_EL2 WRITE AFTER 8 S', self.text)
         self.assertEqual(self.code.count('NEXT CNTHCTL_EL2 WRITE AFTER 8 S'), 1)
 
@@ -317,6 +320,8 @@ DOC_MUTANTS = [
     ('the-wait-in-the-lines-table-is-wrong', _replace('| `NEXT CNTHCTL_EL2 WRITE AFTER 8 S` | the write follows eight seconds after this line |',
                                                       '| `NEXT CNTHCTL_EL2 WRITE AFTER 5 S` | the write follows eight seconds after this line |')),
     ('the-wait-in-the-prose-is-wrong', _replace('then eight seconds on the runner\'s counter', 'then ten seconds on the runner\'s counter')),
+    ('the-backwards-counter-is-forgotten', _replace('or that runs backwards (a read below the first, which would end the wait at once) ends', 'or that runs fast ends')),
+    ('the-lines-table-forgets-the-backwards-counter', _replace('| the counter does not run or runs backwards: the wait cannot be made and nothing was written |', '| the counter does not run: the wait cannot be made and nothing was written |')),
     ('bit-13-is-renumbered', _replace('| 13 | `EL1TVT`', '| 15 | `EL1TVT`')),
     ('bit-14-is-called-the-timer', _replace('| 14 | `EL1TVCT` (traps the EL1 virtual counter)', '| 14 | `EL1TVCT` (traps the EL1 virtual timer)')),
     ('ecv-is-set-in-v', _replace('| 12 | `ECV` | **never set** |', '| 12 | `ECV` | set |')),

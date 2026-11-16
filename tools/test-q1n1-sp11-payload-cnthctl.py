@@ -202,6 +202,8 @@ MUTANTS = [
     sub('waits-one-read-too-long', 'if (now - start >= hz * seconds) return 1;', 'if (now - start > hz * seconds) return 1;'),
     sub('counts-from-zero-not-from-the-first-read', 'if (now - start >= hz * seconds) return 1;', 'if (now >= hz * seconds) return 1;'),
     sub('gives-up-on-a-slow-counter', '#define COUNTER_STUCK_READS 2000000u', '#define COUNTER_STUCK_READS 20u'),
+    sub('wait-does-not-refuse-a-counter-that-goes-back', '        if (now < start) return 0;\n', ''),
+    sub('wait-takes-a-read-at-the-start-for-a-read-below-it', '        if (now < start) return 0;\n', '        if (now <= start) return 0;\n'),
     sub('waits-ten-times-as-long-for-a-stuck-counter', '#define COUNTER_STUCK_READS 2000000u', '#define COUNTER_STUCK_READS 20000000u'),
     sub('goes-on-with-a-stuck-counter', WAIT, '    wait_seconds(a, hz, WAIT_BEFORE_WRITE_S);\n    if (0) {\n        say(a, "REFUSED=COUNTER_STUCK");\n        return 0;\n    }\n'),
     # -- what it refuses

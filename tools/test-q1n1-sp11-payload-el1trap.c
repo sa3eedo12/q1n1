@@ -4,10 +4,12 @@
  * modelled machine; driven by tools/test-q1n1-sp11-payload-el1trap.py under ASan and UBSan.
  *
  * The machine has the five registers the payload changes (the bits a write changes, bits that come up set on the first write, what
- * later writes do), the registers it reads, a counter, and an EL1 that runs the stub: a read traps (ESR_EL2 class 0x18, that register's
+ * later writes do), the registers it reads, a counter, the PSTATE its caller had (which the probe's HVC saves and the excursion's last
+ * ERET returns five bits of) and an EL1 that runs the stub: a read traps (ESR_EL2 class 0x18, that register's
  * ISS, the ELR of the instruction) when CNTHCTL_EL2 says so and otherwise returns a value; scripted ends replace the stub's HVC. A
  * predictor says, from the world alone, the refusal or the registers left, whether the excursion ran and what the payload returns; a
- * checker holds every run to the order and the page the document gives: in the suites and in 6000 random worlds.
+ * checker holds every run to the order and the page the document gives: in the suites and in 6000 random worlds (the random worlds,
+ * the argument checks and the two reports are in test-q1n1-sp11-payload-el1trap-tail.h, included below).
  * The assembly on a core is not shown here: tools/test-q1n1-sp11-payload-el1trap.py disassembles the real binary and
  * tools/test-q1n1-sp11-payload-qemu-el1trap.py runs it at EL2 under QEMU. Nothing runs on hardware. Evidence: EXPERIMENTAL. */
 #include <inttypes.h>
@@ -42,10 +44,14 @@ static void dump_page(void);
 #define EXPECTED_HCR BIT(31)
 #define EXPECTED_SCTLR UINT64_C(0x30500800)
 #define ECV BIT(12)
-/* The bits that decide whether EL1 can be entered and left: RW, E2H, TGE, HCD, VM, FMO, IMO, AMO of HCR_EL2; M, A, C, I, WXN, E0E and
- * EE of SCTLR_EL1. */
-#define BITS_HCR (BIT(31) | BIT(34) | BIT(27) | BIT(29) | BIT(0) | (UINT64_C(7) << 3))
+/* The bits that decide whether EL1 can be entered and left: RW, E2H, TGE, HCD, VM, DC, FMO, IMO, AMO of HCR_EL2; M, A, C, I, WXN, E0E
+ * and EE of SCTLR_EL1. */
+#define BITS_HCR (BIT(31) | BIT(34) | BIT(27) | BIT(29) | BIT(0) | BIT(12) | (UINT64_C(7) << 3))
 #define BITS_SCTLR (BIT(0) | BIT(1) | BIT(2) | BIT(12) | BIT(19) | BIT(24) | BIT(25))
+/* What the end of an excursion returns to EL2 with: D, A, I, F masked and EL2h, plus these five bits of the caller's PSTATE (SSBS, PAN,
+ * UAO, DIT, TCO). */
+#define SPSR_EL2H_MASKED UINT64_C(0x3c9)
+#define SPSR_KEPT (BIT(12) | BIT(22) | BIT(23) | BIT(24) | BIT(25))
 /* What a scripted end reports besides its reason: the exception registers of EL2, and of EL1 for an exception an EL1 vector caught. */
 #define END_ELR UINT64_C(0x5CB55123)
 #define END_FAR UINT64_C(0xDEAD0000)
@@ -65,8 +71,9 @@ struct excursion {
     uint64_t el1_esr, el1_elr, el1_far, el1_vector;
     uint64_t probe_ok, saved_vbar;
     struct trap_record trap[TRAPS_MAX];
+    uint64_t caller_spsr;
 };
-_Static_assert(sizeof(struct excursion) == 296, "the record is 296 bytes");
+_Static_assert(sizeof(struct excursion) == 304, "the record is 304 bytes");
 
 extern char el1trap_host_image[];
 #define IMG_EL2 ((uint64_t)(uintptr_t)el1trap_host_image)
@@ -93,11 +100,14 @@ struct world {
     int ecv_effective, control_traps, cntfrq_traps;
     uint64_t value[4];          /* what the stub's reads return when they do not trap */
     uint64_t iss_noise;         /* XORed into the ISS of the first trap record */
+    uint64_t caller_spsr;       /* the PSTATE the caller had: what SPSR_EL2 holds when the probe's HVC enters EL2 */
+    uint64_t skew[3];           /* added to the EL2 table, the EL1 table and the stub the payload sees: misaligns them */
     int scenario, probe, vbar2;
     uint64_t k, end_esr;        /* accesses done before an EL1 or EL2 exception; the ESR_EL2 an end reports */
 };
 static struct world w, before;
-static uint64_t counter_reads, write_count[R_COUNT], writes_total, runs, probes, trap_mask;
+static uint64_t counter_reads, write_count[R_COUNT], writes_total, runs, probes, trap_mask, eret_spsr;
+uint64_t pl_host_skew[3];
 
 enum { EV_READ, EV_WRITE, EV_CACHE, EV_RUN, EV_LINE };
 struct event { int kind; char text[112]; uint64_t value, from, reads, count; };
@@ -212,7 +222,8 @@ uint64_t pl_host_run(struct excursion *e, uint64_t stub)
     record(EV_RUN, e->mode == MODE_PROBE ? "PROBE" : "EXCURSION", e->mode);
     if (e->magic != EXCURSION_MAGIC || stub != IMG_STUB || (e->mode != MODE_PROBE && e->mode != MODE_EXCURSION) || e->reason || e->entries ||
         e->traps || e->deadline - counter_value(counter_reads) != (plausible_hz(w.cntfrq) ? w.cntfrq : 19200000u) /* one second */ ||
-        (e->mode == MODE_PROBE && (writes_total || probes)) || (e->mode == MODE_EXCURSION && !probes)) {
+        (e->mode == MODE_PROBE && (writes_total || probes || e->caller_spsr)) ||
+        (e->mode == MODE_EXCURSION && (!probes || e->caller_spsr != w.caller_spsr))) {
         fprintf(stderr, "FAIL: the record or the stub address handed to el1trap_run is not as the assembly needs it\n");
         exit(3);
     }
@@ -221,11 +232,16 @@ uint64_t pl_host_run(struct excursion *e, uint64_t stub)
         probes++;
         e->entries = 1;
         e->vector = 4;
-        if (w.probe == PROBE_OK) e->probe_ok = 1;
-        else e->reason = END_EL2_EXCEPTION;
+        if (w.probe == PROBE_OK) {
+            e->probe_ok = 1;
+            e->caller_spsr = w.caller_spsr;     /* the handler of a probe that worked keeps SPSR_EL2 */
+        } else {
+            e->reason = END_EL2_EXCEPTION;
+        }
     } else {
         uint64_t done = w.scenario == SC_EL1_EXC || w.scenario == SC_EL2_EXC ? w.k : 4;      /* accesses before the end */
         runs++;
+        eret_spsr = SPSR_EL2H_MASKED | (e->caller_spsr & SPSR_KEPT);                          /* what el1trap_end returns with */
         if ((w.reg[R_HCR] & BITS_HCR) != EXPECTED_HCR || (w.reg[R_SCTLR] & BITS_SCTLR) != 0 || w.reg[R_VBAR1] != IMG_EL1 ||
             (w.daif & 0x3c0) != 0x3c0 || (w.el_raw >> 2 & 3) != 2 || (w.reg[R_CNTHCTL] & ECV)) {
             fprintf(stderr, "FAIL: the stub was entered in a state the document does not allow\n");
@@ -339,15 +355,17 @@ static void unit_like(void)
     w.value[2] = UNIT_HZ;
     w.value[3] = 0x123456000ull;
     w.end_esr = UINT64_C(0x96000045);
+    w.caller_spsr = SPSR_EL2H_MASKED | SPSR_KEPT | BIT(31) | BIT(13) | BIT(10);      /* the five bits set, and three that are not passed on */
 }
 
 static uint64_t go(const struct q1n1_payload_args *a)
 {
     log_n = bad_lines = 0;
-    counter_reads = writes_total = runs = probes = trap_mask = 0;
+    counter_reads = writes_total = runs = probes = trap_mask = eret_spsr = 0;
     memset(write_count, 0, sizeof write_count);
     first_bad[0] = 0;
     if (w.vbar2 == VBAR2_NEVER) w.writable[R_VBAR2] = 0;
+    memcpy(pl_host_skew, w.skew, sizeof pl_host_skew);
     before = w;
     return payload_entry(a);
 }
@@ -407,12 +425,25 @@ struct prediction {
     uint64_t final[R_COUNT], ret;
 };
 
+/* Whether the wait reads a value below its first: the model's counter is start + moved * every modulo 2^64 (moved: the reads after the
+ * stall), so it goes back when a step is negative and does not wrap below zero at the first, or when a forward counter wraps past 2^64
+ * between the first read and the last read of the wait. */
+static int counter_back(const struct world *m)
+{
+    typedef __int128 wide;
+    wide two64 = (wide)1 << 64, step = m->every >> 63 ? (wide)m->every - two64 : (wide)m->every;
+    wide limit = (wide)SECONDS * (plausible_hz(m->cntfrq) ? m->cntfrq : 19200000u), first = (wide)m->start + (m->stall ? 0 : step);
+    if (step > 0) return (first + (limit + step - 1) / step * step) / two64 != first / two64;
+    return step < 0 && (first % two64 + two64) % two64 >= -step;
+}
+
 static void predict(const struct world *m, struct prediction *p)
 {
     uint64_t end = m->base + m->size, saved[R_COUNT], cur[R_COUNT], writes[R_COUNT] = {0, 0, 0, 0, 0}, wanted[4];
+    uint64_t el2 = IMG_EL2 + m->skew[0], el1 = IMG_EL1 + m->skew[1], stub = IMG_STUB + m->skew[2];
     unsigned bad = 0;
-    int layout = m->size < (UINT64_C(1) << 32) && end >= m->base && IMG_EL2 >= m->base && IMG_EL2 + 2048 <= end && IMG_EL1 >= m->base &&
-                 IMG_EL1 + 2048 <= end && IMG_STUB >= m->base && IMG_STUB + 20 <= end;
+    int layout = m->size < (UINT64_C(1) << 32) && end >= m->base && !((el2 | el1) & 2047) && !(stub & 3) && el2 >= m->base &&
+                 el2 + 2048 <= end && el1 >= m->base && el1 + 2048 <= end && stub >= m->base && stub + 20 <= end;
     memset(p, 0, sizeof *p);
     for (unsigned i = 0; i < R_COUNT; i++) p->final[i] = saved[i] = cur[i] = m->reg[i];
     if ((m->el_raw >> 2 & 3) != 2) p->refusal = "SKIPPED_NOT_AT_EL2";
@@ -426,7 +457,7 @@ static void predict(const struct world *m, struct prediction *p)
     else if (m->sp < m->stack_base + 16384 || m->sp > m->stack_base + m->stack_size) p->refusal = "REFUSED=STACK";
     if (p->refusal) return;
     p->waited = 1;
-    if (m->every == 0 || m->stall > STUCK_READS) { p->refusal = "REFUSED=COUNTER_STUCK"; return; }
+    if (m->every == 0 || m->stall > STUCK_READS || counter_back(m)) { p->refusal = "REFUSED=COUNTER_STUCK"; return; }
     /* The probe leaves VBAR_EL2 at the payload's table on this machine; the payload's one write puts it back, if writes work. */
     if (m->vbar2 != VBAR2_BACK) cur[R_VBAR2] = after_write(m, R_VBAR2, IMG_EL2, saved[R_VBAR2], writes[R_VBAR2]++);
     p->probe_failed = m->probe != PROBE_OK || cur[R_VBAR2] != saved[R_VBAR2];
@@ -565,6 +596,7 @@ static const char *rules(uint64_t ret, const struct prediction *p)
     for (unsigned k = 0; k < 4; k++) { NEED(ev_is(fw + 5 + k, EV_READ, reg_name[k])); rb[k] = log_[fw + 5 + k].value; }
     at = fw + 9;
     NEED(p->ran == ev_is(at, EV_RUN, "EXCURSION") && runs == (uint64_t)p->ran);
+    NEED(eret_spsr == (p->ran ? SPSR_EL2H_MASKED | (m->caller_spsr & SPSR_KEPT) : 0));      /* the caller's five bits come back, the rest does not */
     at += (unsigned)p->ran;
     for (unsigned k = 0; k < 4; k++) NEED(ev_write(at + k, reg_name[k], m->reg[k]));
     NEED(ev_is(at + 4, EV_CACHE, "isb"));
@@ -754,16 +786,17 @@ static int suite_held(void)
 {
     /* Each bit of HCR_EL2 and SCTLR_EL1 that decides whether EL1 can be entered, stuck at the value it must not have (not held) and at
      * the value it must have (held): RW must be set and the others clear. */
-    static const unsigned hcr_bits[] = {0, 3, 4, 5, 27, 29, 31}, sctlr_bits[] = {0, 1, 2, 12, 19, 24, 25};
+    static const unsigned hcr_bits[] = {0, 3, 4, 5, 12, 27, 29, 31}, sctlr_bits[] = {0, 1, 2, 12, 19, 24, 25};
     /* Other failures: nothing writable, bits that come up set (E2H, a bit of VBAR_EL1, ECV), RES0 bits of VBAR_EL1, and bits 13 and 14
      * of CNTHCTL_EL2 that may not stick, which does not stop the run. */
     static const struct { unsigned reg; uint64_t writable, forced; int held; } rest[] = {
-        {R_HCR, 0, 0, 0}, {R_HCR, ~UINT64_C(0), BIT(34), 0}, {R_SCTLR, 0, 0, 1}, {R_VBAR1, 0, 0, 0}, {R_VBAR1, ~UINT64_C(0), BIT(60), 0},
-        {R_VBAR1, ~UINT64_C(0x7FF), 0, 1}, {R_CNTHCTL, ~UINT64_C(0), ECV, 0}, {R_CNTHCTL, 0x1FFF, 0, 1}, {R_CNTHCTL, 0x2000, 0, 1},
+        {R_HCR, 0, 0, 0}, {R_HCR, ~UINT64_C(0), BIT(34), 0}, {R_HCR, ~UINT64_C(0), BIT(12), 0}, {R_SCTLR, 0, 0, 1}, {R_VBAR1, 0, 0, 0},
+        {R_VBAR1, ~UINT64_C(0), BIT(60), 0}, {R_VBAR1, ~UINT64_C(0x7FF), 0, 1}, {R_CNTHCTL, ~UINT64_C(0), ECV, 0}, {R_CNTHCTL, 0x1FFF, 0, 1},
+        {R_CNTHCTL, 0x2000, 0, 1},
     };
     uint64_t ret;
     for (unsigned reg = R_HCR; reg <= R_SCTLR; reg += 2)
-        for (unsigned i = 0; i < 7; i++)
+        for (unsigned i = 0; i < (reg == R_HCR ? 8u : 7u); i++)
             for (unsigned right = 0; right < 2; right++) {
                 unsigned bit = reg == R_HCR ? hcr_bits[i] : sctlr_bits[i], wanted = reg == R_HCR && bit == 31;
                 unit_like();
@@ -818,6 +851,20 @@ static int suite_refuse(void)
         w.stall = i == 3 ? STUCK_READS : 0;
         CHECK(!run_checked(&ret) && ret == 0 && runs == 1);
     }
+    /* A table or the stub that is not aligned as VBAR_ELx (2 KiB) and an instruction (4 bytes) need is refused to the bit, in an image
+     * large enough that nothing but the alignment can refuse it. */
+    static const struct { unsigned which; uint64_t by; } skews[] = {
+        {0, 1}, {0, 4}, {0, 8}, {0, 512}, {0, 1024}, {1, 1}, {1, 4}, {1, 512}, {1, 1024}, {2, 1}, {2, 2},
+    };
+    unit_like();
+    w.size = IMG_BYTES + 4096;
+    CHECK(!run_checked(&ret) && ret == 0 && runs == 1);
+    for (unsigned i = 0; i < sizeof skews / sizeof skews[0]; i++) {
+        unit_like();
+        w.size = IMG_BYTES + 4096;
+        w.skew[skews[i].which] = skews[i].by;
+        CHECK(!run_checked(&ret) && ret == 0 && writes_total == 0 && line_is(lines_n() - 1, PFX "REFUSED=ENTRY"));
+    }
     return 0;
 }
 
@@ -831,150 +878,25 @@ static int suite_clock(void)
         w.every = plausible_hz(hz[i]) ? hz[i] / 19 + 1 : 1000003;
         CHECK(!run_checked(&ret) && ret == 0 && runs == 1);
     }
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < 2; i++) {
         unit_like();
         w.cntfrq = i == 0 ? 1000000 : UNIT_HZ;
         w.every = i == 0 ? 1000000 : w.every;                       /* the counter lands exactly on eight seconds at a read */
         w.stall = i == 1 ? 1000000 : 0;                             /* a million reads on one value, then it runs: not stuck */
-        w.start = i == 2 ? ~UINT64_C(0) - 100 * w.every : w.start;  /* the counter wraps in the middle of the wait */
-        CHECK(!run_checked(&ret) && ret == 0);
+        CHECK(!run_checked(&ret) && ret == 0 && runs == 1);
     }
-    return 0;
-}
-
-static uint64_t rng = 0x9e3779b97f4a7c15ull;
-static uint64_t rnd(void)
-{
-    rng ^= rng << 13;
-    rng ^= rng >> 7;
-    rng ^= rng << 17;
-    return rng;
-}
-/* `usual`, except one time in `n`: `rare`. */
-#define RARELY(n, usual, rare) (rnd() % (n) ? (usual) : (rare))
-
-static int suite_fuzz(void)
-{
-    static const unsigned fewest[T_COUNT] = {100, 20, 100, 100, 100, 100, 100};
-    unsigned seen[T_COUNT];
-    memcpy(seen, tally, sizeof seen);
-    for (unsigned round = 0; round < 6000; round++) {
-        uint64_t ret;
+    /* A counter that goes back (or wraps) in the wait is refused where it stands: a read below the first would end the wait at once. */
+    for (unsigned i = 0; i < 4; i++) {
         unit_like();
-        w.el_raw = RARELY(8, 2 << 2, (rnd() & 3) << 2);
-        w.reg[R_HCR] = RARELY(8, 0x88000010, rnd());
-        w.mmfr0 = rnd();
-        w.pfr0 = RARELY(16, w.pfr0, rnd());
-        w.cntfrq = RARELY(4, 1000000u + rnd() % 999000000u, RARELY(3, 0, rnd()));
-        w.daif = RARELY(8, 0x3c0, rnd() & 0x3c0);
-        w.spsel = RARELY(12, 1, rnd() & 1);
-        w.reg[R_CNTHCTL] = RARELY(4, rnd() & 0xFFF, rnd());
-        w.reg[R_SCTLR] = rnd();
-        w.reg[R_VBAR1] = rnd() & ~UINT64_C(0x7ff);
-        w.reg[R_VBAR2] = (rnd() & ~UINT64_C(0x7ff)) | 0x1000;
-        for (unsigned r = 0; r < R_COUNT; r++) {
-            w.writable[r] = RARELY(3, ~UINT64_C(0), rnd());
-            w.forced[r] = RARELY(12, 0, BIT(rnd() % 64));
-            w.restore[r] = (int)(rnd() % 3);
-        }
-        /* The vector bases hold host addresses, whose bits 11 to 39 depend on where the host loaded the image: a forced bit there
-         * would make the world, and so the count of checks, differ from one run to the next. */
-        w.forced[R_VBAR1] &= ~((BIT(40) - 1) & ~UINT64_C(0x7ff));
-        w.forced[R_VBAR2] &= ~((BIT(40) - 1) & ~UINT64_C(0x7ff));
-        w.writable[R_CNTHCTL] &= RARELY(2, 0x7FFF, ~UINT64_C(0));
-        w.sp = RARELY(8, w.sp, w.stack_base + rnd() % (w.stack_size * 2));
-        w.every = RARELY(200, (plausible_hz(w.cntfrq) ? w.cntfrq : 19200000u) / 40 + rnd() % 2000000, 0);
-        w.start = rnd();
-        w.stall = RARELY(100, RARELY(10, 0, rnd() % 100), STUCK_READS + 1);
-        w.no_counter_op = rnd() % 40 == 0;
-        w.ecv_effective = (int)(rnd() & 1);
-        w.control_traps = rnd() % 8 != 0;
-        w.cntfrq_traps = rnd() % 8 == 0;
-        w.iss_noise = RARELY(4, 0, BIT(rnd() % 31) & ~BIT(25));
-        w.scenario = RARELY(3, SC_NORMAL, (int)(rnd() % SC_COUNT));
-        w.k = rnd() % 5;
-        w.probe = RARELY(8, PROBE_OK, PROBE_FAILS);
-        w.vbar2 = RARELY(10, VBAR2_BACK, (int)(1 + rnd() % 2));
-        switch (rnd() % 24) {
-        case 0: w.base = IMG_EL2 + 1 + rnd() % 8192; break;                                 /* the vectors are below the image */
-        case 1: w.size = rnd() % 20000; break;
-        case 2: w.base = IMG_EL2 - 16 * (1 + rnd() % 64); w.size = IMG_BYTES + (IMG_EL2 - w.base) + rnd() % 100; break;
-        case 3: w.base = IMG_EL2 - (1 + rnd() % 15); w.size = IMG_BYTES + (IMG_EL2 - w.base) + rnd() % 100; break;    /* an unaligned start */
-        default: break;
-        }
-        if (run_checked(&ret)) { fprintf(stderr, "fuzz round %u\n", round); return 1; }
+        w.every = i < 2 ? -UINT64_C(1000003) : w.every;             /* counts down ... */
+        w.start = i < 2 ? UINT64_C(1) << 40 : ~UINT64_C(0) - 100 * w.every;     /* ... or up, past 2^64 in the middle of the wait */
+        w.stall = i & 1 ? 10 : 0;
+        CHECK(!run_checked(&ret) && ret == 0 && writes_total == 0 && runs == 0 && line_is(lines_n() - 1, PFX "REFUSED=COUNTER_STUCK"));
     }
-    for (unsigned i = 0; i < T_COUNT; i++) CHECK(tally[i] - seen[i] >= fewest[i]);    /* every path was taken often enough to mean something */
     return 0;
 }
 
-static int suite_args(void)
-{
-    struct q1n1_payload_args a;
-    unit_like();
-    for (unsigned i = 0; i < 5; i++) {
-        a = args();
-        switch (i) {
-        case 0: a.magic ^= 1; break;
-        case 1: a.version = 2; break;
-        case 2: a.size = sizeof a - 1; break;
-        case 3: a.ops.puts = NULL; break;
-        default: a.ops.hex = NULL; break;
-        }
-        CHECK(go(&a) == Q1N1_PAYLOAD_RET_BAD_ARGS && log_n == 0);
-    }
-    CHECK(payload_entry(NULL) == Q1N1_PAYLOAD_RET_BAD_ARGS);
-    a = args();
-    a.size = sizeof a + 64;                  /* a larger table than the payload knows is fine, and load32 is never used */
-    a.ops.load32 = NULL;
-    CHECK(go(&a) == 0 && runs == 1);
-    return 0;
-}
-
-/* The pages of the worlds the host test scripts, as docs/SP11-PAYLOAD-EL1TRAP.md shows them. Run as `page`. */
-static void page_of(const char *title)
-{
-    struct q1n1_payload_args a = args();
-    go(&a);
-    printf("# %s\n", title);
-    for (unsigned i = 0; i < lines_n(); i++) printf("%s\n", line_n(i));
-}
-#define PAGE(title, edit) do { unit_like(); edit; page_of(title); } while (0)
-static int report_page(void)
-{
-    PAGE("traps effective", (void)0);
-    PAGE("bits do not stick", w.writable[R_CNTHCTL] = 0x1FFF);
-    PAGE("stuck but inert", w.ecv_effective = 0);
-    PAGE("only bit 14 sticks", w.writable[R_CNTHCTL] = 0x1FFF | BIT(14));
-    PAGE("control not trapped", w.control_traps = 0);
-    PAGE("hvc undefined at el2", (w.probe = PROBE_FAILS, w.end_esr = 0));
-    PAGE("write not held", w.forced[R_HCR] = BIT(34));
-    PAGE("restore fails", w.restore[R_HCR] = RESTORE_NEVER);
-    return 0;
-}
-
-/* The most lines this payload prints, for the chain's page budget in docs/SP11-PAYLOAD.md: over every scripted end, both probe
- * results, the traps effective or inert, and no register, four or all five not put back (VBAR_EL2 too). Run as `lines-report`. */
-static int report_lines(void)
-{
-    unsigned most = 0;
-    for (unsigned i = 0; i < SC_COUNT * 2 * 3 * 2; i++) {
-        struct q1n1_payload_args a;
-        unsigned fail = i / SC_COUNT / 2 % 3;       /* 0: none, 1: four registers, 2: five */
-        unit_like();
-        w.scenario = (int)(i % SC_COUNT);
-        w.k = 2;
-        w.probe = (int)(i / SC_COUNT % 2);
-        w.ecv_effective = (int)(i / SC_COUNT / 6 % 2);
-        w.vbar2 = fail == 2 ? VBAR2_LATE : VBAR2_BACK;
-        for (unsigned r = 0; fail && r < R_VBAR2 + (fail == 2); r++) w.restore[r] = RESTORE_NEVER;
-        a = args();
-        go(&a);
-        if (lines_n() > most) most = lines_n();
-    }
-    printf("LINES_MAX=%u\n", most);
-    return 0;
-}
+#include "test-q1n1-sp11-payload-el1trap-tail.h"
 
 int main(int argc, char **argv)
 {

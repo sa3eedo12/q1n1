@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import sp11_payload_testlib as lib  # noqa: E402
 import sp11_payload_ecv_lib as ecv  # noqa: E402
+from sp11_payload_el1trap_mutants import ASM_MUTANTS, FILE, MUTANTS  # noqa: E402  (the seeded bugs, kept in a file of their own)
 
 native = ecv.load_module('sp11_payload_native_for_el1trap', ROOT / 'tools' / 'test-q1n1-sp11-payload.py')
 native.BUILD = ROOT / 'build' / 'sp11-payload-el1trap-test'
@@ -45,8 +46,9 @@ READELF, run, have = ecv.READELF, lib.run, lib.have
 code_of, Builder, asm, read, facts, need_tools = ecv.code_of, ecv.Builder, ecv.asm, ecv.read, ecv.facts, ecv.need_tools
 SUITES = ('order', 'accesses', 'ends', 'probe', 'held', 'refuse', 'clock', 'fuzz', 'args')
 OWN_FILES = [SOURCE] + [ROOT / 'tools' / name for name in (
-    'test-q1n1-sp11-payload-el1trap.c', 'test-q1n1-sp11-payload-el1trap.py', 'test-q1n1-sp11-payload-qemu-el1trap.py',
-    'test-q1n1-sp11-payload-el1trap-doc.py', 'sp11_payload_ecv_lib.py')]
+    'test-q1n1-sp11-payload-el1trap.c', 'test-q1n1-sp11-payload-el1trap-tail.h', 'test-q1n1-sp11-payload-el1trap.py',
+    'test-q1n1-sp11-payload-qemu-el1trap.py', 'test-q1n1-sp11-payload-el1trap-doc.py', 'sp11_payload_ecv_lib.py',
+    'sp11_payload_el1trap_mutants.py')]
 LINES_MAX = 37
 POLICY = lib.POLICIES['el1trap']
 OTHERS = ('state', 'psci', 'timer', 'usbsmmu', 'cpuon', 'cnthctl')
@@ -110,11 +112,13 @@ class El1trapSource(unittest.TestCase):
                               ('EL1_PHYSICAL_BITS', 'UINT64_C(3)'), ('EL1TVT_BIT', '(UINT64_C(1) << 13)'), ('EL1TVCT_BIT', '(UINT64_C(1) << 14)'),
                               ('ECV_BIT', '(UINT64_C(1) << 12)'), ('WAIT_BEFORE_EXCURSION_S', '8u'), ('DEADLINE_S', '1u'), ('TRAPS_MAX', '8'),
                               ('ENTRIES_BUDGET', '8'), ('ENTRIES_FATAL', '24'), ('STACK_KEPT_BYTES', '(16u * 1024u)'), ('CACHE_STEP', '16u'),
-                              ('COUNTER_STUCK_READS', '2000000u'), ('DAIF_MASKED', 'UINT64_C(0x3c0)')):
+                              ('COUNTER_STUCK_READS', '2000000u'), ('DAIF_MASKED', 'UINT64_C(0x3c0)'), ('SPSR_EL2H_MASKED', '0x3c9'),
+                              ('SPSR_KEPT_LOW', '0x1000'), ('SPSR_KEPT_HIGH', '0x3c0'), ('E_CALLER_SPSR', '296')):
             self.assertRegex(self.code, rf'#define {define}\s+{re.escape(value)}')
         self.assertIn('r.wanted[R_CNTHCTL] = (cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT;', self.code)
         self.assertIn('mov x2, #0x3c5', self.code)
-        self.assertIn('mov x13, #0x3c9', self.code)
+        self.assertIn('mov x14, #" STR(SPSR_EL2H_MASKED)', self.code)
+        self.assertNotIn('mov x13, #0x3c9', self.code, 'the end of an excursion no longer returns a constant')
         self.assertEqual(len(re.findall(r'\bECV_BIT\b', self.code)), 3, 'defined, in OLD_REFUSED_BITS, and in the check of the read-back')
         self.assertIn('#define OLD_REFUSED_BITS (ECV_BIT | EL1TVT_BIT | EL1TVCT_BIT)', self.code)
 
@@ -154,192 +158,6 @@ class El1trapSource(unittest.TestCase):
                 self.assertLess(len(text.splitlines()), 1500)
                 self.assertLess(len(text.encode('utf-8')), 50 * 1024)
                 self.assertIn('SPDX-License-Identifier: MIT', text[:200])
-
-
-# ---- seeded bugs in el1trap.c ----------------------------------------------------------------------------------------------
-
-FILE = 'payloads/el1trap.c'
-WRITES = ('    write_vbar_el1(r->wanted[R_VBAR1]);\n    write_sctlr_el1(r->wanted[R_SCTLR]);\n    write_cnthctl_el2(r->wanted[R_CNTHCTL]);\n'
-          '    write_hcr_el2(r->wanted[R_HCR]);\n    isb();\n')
-RESTORE = ('    for (unsigned i = 0; i <= R_VBAR1; i++) write_register(i, r->saved[i]);    /* HCR_EL2 first: the reverse of the order it was set in */\n'
-           '    isb();\n')
-RETRY = '        write_register(i, r->saved[i]);\n        isb();\n        w->restored[i] = read_register(i);\n        w->retried |= 1u << i;\n'
-PROBE = '    prepare(&r, &w.probe, MODE_PROBE);\n    RUN(&w.probe, EL1_STUB);\n    w.probe_done = 1;\n'
-VBAR2_RETRY = ('    if (w.restored[R_VBAR2] != r.saved[R_VBAR2]) {      /* el1trap_run puts it back; one more write if that did not hold */\n'
-               '        write_register(R_VBAR2, r.saved[R_VBAR2]);\n        isb();\n        w.restored[R_VBAR2] = read_register(R_VBAR2);\n'
-               '        w.retried |= 1u << R_VBAR2;\n    }\n')
-NEXT_AFTER = '    say(&r.out, "NEXT EL1 EXCURSION AFTER 8 S");\n'
-WAIT = '    if (!wait_seconds(a, r.hz, WAIT_BEFORE_EXCURSION_S)) {\n        say(&r.out, "REFUSED=COUNTER_STUCK");\n        return 0;\n    }\n'
-NEXT = '    say(&r.out, "NEXT EL1 EXCURSION");\n'
-CLEAN = '    for (uint64_t at = start & ~(uint64_t)(CACHE_STEP - 1); at < start + bytes; at += CACHE_STEP) dc_civac(at);\n'
-INVALIDATE = '    for (uint64_t at = start & ~(uint64_t)(CACHE_STEP - 1); at < start + bytes; at += CACHE_STEP) ic_ivau(at);\n'
-HCR_CHECKED = '#define HCR_BITS_CHECKED ((UINT64_C(1) << 31) | (UINT64_C(1) << 34) | (UINT64_C(1) << 27) | (UINT64_C(1) << 29) | UINT64_C(1) | \\\n'
-SCTLR_CHECKED = ('#define SCTLR_EL1_BITS_CHECKED (UINT64_C(0x1) | UINT64_C(0x2) | UINT64_C(0x4) | UINT64_C(0x1000) | UINT64_C(0x80000) | '
-                 'UINT64_C(0x1000000) | \\\n')
-
-
-def sub(name, old, new):
-    return ('el1trap-' + name, FILE, [(old, new)], ['el1trap'], None)
-
-
-def drop(name, statement):
-    return sub(name, statement, '')
-
-
-def hcr_bit(name, old):
-    return sub(f'hcr-check-misses-{name}', HCR_CHECKED, HCR_CHECKED.replace(old, '', 1))
-
-
-def sctlr_bit(name, old):
-    return sub(f'sctlr-check-misses-{name}', SCTLR_CHECKED, SCTLR_CHECKED.replace(old, '', 1))
-
-
-MUTANTS = [
-    # -- the values the excursion writes
-    sub('hcr-also-sets-tge', '#define HCR_EXCURSION (UINT64_C(1) << 31)', '#define HCR_EXCURSION ((UINT64_C(1) << 31) | (UINT64_C(1) << 27))'),
-    sub('hcr-also-sets-imo', '#define HCR_EXCURSION (UINT64_C(1) << 31)', '#define HCR_EXCURSION ((UINT64_C(1) << 31) | (UINT64_C(1) << 4))'),
-    sub('hcr-also-sets-hcd', '#define HCR_EXCURSION (UINT64_C(1) << 31)', '#define HCR_EXCURSION ((UINT64_C(1) << 31) | (UINT64_C(1) << 29))'),
-    sub('hcr-also-sets-e2h', '#define HCR_EXCURSION (UINT64_C(1) << 31)', '#define HCR_EXCURSION ((UINT64_C(1) << 31) | (UINT64_C(1) << 34))'),
-    sub('hcr-without-rw', '#define HCR_EXCURSION (UINT64_C(1) << 31)', '#define HCR_EXCURSION UINT64_C(0)'),
-    sub('sctlr-sets-the-mmu', 'UINT64_C(0x30500800)', 'UINT64_C(0x30500801)'),
-    sub('sctlr-sets-the-data-cache', 'UINT64_C(0x30500800)', 'UINT64_C(0x30500804)'),
-    sub('sctlr-sets-the-instruction-cache', 'UINT64_C(0x30500800)', 'UINT64_C(0x30501800)'),
-    sub('sctlr-sets-span-as-well', 'UINT64_C(0x30500800)', 'UINT64_C(0x30D00800)'),
-    sub('cnthctl-keeps-the-el1-physical-bits', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT;', 'cnthctl | EL1TVCT_BIT | EL1TVT_BIT;'),
-    sub('cnthctl-clears-only-bit-0', '#define EL1_PHYSICAL_BITS UINT64_C(3)', '#define EL1_PHYSICAL_BITS UINT64_C(1)'),
-    sub('cnthctl-sets-ecv-as-well', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT;', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT | ECV_BIT;'),
-    sub('cnthctl-sets-only-bit-14', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT;', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT;'),
-    sub('cnthctl-sets-only-bit-13', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVCT_BIT | EL1TVT_BIT;', '(cnthctl & ~EL1_PHYSICAL_BITS) | EL1TVT_BIT;'),
-    sub('cnthctl-bit-13-is-bit-15', '#define EL1TVT_BIT (UINT64_C(1) << 13)', '#define EL1TVT_BIT (UINT64_C(1) << 15)'),
-    sub('vbar-el1-is-the-el2-table', '    r.wanted[R_VBAR1] = EL1_VECTORS;\n', '    r.wanted[R_VBAR1] = EL2_VECTORS;\n'),
-    # -- the order of the writes, the barriers, the read-back, the put-back
-    sub('hcr-is-written-first', WRITES, '    write_hcr_el2(r->wanted[R_HCR]);\n    write_vbar_el1(r->wanted[R_VBAR1]);\n    write_sctlr_el1(r->wanted[R_SCTLR]);\n'
-                                        '    write_cnthctl_el2(r->wanted[R_CNTHCTL]);\n    isb();\n'),
-    sub('cnthctl-is-written-before-sctlr', WRITES, '    write_vbar_el1(r->wanted[R_VBAR1]);\n    write_cnthctl_el2(r->wanted[R_CNTHCTL]);\n'
-                                                   '    write_sctlr_el1(r->wanted[R_SCTLR]);\n    write_hcr_el2(r->wanted[R_HCR]);\n    isb();\n'),
-    sub('no-isb-before-the-read-back', WRITES, WRITES.replace('    isb();\n', '')),
-    sub('no-isb-after-the-put-back', RESTORE, RESTORE.replace('    isb();\n', '')),
-    sub('puts-back-in-the-order-set', RESTORE, '    for (unsigned i = R_VBAR1 + 1; i > 0; i--) write_register(i - 1, r->saved[i - 1]);\n    isb();\n'),
-    sub('never-puts-vbar-el1-back', RESTORE, RESTORE.replace('i <= R_VBAR1', 'i < R_VBAR1')),
-    sub('never-retries', '        if (w->restored[i] == r->saved[i]) continue;\n        write_register(i, r->saved[i]);\n',
-        '        if (1) continue;\n        write_register(i, r->saved[i]);\n'),
-    sub('always-retries', '        if (w->restored[i] == r->saved[i]) continue;\n        write_register(i, r->saved[i]);\n',
-        '        if (0) continue;\n        write_register(i, r->saved[i]);\n'),
-    sub('retries-without-an-isb', RETRY, RETRY.replace('        isb();\n', '')),
-    sub('retries-with-the-value-under-test', RETRY, RETRY.replace('write_register(i, r->saved[i]);', 'write_register(i, r->wanted[i % 4]);')),
-    sub('does-not-read-after-the-retry', RETRY, RETRY.replace('        w->restored[i] = read_register(i);\n', '')),
-    sub('runs-without-checking-the-writes', '    w->held = (uint32_t)writes_held(r, w->readback);\n', '    w->held = 1;\n'),
-    sub('never-runs', '    if (w->held) {\n', '    if (0) {\n'),
-    sub('reads-the-registers-back-before-writing', WRITES + '    for (unsigned i = 0; i < R_VBAR2; i++) w->readback[i] = read_register(i);\n',
-        '    for (unsigned i = 0; i < R_VBAR2; i++) w->readback[i] = read_register(i);\n' + WRITES),
-    sub('reads-another-register-inside-the-window', '    w->held = (uint32_t)writes_held(r, w->readback);\n',
-        '    w->held = (uint32_t)writes_held(r, w->readback);\n    (void)SYSREG(esr_el2);\n'),
-    # -- the held check: each bit that decides whether EL1 can be entered
-    sub('ignores-hcr-in-the-held-check', '    return (readback[R_HCR] & HCR_BITS_CHECKED) == (r->wanted[R_HCR] & HCR_BITS_CHECKED) &&\n', '    return 1 &&\n'),
-    sub('ignores-sctlr-in-the-held-check', '           (readback[R_SCTLR] & SCTLR_EL1_BITS_CHECKED) == (r->wanted[R_SCTLR] & SCTLR_EL1_BITS_CHECKED) &&\n', '           1 &&\n'),
-    sub('ignores-vbar-in-the-held-check', '           readback[R_VBAR1] == r->wanted[R_VBAR1] && !(readback[R_CNTHCTL] & ECV_BIT);', '           !(readback[R_CNTHCTL] & ECV_BIT);'),
-    sub('ignores-ecv-in-the-held-check', '           readback[R_VBAR1] == r->wanted[R_VBAR1] && !(readback[R_CNTHCTL] & ECV_BIT);', '           readback[R_VBAR1] == r->wanted[R_VBAR1];'),
-    sub('hcr-check-misses-rw', HCR_CHECKED, HCR_CHECKED.replace('((UINT64_C(1) << 31) | ', '(', 1)),
-    hcr_bit('e2h', '(UINT64_C(1) << 34) | '),
-    hcr_bit('tge', '(UINT64_C(1) << 27) | '),
-    hcr_bit('hcd', '(UINT64_C(1) << 29) | '),
-    hcr_bit('vm', 'UINT64_C(1) | \\\n'),
-    sub('hcr-check-misses-fmo', '(UINT64_C(7) << 3))        /* RW, E2H', '(UINT64_C(6) << 3))        /* RW, E2H'),
-    sub('hcr-check-misses-imo', '(UINT64_C(7) << 3))        /* RW, E2H', '(UINT64_C(5) << 3))        /* RW, E2H'),
-    sub('hcr-check-misses-amo', '(UINT64_C(7) << 3))        /* RW, E2H', '(UINT64_C(3) << 3))        /* RW, E2H'),
-    sctlr_bit('m', 'UINT64_C(0x1) | '),
-    sctlr_bit('a', 'UINT64_C(0x2) | '),
-    sctlr_bit('c', 'UINT64_C(0x4) | '),
-    sctlr_bit('i', 'UINT64_C(0x1000) | '),
-    sctlr_bit('wxn', 'UINT64_C(0x80000) | '),
-    sctlr_bit('e0e', 'UINT64_C(0x1000000) | \\\n'),
-    sub('sctlr-check-misses-ee', '| \\\n                                UINT64_C(0x2000000))', ')'),
-    # -- the probe
-    drop('never-probes', PROBE),
-    sub('probe-is-an-excursion', 'prepare(&r, &w.probe, MODE_PROBE);', 'prepare(&r, &w.probe, MODE_EXCURSION);'),
-    sub('ignores-a-failed-probe', '    if (!w.probe.probe_ok || w.probe.reason || w.restored[R_VBAR2] != r.saved[R_VBAR2]) {\n', '    if (0) {\n'),
-    sub('ignores-vbar-el2-that-is-not-back', ' || w.restored[R_VBAR2] != r.saved[R_VBAR2]) {\n        row(&line);\n        word(&line, "HVC_AT_EL2=FAILED");', ') {\n        row(&line);\n        word(&line, "HVC_AT_EL2=FAILED");'),
-    drop('does-not-put-vbar-el2-back-after-the-probe', VBAR2_RETRY),
-    sub('probe-failure-says-restored-without-looking', '        for (unsigned i = 0; i < R_VBAR2; i++) w.restored[i] = r.saved[i];     /* nothing but VBAR_EL2 was ever changed */\n',
-        '        for (unsigned i = 0; i < R_COUNT; i++) w.restored[i] = r.saved[i];\n'),
-    # -- announce, wait, then the work
-    drop('never-announces-the-wait', NEXT_AFTER),
-    drop('never-announces-the-excursion', NEXT),
-    sub('announces-the-excursion-after-the-window', NEXT + '\n    excursion_window(&r, &w);\n', '\n    excursion_window(&r, &w);\n' + NEXT),
-    sub('waits-before-announcing', NEXT_AFTER + WAIT, WAIT + NEXT_AFTER),
-    sub('does-not-wait', WAIT, '    if (0) {\n        say(&r.out, "REFUSED=COUNTER_STUCK");\n        return 0;\n    }\n'),
-    sub('goes-on-with-a-stuck-counter', WAIT, '    wait_seconds(a, r.hz, WAIT_BEFORE_EXCURSION_S);\n'),
-    sub('waits-one-second-not-eight', '#define WAIT_BEFORE_EXCURSION_S 8u', '#define WAIT_BEFORE_EXCURSION_S 1u'),
-    sub('waits-eighty-seconds', '#define WAIT_BEFORE_EXCURSION_S 8u', '#define WAIT_BEFORE_EXCURSION_S 80u'),
-    sub('waits-at-a-fixed-19-2-mhz', 'if (now - start >= hz * seconds) return 1;', 'if (now - start >= 19200000u * seconds) return 1;'),
-    sub('does-not-bound-the-frequency', 'r.hz = cntfrq >= COUNTER_HZ_MIN && cntfrq <= COUNTER_HZ_MAX ? cntfrq : COUNTER_HZ_DEFAULT;', 'r.hz = cntfrq;'),
-    sub('frequency-lower-bound-is-one-too-high', '#define COUNTER_HZ_MIN 1000000u', '#define COUNTER_HZ_MIN 1000001u'),
-    sub('frequency-upper-bound-excludes-one-ghz', 'cntfrq <= COUNTER_HZ_MAX ?', 'cntfrq < COUNTER_HZ_MAX ?'),
-    sub('waits-one-read-too-long', 'if (now - start >= hz * seconds) return 1;', 'if (now - start > hz * seconds) return 1;'),
-    sub('counts-from-zero-not-from-the-first-read', 'if (now - start >= hz * seconds) return 1;', 'if (now >= hz * seconds) return 1;'),
-    sub('gives-up-on-a-slow-counter', '#define COUNTER_STUCK_READS 2000000u', '#define COUNTER_STUCK_READS 20u'),
-    sub('deadline-is-zero-seconds', '#define DEADLINE_S 1u', '#define DEADLINE_S 0u'),
-    sub('deadline-ignores-the-frequency', '    e->deadline = r->a->ops.counter() + r->hz * DEADLINE_S;\n', '    e->deadline = r->a->ops.counter() + DEADLINE_S;\n'),
-    # -- the image is made visible to a core that fetches without its caches
-    drop('does-not-clean-the-image', CLEAN),
-    drop('does-not-invalidate-the-instruction-cache', INVALIDATE),
-    sub('no-barrier-between-clean-and-invalidate', '    dsb_sy();\n' + INVALIDATE, INVALIDATE),
-    sub('no-barrier-after-the-invalidate', 'ic_ivau(at);\n    dsb_sy();\n    isb();\n', 'ic_ivau(at);\n    isb();\n'),
-    sub('no-isb-after-the-cache-work', '    dsb_sy();\n    isb();\n}\n', '    dsb_sy();\n}\n'),
-    sub('cache-step-is-32', '#define CACHE_STEP 16u', '#define CACHE_STEP 32u'),
-    sub('cleans-all_but_the_last_line', 'at < start + bytes; at += CACHE_STEP) dc_civac(at);', 'at + CACHE_STEP < start + bytes; at += CACHE_STEP) dc_civac(at);'),
-    sub('cleans-from-the-unaligned-start', CLEAN, CLEAN.replace('start & ~(uint64_t)(CACHE_STEP - 1)', 'start')),
-    # -- what it refuses
-    drop('does-not-check-the-arguments', '    if (!pl_args_ok(a)) return Q1N1_PAYLOAD_RET_BAD_ARGS;\n'),
-    sub('runs-at-any-el', '    if ((current_el >> 2 & 3) != 2) {\n', '    if (0) {\n'),
-    sub('takes-el3-for-el2', '    if ((current_el >> 2 & 3) != 2) {\n', '    if ((current_el >> 2 & 3) < 2) {\n'),
-    sub('does-not-check-for-the-counter-op', '    if (!a->ops.counter) {\n', '    if (0) {\n'),
-    sub('does-not-check-the-layout', '    if (!layout_ok(a)) {\n', '    if (0) {\n'),
-    sub('layout-ignores-the-start-of-the-image', 'if (el2 < base || el2 + 2048 > end', 'if (el2 + 2048 > end'),
-    sub('layout-ignores-the-end-of-the-stub', 'stub + EL1_STUB_BYTES > end', 'stub + 4 > end'),
-    sub('layout-ignores-a-huge-image', 'if (a->payload_size >= (UINT64_C(1) << 32) || end < base) return 0;', 'if (end < base) return 0;'),
-    drop('does-not-refuse-e2h', '    if (hcr >> 34 & 1) return "REFUSED=E2H";\n'),
-    sub('e2h-is-bit-33', '    if (hcr >> 34 & 1) return "REFUSED=E2H";\n', '    if (hcr >> 33 & 1) return "REFUSED=E2H";\n'),
-    drop('does-not-refuse-a-core-without-aarch64-el1', '    if ((pfr0 >> 4 & 15) == 0) return "REFUSED=NO_EL1_AARCH64";\n'),
-    sub('el1-field-is-bits-11-to-8', '    if ((pfr0 >> 4 & 15) == 0) return "REFUSED=NO_EL1_AARCH64";\n', '    if ((pfr0 >> 8 & 15) == 0) return "REFUSED=NO_EL1_AARCH64";\n'),
-    drop('does-not-refuse-unmasked-interrupts', '    if ((daif & DAIF_MASKED) != DAIF_MASKED) return "REFUSED=DAIF_NOT_MASKED";\n'),
-    sub('refuses-only-when-all-of-daif-is-unmasked', '(daif & DAIF_MASKED) != DAIF_MASKED', '!(daif & DAIF_MASKED)'),
-    drop('does-not-refuse-sp0', '    if (!(spsel & 1)) return "REFUSED=SPSEL_NOT_EL2H";\n'),
-    drop('does-not-refuse-an-old-with-bits-set', '    if (cnthctl & OLD_REFUSED_BITS) return "REFUSED=OLD_HAS_BITS_12_TO_14";\n'),
-    sub('refuses-only-an-old-with-ecv-set', '#define OLD_REFUSED_BITS (ECV_BIT | EL1TVT_BIT | EL1TVCT_BIT)', '#define OLD_REFUSED_BITS (ECV_BIT)'),
-    sub('refuses-an-old-with-bit-15-set', '#define OLD_REFUSED_BITS (ECV_BIT | EL1TVT_BIT | EL1TVCT_BIT)', '#define OLD_REFUSED_BITS (ECV_BIT | EL1TVT_BIT | EL1TVCT_BIT | (UINT64_C(1) << 15))'),
-    sub('does-not-check-the-stack', 'if (sp < r->a->stack_base + STACK_KEPT_BYTES || sp > r->a->stack_base + r->a->stack_size) return "REFUSED=STACK";',
-        'if (0) return "REFUSED=STACK";'),
-    sub('stack-low-bound-is-off-by-one', 'sp < r->a->stack_base + STACK_KEPT_BYTES', 'sp <= r->a->stack_base + STACK_KEPT_BYTES'),
-    sub('stack-high-bound-is-off-by-one', 'sp > r->a->stack_base + r->a->stack_size', 'sp >= r->a->stack_base + r->a->stack_size'),
-    sub('keeps-only-8-kib-of-stack', '#define STACK_KEPT_BYTES (16u * 1024u)', '#define STACK_KEPT_BYTES (8u * 1024u)'),
-    # -- the page and the verdict
-    sub('effective-when-either-ecv-read-traps', 'trapped[ACCESS_VCT] && trapped[ACCESS_VTIMER] ? "TRAPS_EFFECTIVE"', 'trapped[ACCESS_VCT] || trapped[ACCESS_VTIMER] ? "TRAPS_EFFECTIVE"'),
-    sub('inert-when-either-ecv-read-does-not-trap', '!trapped[ACCESS_VCT] && !trapped[ACCESS_VTIMER] ? "TRAPS_INERT"', '!trapped[ACCESS_VCT] || !trapped[ACCESS_VTIMER] ? "TRAPS_INERT"'),
-    sub('verdict-ignores-the-control', '!trapped[ACCESS_CONTROL] ? "CONTROL_NOT_TRAPPED"', '0 ? "CONTROL_NOT_TRAPPED"'),
-    drop('does-not-say-when-cntfrq-trapped', '        if (trapped[ACCESS_FRQ]) word(&line, "CNTFRQ_EL0_TRAPPED");\n'),
-    sub('bits-yes-when-either-sticks', 'bits == 2 ? "BITS13_14_IN_READBACK=YES"', 'bits >= 1 ? "BITS13_14_IN_READBACK=YES"'),
-    sub('bits-from-nothing', 'unsigned bits = (unsigned)(readback_cnthctl >> 13 & 1) + (unsigned)(readback_cnthctl >> 14 & 1);', 'unsigned bits = 2;'),
-    sub('does-not-check-the-iss', '(t->esr & ISS_MASK) == expected_iss(i) ? "ISS_OK=YES"', '1 ? "ISS_OK=YES"'),
-    sub('does-not-check-the-class', '(t->esr >> 26 & 63) == EC_TRAPPED_SYSREG &&', '1 &&'),
-    sub('expected-iss-has-no-rt', '((uint64_t)i << 5) |', '((uint64_t)0 << 5) |'),
-    sub('expected-iss-op2-in-the-wrong-place', '((uint64_t)e[4] << 17)', '((uint64_t)e[4] << 16)'),
-    sub('matches-traps-by-order-not-by-elr', 'if (e->trap[k].elr == at) return &e->trap[k];', 'if (k == i) return &e->trap[k];'),
-    sub('names-a-reason-wrongly', '"NONE", "OK", "BUDGET"', '"NONE", "BUDGET"'),
-    sub('prints-no-trap-records-of-an-end', 'k < TRAPS_MAX; k++) {\n        row(&line);\n        word(&line, "TRAP");', 'k < 0; k++) {\n        row(&line);\n        word(&line, "TRAP");'),
-    sub('does-not-print-what-an-el1-vector-reported', '    if (e->reason == END_EL1_EXCEPTION) {\n', '    if (0) {\n'),
-    sub('reports-an-end-as-ok', '    } else if (w.e.reason == END_HVC) {\n', '    } else if (1) {\n'),
-    sub('prints-the-vbar-address-not-the-offset', 'w.readback[R_VBAR1] - a->payload_base, "SCTLR_EL1", "VBAR_EL1_OFFSET"', 'w.readback[R_VBAR1], "SCTLR_EL1", "VBAR_EL1_OFFSET"'),
-    sub('says-restored-without-looking', '    if (!bad) {\n        say(&r->out, "RESTORED=YES");', '    if (1) {\n        say(&r->out, "RESTORED=YES");'),
-    sub('does-not-compare-vbar-el2', '    for (unsigned i = 0; i < R_COUNT; i++) bad += w->restored[i] != r->saved[i];\n', '    for (unsigned i = 0; i < R_VBAR2; i++) bad += w->restored[i] != r->saved[i];\n'),
-    drop('does-not-shout-that-it-could-not-restore', '    say(&r->out, "POWER_CYCLE_BEFORE_ANY_OTHER_PAYLOAD");\n'),
-    sub('returns-0-when-it-could-not-restore', '    if (!report_restore(&r, &w)) return RET_NOT_RESTORED;\n    return w.held', '    report_restore(&r, &w);\n    return w.held'),
-    sub('returns-0-when-the-excursion-did-not-end-well', 'return w.held && w.e.reason == END_HVC ? 0 : RET_NOT_OK;', 'return 0;'),
-    sub('returns-2-when-it-did-not-restore', '#define RET_NOT_RESTORED 3u', '#define RET_NOT_RESTORED 2u'),
-    # -- registers that must not be touched
-    sub('reads-cntpoff-el2', '    current_el = SYSREG(CurrentEL);\n', '    current_el = SYSREG(CurrentEL);\n    (void)SYSREG(S3_4_C14_C0_6);\n'),
-    sub('reads-cntvoff-el2', '    current_el = SYSREG(CurrentEL);\n', '    current_el = SYSREG(CurrentEL);\n    (void)SYSREG(S3_4_C14_C0_3);\n'),
-]
 
 
 class El1trapMutants(unittest.TestCase):
@@ -438,6 +256,65 @@ def llvm_mc(text):
     return [struct.unpack('<I', bytes(int(b, 16) for b in encoding.split(',')))[0] for encoding in found]
 
 
+MACHINE = ('el1trap_run', 'el1trap_probe', 'el1trap_resume', 'el1trap_el2_common', 'el1trap_from_el2', 'el1trap_trapped', 'el1trap_hvc',
+           'el1trap_end', 'el1trap_fatal')
+
+
+def machine_blocks(text):
+    """{label: [(mnemonic, operands)]} of the assembly of el1trap_run in an objdump listing, comments cut, case folded, an address
+    before a symbol left out."""
+    blocks, label = {}, None
+    for line in text.splitlines():
+        head = re.match(r'^[0-9a-f]+ <(\w+)>:$', line)
+        if head:
+            label = head.group(1) if head.group(1) in MACHINE else None
+            if label:
+                blocks[label] = []
+            continue
+        ins = re.match(r'\s+[0-9a-f]+:\s+(\S+)\s*(.*)$', line)
+        if label and ins:
+            blocks[label].append((ins.group(1).lower(), re.sub(r'0x[0-9a-f]+ (<\w+>)', r'\1', ins.group(2).split('//')[0].strip().lower())))
+    return blocks
+
+
+def asm_problems(text, source):
+    """What the disassembly says against the document's account of the assembly (the order of the saves and the restores, the ISB after
+    every write of VBAR_EL2, the class taken from ESR_EL2[31:26], what the stub's registers are reported as, what the last ERET
+    returns with); an empty list means it agrees. The offsets are the source's own."""
+    blocks, problems = machine_blocks(text), []
+    off = lambda name: f'#{int(re.search(rf"#define {name} (\d+)", source).group(1)):#x}'   # noqa: E731
+    spsr_slot, frame = off('FRAME_SPSR'), off('FRAME_E')
+
+    def need(label, wanted, why):
+        block = blocks.get(label, [])
+        if not any(block[i:i + len(wanted)] == wanted for i in range(len(block) - len(wanted) + 1)):
+            problems.append(f'{label}: {why}')
+
+    need('el1trap_run', [('mrs', 'x2, spsr_el2'), ('mrs', 'x3, elr_el2'), ('stp', f'x2, x3, [sp, {spsr_slot}]')], 'SPSR_EL2 and ELR_EL2 are not saved in x2, x3')
+    need('el1trap_run', [('mrs', 'x27, vbar_el2'), ('str', f'x27, [x0, {off("E_SAVED_VBAR")}]')], 'VBAR_EL2 is not saved')
+    need('el1trap_run', [('adr', 'x2, <el1trap_vectors_el2>'), ('msr', 'vbar_el2, x2'), ('isb', '')], 'the EL2 table is not installed and synchronised')
+    need('el1trap_run', [('msr', 'elr_el2, x1'), ('mov', 'x2, #0x3c5'), ('msr', 'spsr_el2, x2'), ('eret', '')], 'the ERET to the stub is not EL1h with DAIF masked')
+    need('el1trap_resume', [('ldr', f'x0, [sp, {frame}]'), ('ldr', f'x2, [x0, {off("E_SAVED_VBAR")}]'), ('msr', 'vbar_el2, x2'), ('isb', ''),
+                            ('ldp', f'x2, x3, [sp, {spsr_slot}]'), ('msr', 'spsr_el2, x2'), ('msr', 'elr_el2, x3'),
+                            ('ldr', f'x0, [x0, {off("E_REASON")}]')], 'VBAR_EL2, SPSR_EL2 and ELR_EL2 are not put back from the slots they were saved in')
+    need('el1trap_el2_common', [('ubfx', 'x13, x9, #26, #6')], 'the exception class is not ESR_EL2[31:26]')
+    if ('lsr', 'x13, x9, #26') in blocks.get('el1trap_el2_common', []):
+        problems.append('el1trap_el2_common: the class keeps ESR_EL2[63:32]')
+    need('el1trap_from_el2', [('mov', 'x14, #0x1'), ('str', f'x14, [x11, {off("E_PROBE_OK")}]'), ('mrs', 'x14, spsr_el2'),
+                              ('str', f'x14, [x11, {off("E_CALLER_SPSR")}]'), ('eret', '')], "the probe does not keep the caller's SPSR_EL2")
+    need('el1trap_end', [('stp', f'x0, x1, [x11, {off("E_X0")}]'), ('stp', f'x2, x3, [x11, {off("E_X2")}]'), ('adr', 'x13, <el1trap_resume>'),
+                         ('msr', 'elr_el2, x13'), ('ldr', f'x13, [x11, {off("E_CALLER_SPSR")}]'), ('mov', 'x14, #0x1000'),
+                         ('movk', 'x14, #0x3c0, lsl #16'), ('and', 'x13, x13, x14'), ('mov', 'x14, #0x3c9'), ('orr', 'x13, x13, x14'),
+                         ('msr', 'spsr_el2, x13'), ('eret', '')],
+         "the stub's x0 to x3 are not reported as they were, or the last ERET does not return with SSBS, PAN, UAO, DIT and TCO of the caller")
+    need('el1trap_fatal', [('msr', 'vbar_el2, x27'), ('isb', ''), ('udf', '#0x0')], 'the fatal path does not put VBAR_EL2 back and fault')
+    sites = [(label, i) for label, block in blocks.items() for i, (m, o) in enumerate(block) if m == 'msr' and o.startswith('vbar_el2,')]
+    if len(sites) != 3:
+        problems.append(f'{len(sites)} writes of VBAR_EL2 in the assembly, the document says three')
+    problems += [f'{label}: the write of VBAR_EL2 is not followed by an ISB' for label, i in sites if blocks[label][i + 1:i + 2] != [('isb', '')]]
+    return problems
+
+
 class El1trapBinary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -465,7 +342,7 @@ class El1trapBinary(unittest.TestCase):
         f = facts(self.elf, self.flat)
         self.assertEqual(set(f['mrs']), POLICY['registers'])
         self.assertEqual(dict(f['msr']), {'vbar_el2': 4, 'elr_el2': 4, 'spsr_el2': 3, 'hcr_el2': 1, 'cnthctl_el2': 1, 'sctlr_el1': 1, 'vbar_el1': 1})
-        self.assertEqual((f['mnemonics']['mrs'], f['mnemonics']['msr']), (27, 15))
+        self.assertEqual((f['mnemonics']['mrs'], f['mnemonics']['msr']), (28, 15))
         self.assertEqual(dict(f['hvc']), {'#0x1': 16, '#0': 1, '#0x2': 1}, 'sixteen EL1 vector entries, the stub, the probe')
         self.assertEqual((f['mnemonics']['eret'], f['mnemonics']['isb'], f['mnemonics']['dsb'], f['mnemonics']['udf']), (4, 4, 1, 1))
         self.assertEqual((dict(f['dc']), dict(f['ic'])), ({'civac': 1}, {'ivau': 1}))
@@ -507,6 +384,10 @@ class El1trapBinary(unittest.TestCase):
                 for offset in (8, 64, 124) if n < 15 else (8,):     # the rest of an entry is padding that is never executed
                     self.assertEqual(by_address[el2 + 128 * n + offset][0], 'nop')
                     self.assertEqual(by_address[el1 + 128 * n + offset][0], 'nop')
+
+    def test_the_assembly_saves_installs_reports_and_returns_as_the_document_says(self):
+        self.assertEqual(asm_problems(self.text, SOURCE.read_text(encoding='utf-8')), [])
+        self.assertEqual(sorted(machine_blocks(self.text)), sorted(MACHINE))
 
     def test_every_forbidden_addition_is_named_by_the_allow_list_check(self):
         self.assertGreaterEqual(len(BAD_BINARIES), 40)
@@ -593,6 +474,27 @@ class El1trapBinary(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(Path(flat).read_bytes(), Path(self.flat).read_bytes())
         self.assertEqual(Path(self.flat).read_bytes()[:4], bytes.fromhex('5f2403d5'), 'BTI c first, as the runner expects')
+
+
+class El1trapAsmMutants(unittest.TestCase):
+    """The audit of the assembly must be able to fail: no host program runs the assembly, so each seeded edit of it is built and the
+    audit of its disassembly must name something (the QEMU suite is the run of the real thing)."""
+
+    def test_each_seeded_edit_of_the_assembly_is_named_and_the_control_is_clean(self):
+        need_tools()
+        source = SOURCE.read_text(encoding='utf-8')
+        builder = Builder(BUILD / 'asm-mutants')
+        self.assertGreaterEqual(len(ASM_MUTANTS), 10)
+        self.assertEqual(len({name for name, _ in ASM_MUTANTS}), len(ASM_MUTANTS))
+        for name, edits in [('control', [])] + ASM_MUTANTS:
+            with self.subTest(mutant=name):
+                done, elf, _ = builder.build('el1trap', name, edits)
+                self.assertEqual(done.returncode, 0, done.stderr[-800:])
+                problems = asm_problems(run(['llvm-objdump', '-d', '--no-show-raw-insn', str(elf)]).stdout, source)
+                if name == 'control':
+                    self.assertEqual(problems, [])
+                else:
+                    self.assertTrue(problems, 'the audit passed a binary whose assembly was changed')
 
 
 class El1trapStick(unittest.TestCase):

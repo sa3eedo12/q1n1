@@ -35,7 +35,8 @@ asks for it; it is not it.
    or 14 set (a write could then not show whether it makes a bit stick, and `ECV` would be on before this payload ran).
 3. **Announce, then wait eight seconds.** `NEXT CNTHCTL_EL2 WRITE AFTER 8 S`, then eight seconds on the runner's counter, so that a
    hang or a reset at the write leaves a page that was already photographed. A counter that does not run (two million equal reads
-   in a row) ends the payload with `REFUSED=COUNTER_STUCK` before the write: the wait cannot be made.
+   in a row) or that runs backwards (a read below the first, which would end the wait at once) ends
+   the payload with `REFUSED=COUNTER_STUCK` before the write: the wait cannot be made.
 4. **The window.** `V = (OLD & ~3) | (1 << 14) | (1 << 13)`, then: write V; `ISB`; read the register (R); write OLD; `ISB`; read
    it (R2). If R2 is not OLD it writes OLD **once more**, `ISB`, and reads (R3): the one retry. **Nothing is printed and nothing
    else is read between the first write and the last read**, and no other register is ever written.
@@ -118,7 +119,7 @@ printed as the runner's hex op prints them (`0X` and capitals).
 | `CNTHCTL_EL2 OLD=0X.. CNTFRQ_EL0=0X..` + ` FREQ=DEFAULT` | the register as found, and the counter frequency; `FREQ=DEFAULT` if it is outside 1 MHz to 1 GHz and 19.2 MHz is used |
 | `REFUSED=E2H` / `REFUSED=OLD_HAS_BITS_12_TO_14` | nothing was written: E2H is set / OLD has bit 12, 13 or 14 set |
 | `NEXT CNTHCTL_EL2 WRITE AFTER 8 S` | the write follows eight seconds after this line |
-| `REFUSED=COUNTER_STUCK` | the counter does not run: the wait cannot be made and nothing was written |
+| `REFUSED=COUNTER_STUCK` | the counter does not run or runs backwards: the wait cannot be made and nothing was written |
 | `OLD=0X.. V=0X..` | the value found and the value written |
 | `R=0X.. R2=0X..` | the read-back after the write, and after the restore |
 | `BITS13_14_STUCK=YES\|NO\|PARTIAL R_EQ_V=YES\|NO` | whether bits 13 and 14 are both, neither or one of them set in R, and whether R is exactly V |
@@ -199,7 +200,7 @@ step" is a proposal for a separate, authorised change, never something this payl
 | q1n1's fault page, `ELR_EL2` inside `cnthctl.bin` | an exception at EL2 on the access (UNDEFINED, or a trap): `ESR_EL2` bits 31:26 are the class | the same as the line above, with a class: `0x18` a trapped system register access, `0x00` UNDEFINED |
 | `REFUSED=E2H` | `HCR_EL2.E2H` is set: the register has the VHE layout and the monitor's formula is not what it would be | nothing was written; whether the monitor can run in that regime is the entry study's question (C1), and this payload needs a different design for it |
 | `REFUSED=OLD_HAS_BITS_12_TO_14` | the firmware left bit 12, 13 or 14 set | nothing was written. Bits 13 and 14 already set: the register holds them (read, not written) and `el1trap` can start; bit 12 set: ECV is on, which is a finding on its own: stop and report |
-| `REFUSED=COUNTER_STUCK` or `REFUSED=NO_COUNTER` | the counter does not run, or the runner gave none: no wait can be made | nothing was written; a runner or CPU question before any write |
+| `REFUSED=COUNTER_STUCK` or `REFUSED=NO_COUNTER` | the counter does not run or runs backwards, or the runner gave none: no wait can be made | nothing was written; a runner or CPU question before any write |
 | `SKIPPED_NOT_AT_EL2` | the runner was not at EL2 | nothing was done |
 | `FREQ=DEFAULT` on the OLD line | `CNTFRQ_EL0` is outside 1 MHz to 1 GHz | the wait used 19.2 MHz; the value is the finding (the unit's is `0x124F800`, OBSERVED) |
 <!-- /cnthctl-decisions -->
@@ -271,9 +272,9 @@ Hardware: NOT RUN. Every command writes only under `build/`.
 
 | Command | What it runs |
 | --- | --- |
-| `python3 tools/test-q1n1-sp11-payload-cnthctl.py` | the host program `tools/test-q1n1-sp11-payload-cnthctl.c` (six suites over a modelled machine whose register can hold the bits, lose them as RES0, hold one, or refuse the restore: the exact events, the wait to the read, the window, an independent oracle of the page, 6000 random worlds) under ASan and UBSan; 62 seeded-bug mutants and an unmutated control; the source audits; the allow-list on the binary with 37 seeded bad binaries and a flat binary patched behind the disassembly; the stick, the manifest tool and the runner's own validator |
+| `python3 tools/test-q1n1-sp11-payload-cnthctl.py` | the host program `tools/test-q1n1-sp11-payload-cnthctl.c` (six suites over a modelled machine whose register can hold the bits, lose them as RES0, hold one, or refuse the restore: the exact events, the wait to the read, the window, an independent oracle of the page, 6000 random worlds) under ASan and UBSan; 64 seeded-bug mutants and an unmutated control; the source audits; the allow-list on the binary with 37 seeded bad binaries and a flat binary patched behind the disassembly; the stick, the manifest tool and the runner's own validator |
 | `python3 tools/test-q1n1-sp11-payload-qemu-cnthctl.py` | the QEMU boots above |
-| `python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py` | this document against the source, the host model and the binary, with 41 seeded mistakes in the document |
+| `python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py` | this document against the source, the host model and the binary, with 43 seeded mistakes in the document |
 | `python3 tools/test-q1n1-sp11-payload-build.py` | `make payloads` builds `cnthctl.bin`, the ELF check, the allow-list of every payload, two builds byte-identical, the same bytes at another link address |
 | `python3 tools/test-q1n1-sp11-payload-cnthctl.py facts` | the size, digest and instruction inventory of the built binary |
 

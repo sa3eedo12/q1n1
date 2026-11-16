@@ -64,6 +64,19 @@ VARIANTS = {
               '    e->deadline = r->a->ops.counter() + (mode == MODE_EXCURSION ? 0 : r->hz * DEADLINE_S);\n')],
     'fatal': [('"    b.hi el1trap_fatal\\n"', '"    b.hi el1trap_fatal\\n"\n    "    udf #0\\n"')],     # the handler faults
     'lost': [(PUT_BACK, PUT_BACK.replace('i = 0', 'i = 2')), (RETRY, RETRY.replace('if (w->restored[i] == r->saved[i]) continue;', 'if (1) continue;'))],
+    # The caller has SSBS, PAN, UAO and DIT set before the probe and the copy prints them after the excursion: a last ERET that returned
+    # a constant would print 0. TCO is not among them: with this QEMU configuration it reads back as 0 even when set (OBSERVED; no tag
+    # memory, INFERRED as the reason), so the audit of the disassembly is the only check of that bit.
+    'pstate': [('    if (!pl_args_ok(a)) return Q1N1_PAYLOAD_RET_BAD_ARGS;\n',
+                '    if (!pl_args_ok(a)) return Q1N1_PAYLOAD_RET_BAD_ARGS;\n'
+                '    __asm__ volatile("msr S3_3_C4_C2_6, %0\\n msr S3_0_C4_C2_3, %1\\n msr S3_0_C4_C2_4, %2\\n msr S3_3_C4_C2_5, %3" : :\n'
+                '                     "r"(UINT64_C(1) << 12), "r"(UINT64_C(1) << 22), "r"(UINT64_C(1) << 23), "r"(UINT64_C(1) << 24));\n'),
+               ('    excursion_window(&r, &w);\n',
+                '    excursion_window(&r, &w);\n'
+                '    row(&line);\n'
+                '    field(a, &line, "PSTATE_KEPT", (SYSREG(S3_3_C4_C2_6) & (UINT64_C(1) << 12)) | (SYSREG(S3_0_C4_C2_3) & (UINT64_C(1) << 22)) |\n'
+                '                                    (SYSREG(S3_0_C4_C2_4) & (UINT64_C(1) << 23)) | (SYSREG(S3_3_C4_C2_5) & (UINT64_C(1) << 24)));\n'
+                '    emit(&r.out, &line);\n')],
 }
 STATE_KEYS = ('HCR_EL2', 'SCTLR_EL2', 'TCR_EL2', 'TTBR0_EL2', 'MAIR_EL2', 'VBAR_EL2', 'CPTR_EL2', 'CNTHCTL_EL2', 'CNTFRQ_EL0', 'DAIF', 'SPSEL')
 EFFECTIVE = [r'CURRENTEL=0X8 HCR_EL2=0X8000038 E2H=0X0', r'DAIF=0X3C0 SPSEL=0X1 CNTFRQ_EL0=0X3B9ACA00', rf'ID_AA64MMFR0_EL1={HEX} ECV=0X2',
@@ -108,7 +121,7 @@ class El1trapQemu(unittest.TestCase):
         chain = lambda name, data, **kw: ecv.Run(name, ecv.stick([('STATE.BIN', state), ('EL1TRAP.BIN', data), ('STATE2.BIN', state)]),  # noqa: E731
                                                   marker=ecv.PREFIX_DONE + '2 ', **kw)
         runs = [chain('max', cls.shipped), ecv.Run('a76', ecv.stick([('EL1TRAP.BIN', cls.shipped)]), cpu='cortex-a76')]
-        runs += [chain(name, cls.variants[name]) for name in ('probe', 'udf', 'svc', 'hvc5', 'loop', 'late', 'lost')]
+        runs += [chain(name, cls.variants[name]) for name in ('probe', 'udf', 'svc', 'hvc5', 'loop', 'late', 'lost', 'pstate')]
         runs += [ecv.Run('hang', ecv.stick([('EL1TRAP.BIN', cls.variants['hang'])]), marker=PREFIX + 'NEXT EL1 EXCURSION\n', grace=25, shot_after=1),
                  ecv.Run('fatal', ecv.stick([('EL1TRAP.BIN', cls.variants['fatal'])]), marker=PREFIX + 'NEXT EL1 EXCURSION AFTER 8 S\n', shot_after=24)]
         runs = [run for run in runs if not ONLY or run.name in ONLY]
@@ -156,9 +169,11 @@ class El1trapQemu(unittest.TestCase):
         self.assertEqual(len(page), 20, page)
         self.assertRegex(page[2], rf'^ID_AA64MMFR0_EL1={HEX} ECV=0X0$')
         self.assertEqual(page[11], 'READBACK HCR_EL2=0X80000000 CNTHCTL_EL2=0X0')
-        self.assertRegex(page[13], rf'^CNTVCT_EL0 NOT_TRAPPED VALUE={HEX}$')
-        self.assertRegex(page[14], rf'^CNTV_CTL_EL0 NOT_TRAPPED VALUE={HEX}$')
-        self.assertRegex(page[15], rf'^CNTFRQ_EL0 NOT_TRAPPED VALUE={HEX}$')
+        # With the ECV bits RES0 the values the stub read are the only evidence that its reads ran: the virtual count is not zero, the
+        # virtual timer's control reads zero after reset, and the frequency is the one the context line printed (x0, x1 and x2 each).
+        self.assertRegex(page[13], r'^CNTVCT_EL0 NOT_TRAPPED VALUE=0X[1-9A-F][0-9A-F]*$')
+        self.assertEqual(page[14], 'CNTV_CTL_EL0 NOT_TRAPPED VALUE=0X0')
+        self.assertEqual(page[15], 'CNTFRQ_EL0 NOT_TRAPPED VALUE=' + re.search(r'CNTFRQ_EL0=(0X[0-9A-F]+)', page[1]).group(1))
         self.assertEqual(page[16], 'CNTPCT_EL0 CONTROL TRAPPED EC=0X18 ISS=0X32F861 ISS_OK=YES')
         self.assertEqual(page[17:], ['VERDICT=TRAPS_INERT BITS13_14_IN_READBACK=NO', 'EXCURSION OK ENTRIES=0X2 TRAPS=0X1', 'RESTORED=YES'])
         self.assertRegex(run.text, r'PAYLOAD DONE INDEX=0 RETURN=0X0 ')
@@ -219,6 +234,15 @@ class El1trapQemu(unittest.TestCase):
         self.assertEqual(run.lines(PREFIX)[13], 'EXCURSION DEADLINE ENTRIES=0X1 TRAPS=0X0 VECTOR=0X8')
         self.assertRegex(run.lines(PREFIX)[14], rf'^ESR_EL2=0X6234F801 ELR_EL2={HEX}$')
         self.assertRegex(self.done(run, 1), r'RETURN=0X2 ')
+        self.check_restored(run)
+
+    # -- the caller's PSTATE comes back --------------------------------------------------------------------------------------------
+    def test_the_last_eret_gives_back_the_ssbs_pan_uao_and_dit_the_caller_had_and_everything_else_is_as_found(self):
+        run = self.run_of('pstate')
+        page = run.lines(PREFIX)
+        self.assertEqual(page[11], 'PSTATE_KEPT=0X1C01000', 'SSBS (bit 12), PAN, UAO and DIT (bits 22 to 24) are as the caller set them')
+        self.assertIn('EXCURSION OK ENTRIES=0X4 TRAPS=0X3', page)
+        self.assertRegex(self.done(run, 1), r'RETURN=0X0 ')
         self.check_restored(run)
 
     # -- a payload that cannot put everything back says so, and the next payload sees it ---------------------------------------

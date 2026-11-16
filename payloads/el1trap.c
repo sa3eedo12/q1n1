@@ -26,7 +26,8 @@
  *      (VA = PA) is OBSERVED on the unit by cpuon (its CPU_ON entry address is a pointer to its own stub).
  *   4. A probe: HVC #2 at EL2 under the payload's own vectors. HVC is enabled by SCR_EL3.HCE (INFERRED), and an UNDEFINED HVC at EL1
  *      would send the EL1 vectors (which return by HVC) into a loop nothing could end; the probe finds out first, with nothing but
- *      VBAR_EL2 changed. A failed probe ends the payload: no EL1 code runs.
+ *      VBAR_EL2 changed. A failed probe ends the payload: no EL1 code runs. The handler of a probe that worked also keeps SPSR_EL2,
+ *      which that exception entry filled with the caller's PSTATE: the excursion's last ERET gives five bits of it back (below).
  *   5. NEXT EL1 EXCURSION, then the writes, and no line is printed from the first write to the last read-back:
  *        VBAR_EL1  = the payload's EL1 vector table (every entry reports its number and returns by HVC #1),
  *        SCTLR_EL1 = 0x30500800: M, C, I, A, SA, SA0, WXN, EE and E0E clear (MMU and caches off, no alignment checks, little endian)
@@ -37,23 +38,26 @@
  *                    non-VHE layout); IMO, FMO and AMO are clear, so that no physical interrupt is routed to EL2 while EL1 runs (and
  *                    none is taken at EL1: SPSR_EL2 masks D, A, I and F, and the runner left them pending-masked at EL2 too); HCD is
  *                    clear (HVC enabled); every trap bit is clear, so that only what CNTHCTL_EL2 traps reaches EL2.
- *      The four registers are read back; if one of the bits that matters (RW, TGE, E2H, VM, HCD, IMO, FMO, AMO of HCR_EL2; M, C, I, A,
- *      WXN, EE, E0E of SCTLR_EL1; the whole of VBAR_EL1) is not as written, nothing is run: REFUSED=WRITE_NOT_HELD, and everything is
- *      put back.
+ *      The four registers are read back; if one of the bits that matters (RW, DC, TGE, E2H, VM, HCD, IMO, FMO, AMO of HCR_EL2; M, C, I,
+ *      A, WXN, EE, E0E of SCTLR_EL1; the whole of VBAR_EL1) is not as written, nothing is run: REFUSED=WRITE_NOT_HELD, and everything is
+ *      put back. (DC is among them because DC set behaves as VM set, with whatever VTTBR_EL2 the firmware left.)
  *   6. el1trap_run (assembly, below): saves x19-x30, SP, SPSR_EL2, ELR_EL2 and VBAR_EL2, installs the payload's EL2 vector table
  *      before the first ERET, ERETs to the stub at EL1h with DAIF masked. Every exception to EL2 enters one handler. For each trapped
  *      MRS (class 0x18) it records ESR_EL2 and ELR_EL2, advances ELR_EL2 by 4 and returns to the stub; an HVC #0 from EL1 ends the
  *      excursion (the stub finished); an HVC #1 (an EL1 vector reported an exception) ends it with ESR_EL1, ELR_EL1 and FAR_EL1; any
- *      other entry ends it with a reason. Ending is an ERET to the code after the first ERET at EL2h, which restores the saved
- *      registers and returns. The bound: the stub is five instructions with no branch and each EL1 vector entry is two, so EL1 can run
- *      at most five instructions between entries; the handler counts its entries in x28 and ends the excursion at the ninth, ends it
+ *      other entry ends it with a reason. Ending is an ERET to the code after the first ERET, at EL2h with D, A, I and F masked and
+ *      with the caller's SSBS, PAN, UAO, DIT and TCO as the probe saw them (all five clear if it saw none): a C caller may rely on
+ *      those, not on the flags or on the bits no payload here knows. It restores the saved registers and returns. The bound: the stub
+ *      is five instructions with no branch and each EL1 vector entry is two, so EL1 can run at most five instructions between
+ *      entries; the handler counts its entries in x28 and ends the excursion at the ninth, ends it
  *      if CNTPCT_EL0 passes the deadline (one second) at an entry, and after 24 entries (a handler that faults again and again)
  *      puts the saved VBAR_EL2 back and executes UDF, so that q1n1's own fault page shows it. What nothing here can bound is an
  *      instruction that never completes, or EL1 code that never reaches an entry (no timer interrupt is armed): the last line on the
  *      page, NEXT EL1 EXCURSION, names it, as for every payload.
  *   7. Everything is put back in the reverse order (HCR_EL2, CNTHCTL_EL2, SCTLR_EL1, VBAR_EL1; VBAR_EL2, SPSR_EL2 and ELR_EL2 by
  *      el1trap_run), read back, and a register that differs gets one more write. A register that still differs is NOT_RESTORED,
- *      loudly, and the payload returns 3.
+ *      loudly, and the payload returns 3. SPSR_EL2 and ELR_EL2 are the exception: they hold nothing at EL2 outside an exception, the
+ *      next entry overwrites both, and they are neither read back nor among the five registers RESTORED=YES speaks for.
  *
  * Registers written: HCR_EL2, CNTHCTL_EL2, SCTLR_EL1, VBAR_EL1, and in el1trap_run VBAR_EL2, SPSR_EL2, ELR_EL2. Never touched:
  * CNTPOFF_EL2 (a read of it never returns on this unit), CNTVOFF_EL2, CNTKCTL_EL1, CNTHCTL_EL2.ECV, SP_EL1, the timer control
@@ -112,6 +116,7 @@ struct excursion {
     uint64_t probe_ok;
     uint64_t saved_vbar;        /* VBAR_EL2 as found: put back before el1trap_run returns */
     struct trap_record trap[TRAPS_MAX];
+    uint64_t caller_spsr;       /* SPSR_EL2 as the probe's HVC #2 entered EL2 with it, which is the caller's PSTATE; 0 if none was taken */
 };
 #define E_MODE 8
 #define E_DEADLINE 16
@@ -128,6 +133,7 @@ struct excursion {
 #define E_PROBE_OK 152
 #define E_SAVED_VBAR 160
 #define E_TRAP0 168
+#define E_CALLER_SPSR 296
 _Static_assert(__builtin_offsetof(struct excursion, mode) == E_MODE && __builtin_offsetof(struct excursion, deadline) == E_DEADLINE &&
                __builtin_offsetof(struct excursion, entries) == E_ENTRIES && __builtin_offsetof(struct excursion, traps) == E_TRAPS &&
                __builtin_offsetof(struct excursion, reason) == E_REASON && __builtin_offsetof(struct excursion, vector) == E_VECTOR &&
@@ -135,17 +141,30 @@ _Static_assert(__builtin_offsetof(struct excursion, mode) == E_MODE && __builtin
                __builtin_offsetof(struct excursion, x) == E_X0 && __builtin_offsetof(struct excursion, x[2]) == E_X2 &&
                __builtin_offsetof(struct excursion, el1_esr) == E_EL1_ESR && __builtin_offsetof(struct excursion, el1_far) == E_EL1_FAR &&
                __builtin_offsetof(struct excursion, probe_ok) == E_PROBE_OK && __builtin_offsetof(struct excursion, saved_vbar) == E_SAVED_VBAR &&
-               __builtin_offsetof(struct excursion, trap) == E_TRAP0 && sizeof(struct excursion) == E_TRAP0 + 16 * TRAPS_MAX,
+               __builtin_offsetof(struct excursion, trap) == E_TRAP0 && __builtin_offsetof(struct excursion, caller_spsr) == E_CALLER_SPSR &&
+               sizeof(struct excursion) == E_CALLER_SPSR + 8 && E_CALLER_SPSR == E_TRAP0 + 16 * TRAPS_MAX,
                "the handler reaches the record at these offsets");
+
+/* What the end of an excursion returns to EL2 with: D, A, I and F masked, AArch64, EL2h (0x3c9), plus the bits of the caller's PSTATE
+ * that are kept: SSBS (bit 12) and PAN, UAO, DIT and TCO (bits 22 to 25), each of which a caller may be using. As two immediates of the
+ * assembly: the low halfword and the halfword of bits 16 to 31. Nothing else of the caller's PSTATE is passed on (the flags are not
+ * part of a C call; a bit nothing here knows is not this payload's to set). */
+#define SPSR_EL2H_MASKED 0x3c9
+#define SPSR_KEPT_LOW 0x1000
+#define SPSR_KEPT_HIGH 0x3c0
+_Static_assert(((SPSR_KEPT_HIGH << 16) | SPSR_KEPT_LOW) == ((1 << 12) | (1 << 22) | (1 << 23) | (1 << 24) | (1 << 25)) &&
+               !(((SPSR_KEPT_HIGH << 16) | SPSR_KEPT_LOW) & SPSR_EL2H_MASKED), "the kept bits are the five of the comment and none of the forced ones");
 
 #ifdef Q1N1_PAYLOAD_HOST_TEST
 /* The host test replaces what a build machine cannot run: MRS, the four MSRs, cache maintenance, ISB, the stack pointer, and the whole
- * of el1trap_run (the assembly), which it models. The image is one object so that the payload's checks on it have addresses. */
+ * of el1trap_run (the assembly), which it models. The image is one object so that the payload's checks on it have addresses; the test
+ * adds pl_host_skew to the two tables and the stub, to hand the payload addresses that are not aligned (nothing here dereferences them). */
 uint64_t pl_host_sysreg(const char *name);
 void pl_host_write(const char *name, uint64_t value);
 void pl_host_cache(const char *operation, uint64_t address);
 uint64_t pl_host_stack_pointer(void);
 uint64_t pl_host_run(struct excursion *e, uint64_t stub);
+extern uint64_t pl_host_skew[3];
 struct host_image {
     char vectors_el2[2048];
     char vectors_el1[2048];
@@ -153,9 +172,9 @@ struct host_image {
 };
 struct host_image el1trap_host_image __attribute__((aligned(2048)));
 #define SYSREG(name) pl_host_sysreg(#name)
-#define EL2_VECTORS ((uintptr_t)el1trap_host_image.vectors_el2)
-#define EL1_VECTORS ((uintptr_t)el1trap_host_image.vectors_el1)
-#define EL1_STUB ((uintptr_t)el1trap_host_image.stub)
+#define EL2_VECTORS ((uintptr_t)el1trap_host_image.vectors_el2 + pl_host_skew[0])
+#define EL1_VECTORS ((uintptr_t)el1trap_host_image.vectors_el1 + pl_host_skew[1])
+#define EL1_STUB ((uintptr_t)el1trap_host_image.stub + pl_host_skew[2])
 #define EL1_STUB_BYTES 20u
 #else
 #define SYSREG(name) ({ uint64_t value_; __asm__ volatile("mrs %0, " #name : "=r"(value_)); value_; })
@@ -277,7 +296,7 @@ __asm__(
     "    mov x12, #" STR(END_DEADLINE) "\n"
     "    cmp x13, x14\n"
     "    b.hi el1trap_end\n"
-    "    lsr x13, x9, #26\n"                        /* the exception class */
+    "    ubfx x13, x9, #26, #6\n"                   /* the exception class, ESR_EL2[31:26]: ISS2 above it is RES0 here, but not assumed to read 0 */
     "    cmp x15, #4\n"
     "    b.eq el1trap_from_el2\n"
     "    mov x12, #" STR(END_VECTOR) "\n"
@@ -299,6 +318,8 @@ __asm__(
     "    b.ne el1trap_end\n"
     "    mov x14, #1\n"
     "    str x14, [x11, #" STR(E_PROBE_OK) "]\n"
+    "    mrs x14, spsr_el2\n"                        /* this entry saved the caller's PSTATE here; the end of an excursion gives five bits back */
+    "    str x14, [x11, #" STR(E_CALLER_SPSR) "]\n"
     "    eret\n"                                     /* to the instruction after the HVC, as it was */
     /* A trapped read: record ESR_EL2 and ELR_EL2, skip the instruction, go on. */
     "el1trap_trapped:\n"
@@ -341,7 +362,14 @@ __asm__(
     "    stp x2, x3, [x11, #" STR(E_X2) "]\n"
     "    adr x13, el1trap_resume\n"
     "    msr elr_el2, x13\n"
-    "    mov x13, #0x3c9\n"                          /* SPSR_EL2: D, A, I, F masked, AArch64, EL2h */
+    /* SPSR_EL2 for the return to EL2h: the five bits of the caller's PSTATE the probe saw (0 if it saw none), then D, A, I, F masked,
+     * AArch64, EL2h. x0 to x3 have been reported and are free; the handler uses x13 and x14 as scratch. */
+    "    ldr x13, [x11, #" STR(E_CALLER_SPSR) "]\n"
+    "    mov x14, #" STR(SPSR_KEPT_LOW) "\n"
+    "    movk x14, #" STR(SPSR_KEPT_HIGH) ", lsl #16\n"
+    "    and x13, x13, x14\n"
+    "    mov x14, #" STR(SPSR_EL2H_MASKED) "\n"
+    "    orr x13, x13, x14\n"
     "    msr spsr_el2, x13\n"
     "    eret\n"
     /* Too many entries: the handler itself is failing. Put the VBAR_EL2 found back and fault under it, so that q1n1's page shows it. */
@@ -357,7 +385,7 @@ __asm__(
 /* What the excursion writes (docs/SP11-PAYLOAD-EL1TRAP.md has the table). */
 #define HCR_EXCURSION (UINT64_C(1) << 31)
 #define HCR_BITS_CHECKED ((UINT64_C(1) << 31) | (UINT64_C(1) << 34) | (UINT64_C(1) << 27) | (UINT64_C(1) << 29) | UINT64_C(1) | \
-                          (UINT64_C(7) << 3))        /* RW, E2H, TGE, HCD, VM, FMO, IMO, AMO */
+                          (UINT64_C(1) << 12) | (UINT64_C(7) << 3))        /* RW, E2H, TGE, HCD, VM, DC, FMO, IMO, AMO */
 #define SCTLR_EL1_EXCURSION UINT64_C(0x30500800)
 #define SCTLR_EL1_BITS_CHECKED (UINT64_C(0x1) | UINT64_C(0x2) | UINT64_C(0x4) | UINT64_C(0x1000) | UINT64_C(0x80000) | UINT64_C(0x1000000) | \
                                 UINT64_C(0x2000000))  /* M, A, C, I, WXN, E0E, EE */
@@ -561,13 +589,15 @@ OUT_OF_LINE void emit(struct out *o, const struct pl_line *line)
 
 /* ---- The wait -------------------------------------------------------------------------------------------------------- */
 
-/* Waits `seconds` on the runner's counter at `hz` ticks a second; 0 if the counter does not run. */
+/* Waits `seconds` on the runner's counter at `hz` ticks a second; 0 if the counter does not run or runs backwards (a read below the
+ * first would make now - start huge and end the wait at once: the photograph window is not given up for a counter that lies). */
 OUT_OF_LINE int wait_seconds(const struct q1n1_payload_args *a, uint64_t hz, unsigned seconds)
 {
     uint64_t start = a->ops.counter(), last = start;
     uint32_t same = 0;
     for (;;) {
         uint64_t now = a->ops.counter();
+        if (now < start) return 0;
         if (now - start >= hz * seconds) return 1;
         if (now == last) {
             if (++same >= COUNTER_STUCK_READS) return 0;
@@ -631,6 +661,7 @@ OUT_OF_LINE void excursion_window(const struct run *r, struct window *w)
     w->held = (uint32_t)writes_held(r, w->readback);
     if (w->held) {
         prepare(r, &w->e, MODE_EXCURSION);
+        w->e.caller_spsr = w->probe.caller_spsr;        /* what the probe's HVC #2 saw of the caller: the last ERET returns five bits of it */
         RUN(&w->e, EL1_STUB);
         w->ran = 1;
     }

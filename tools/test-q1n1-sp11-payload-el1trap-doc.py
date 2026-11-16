@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """docs/SP11-PAYLOAD-EL1TRAP.md against the source, the host model, the binary and the QEMU suite of the el1trap payload, and the same
-agreement tests against 48 seeded mistakes in the document.
+agreement tests against 57 seeded mistakes in the document.
 
     python3 tools/test-q1n1-sp11-payload-el1trap-doc.py
 
@@ -148,14 +148,34 @@ class El1trapDocAgreement(unittest.TestCase):
         self.says('VERIFIED against the monitor\'s source')
         self.says('`INIT_SCTLR_EL1_MMU_OFF` of Linux (VERIFIED against that name in commit 7475ea8b5861, GPL-2.0-only')
 
+    def test_the_callers_pstate_the_registers_not_read_back_and_the_backwards_counter_are_what_the_source_does(self):
+        kept = (self.macro_value('SPSR_KEPT_HIGH') << 16) | self.macro_value('SPSR_KEPT_LOW')
+        self.assertEqual(kept, sum(1 << b for b in (12, 22, 23, 24, 25)), 'SSBS, PAN, UAO, DIT, TCO')
+        self.assertEqual((self.macro_value('SPSR_EL2H_MASKED'), self.macro_value('E_CALLER_SPSR')), (0x3c9, 296))
+        self.assertEqual(0x0000100030C5183D >> 44 & 1, 1, "DSSBS of the unit's SCTLR_EL2")
+        self.assertIn('0x0000100030C5183D', self.text)
+        self.says('the mask `0x3C01000`, built from the immediates `0x1000` and `0x3C0 << 16`')
+        self.says('and the end of the excursion returns with `0x3C9` plus those of its bits that are `SSBS` (bit 12)')
+        self.says('`SSBS` (bit 12) and `PAN`, `UAO`, `DIT`, `TCO` (bits 22 to 25)')
+        self.says('`DSSBS` (bit 44) is set')
+        self.says('A record with no capture (the probe did not run or failed) is zero, so the return is `0x3C9`, as before.')
+        self.says('Not passed on: the flags (not part of a C call), `ALLINT` and any bit this payload does not know')
+        self.says('`SPSR_EL2` and `ELR_EL2` are put back by the assembly and are **not** read back, and `RESTORED=YES` does not speak for them')
+        self.says("the probe's handler also keeps `SPSR_EL2`, which that exception entry filled with the caller's PSTATE")
+        self.says('A counter that does not run (two million equal reads in a row) or that runs backwards (a read below the first, which would end the wait at once)')
+        self.assertIn('if (now < start) return 0;', self.code)
+        self.assertRegex(self.code, r'mrs x14, spsr_el2\\n"\s*\n\s*"\s+str x14, \[x11, #" STR\(E_CALLER_SPSR\)', 'the probe keeps SPSR_EL2')
+        self.assertIn('w->e.caller_spsr = w->probe.caller_spsr;', self.code)
+
     def test_the_hcr_table_is_the_sources_bits(self):
         table = self.table('el1trap-hcr')
         self.assertEqual({bit: row[2] for bit, row in table.items()},
-                         {'31': 'set', '34': 'clear', '27': 'clear', '0': 'clear', '29': 'clear', '5:3': 'clear', 'the rest': 'clear'})
+                         {'31': 'set', '34': 'clear', '27': 'clear', '0': 'clear', '12': 'clear', '29': 'clear', '5:3': 'clear', 'the rest': 'clear'})
         self.assertEqual(self.macro_value('HCR_EXCURSION'), 0x80000000)
-        self.assertEqual(self.macro_value('HCR_BITS_CHECKED'), sum(1 << b for b in (31, 34, 27, 29, 0, 3, 4, 5)), 'RW, E2H, TGE, HCD, VM, FMO, IMO, AMO')
-        for name in ('`RW`', '`E2H`', '`TGE`', '`VM`', '`HCD`', '`AMO`, `IMO`, `FMO`'):
+        self.assertEqual(self.macro_value('HCR_BITS_CHECKED'), sum(1 << b for b in (31, 34, 27, 29, 0, 12, 3, 4, 5)), 'RW, E2H, TGE, HCD, VM, DC, FMO, IMO, AMO')
+        for name in ('`RW`', '`E2H`', '`TGE`', '`VM`', '`DC`', '`HCD`', '`AMO`, `IMO`, `FMO`'):
             self.assertIn(name, ' '.join(row[1] for row in table.values()))
+        self.says('(`HCR_EL2` RW, E2H, TGE, VM, DC, HCD, FMO, IMO, AMO;')
 
     def test_the_sctlr_table_is_the_sources_value_bit_by_bit(self):
         table = self.table('el1trap-sctlr')
@@ -353,18 +373,24 @@ class El1trapDocAgreement(unittest.TestCase):
         qemu_source = (ROOT / 'tools' / 'test-q1n1-sp11-payload-qemu-el1trap.py').read_text(encoding='utf-8')
         self.says('between 7 and 40 seconds')
         self.assertIn('7.0 <= seconds <= 40.0', qemu_source)
-        self.says(f'{["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"][len(qemu.VARIANTS)]} copies of the source, each edited once')
-        self.assertEqual(len(qemu.VARIANTS), 9)
+        self.says(f'{["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][len(qemu.VARIANTS)]} copies of the source, each edited once')
+        self.assertEqual(len(qemu.VARIANTS), 10)
+        self.says('the tenth sets `SSBS`, `PAN`, `UAO` and `DIT` before the probe and prints them after the excursion (`PSTATE_KEPT=0X1C01000`')
+        self.assertIn("PSTATE_KEPT=0X1C01000'", qemu_source)
+        for pinned in ("'CNTV_CTL_EL0 NOT_TRAPPED VALUE=0X0'", '[1-9A-F][0-9A-F]*'):
+            self.assertIn(pinned, qemu_source)
+        self.says('`CNTV_CTL_EL0` reads `0X0`')
 
     def test_the_tests_table_counts_what_the_tests_hold(self):
         for claim in (f'{len(driver.MUTANTS)} seeded-bug mutants', f'{len(driver.BAD_BINARIES)} seeded bad binaries', f'{len(DOC_MUTANTS)} seeded mistakes in the document',
-                      'nine suites', '6000 random worlds'):
+                      f'{len(driver.ASM_MUTANTS)} seeded edits of the assembly', 'nine suites', '6000 random worlds'):
             self.assertIn(claim, self.text)
         self.assertEqual(len(driver.SUITES), 9)
-        host = (ROOT / 'tools' / 'test-q1n1-sp11-payload-el1trap.c').read_text(encoding='utf-8')
+        host = ''.join((ROOT / 'tools' / name).read_text(encoding='utf-8') for name in ('test-q1n1-sp11-payload-el1trap.c', 'test-q1n1-sp11-payload-el1trap-tail.h'))
         self.assertIn('round < 6000', host)
         self.assertGreaterEqual(len(driver.MUTANTS), 100)
         self.assertGreaterEqual(len(driver.BAD_BINARIES), 35)
+        self.assertGreaterEqual(len(driver.ASM_MUTANTS), 10)
 
     def test_the_other_documents_are_the_ones_it_names(self):
         for name in ('SP11-PAYLOAD.md', 'SP11-PAYLOAD-CNTHCTL.md', 'SP11-PAYLOAD-CPUON.md'):
@@ -386,6 +412,15 @@ def _replace(old, new, count=1):
 
 
 DOC_MUTANTS = [
+    ('the-end-is-said-to-return-the-constant', _replace('the end of the excursion returns with `0x3C9` plus those of its bits', 'the end of the excursion returns with `0x3C9` and none of its bits')),
+    ('the-unread-registers-are-said-to-be-read-back', _replace('are put back by the assembly and are **not** read back, and `RESTORED=YES` does not speak for them', 'are put back by the assembly and read back, and `RESTORED=YES` speaks for them')),
+    ('the-backwards-counter-is-forgotten', _replace('or that runs\n   backwards (a read below the first, which would end the wait at once)', 'or that\n   runs fast')),
+    ('dc-is-dropped-from-the-checked-bits', _replace('(`HCR_EL2` RW, E2H, TGE, VM, DC, HCD, FMO, IMO, AMO;', '(`HCR_EL2` RW, E2H, TGE, VM, HCD, FMO, IMO, AMO;')),
+    ('dc-is-said-to-be-set', _replace('| 12 | `DC` | clear |', '| 12 | `DC` | set |')),
+    ('the-kept-mask-is-wrong', _replace('the mask `0x3C01000`, built from', 'the mask `0x3C00000`, built from')),
+    ('the-probe-handler-is-said-not-to-keep-spsr', _replace("the probe's handler\n   also keeps `SPSR_EL2`", "the probe's handler\n   also keeps `SPSR_EL1`")),
+    ('the-pstate-variant-value-is-wrong', _replace('`PSTATE_KEPT=0X1C01000`', '`PSTATE_KEPT=0X3C01000`', count=-1)),
+    ('the-assembly-mutant-count-is-wrong', _replace(f'{len(driver.ASM_MUTANTS)} seeded edits of the assembly', f'{len(driver.ASM_MUTANTS) + 1} seeded edits of the assembly')),
     ('the-wait-in-the-lines-table-is-wrong', _replace('| `NEXT EL1 EXCURSION AFTER 8 S` | what follows starts eight seconds after this line |', '| `NEXT EL1 EXCURSION AFTER 5 S` | what follows starts eight seconds after this line |')),
     ('the-wait-in-the-prose-is-wrong', _replace("then eight seconds on the runner's counter", "then ten seconds on the runner's counter")),
     ('the-hcr-value-is-wrong', _replace('| `HCR_EL2` | C | `0x80000000` | fourth |', '| `HCR_EL2` | C | `0x88000000` | fourth |')),
@@ -400,7 +435,7 @@ DOC_MUTANTS = [
     ('an-iss-is-wrong', _replace('| `mrs x0, cntvct_el0` | traps (`EL1TVCT`) | `0x34F801` |', '| `mrs x0, cntvct_el0` | traps (`EL1TVCT`) | `0x34F800` |')),
     ('cntfrq-is-said-to-trap', _replace('| `mrs x2, cntfrq_el0` | does not trap:', '| `mrs x2, cntfrq_el0` | traps:')),
     ('the-stub-has-a-branch', _replace('| `hvc #0` | the stub is finished: returns to EL2 | - |\n', '| `b .` | the stub loops | - |\n')),
-    ('the-mrs-count-is-wrong', _replace('| 27 | context, read-backs', '| 26 | context, read-backs')),
+    ('the-mrs-count-is-wrong', _replace('| 28 | context, read-backs', '| 27 | context, read-backs')),
     ('an-msr-count-is-wrong', _replace('`VBAR_EL2` 4, `ELR_EL2` 4,', '`VBAR_EL2` 3, `ELR_EL2` 4,')),
     ('the-hvc-immediates-are-wrong', _replace('`#1` 16, `#0` 1, `#2` 1', '`#1` 15, `#0` 1, `#2` 1')),
     ('the-eret-count-is-wrong', _replace('| - | 4 | to the stub; after the probe', '| - | 3 | to the stub; after the probe')),
@@ -424,7 +459,7 @@ DOC_MUTANTS = [
     ('the-qemu-ecv-is-wrong', _replace('ID_AA64MMFR0_EL1=0X2100032310201126 ECV=0X2\nID_AA64PFR0_EL1=0X1301001121110222 EL1=0X2\nOLD CNTHCTL_EL2=0X3 SCTLR_EL1=0XC50838',
                                         'ID_AA64MMFR0_EL1=0X2100032310201126 ECV=0X0\nID_AA64PFR0_EL1=0X1301001121110222 EL1=0X2\nOLD CNTHCTL_EL2=0X3 SCTLR_EL1=0XC50838')),
     ('the-qemu-wait-window-is-wrong', _replace('between 7 and 40 seconds', 'between 7 and 80 seconds')),
-    ('the-qemu-variant-count-is-wrong', _replace('nine copies of the source, each edited once', 'eight copies of the source, each edited once')),
+    ('the-qemu-variant-count-is-wrong', _replace('ten copies of the source, each edited once', 'nine copies of the source, each edited once')),
     ('the-mutant-count-is-wrong', _replace(f'{len(driver.MUTANTS)} seeded-bug mutants', f'{len(driver.MUTANTS) + 1} seeded-bug mutants')),
     ('the-licence-line-goes', lambda doc: doc.split('\n', 1)[1]),
     ('hardware-is-called-run', _replace('**EXPERIMENTAL; hardware NOT RUN.**', '**EXPERIMENTAL; hardware RUN.**')),

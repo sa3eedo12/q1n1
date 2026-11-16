@@ -26,13 +26,14 @@ asks for it; it is not it.
 1. **Where it runs, and what it refuses.** Not at EL2 it prints `SKIPPED_NOT_AT_EL2` and returns. At EL2 it refuses a runner with no
    counter op (`REFUSED=NO_COUNTER`). It then reads its context (`HCR_EL2`, `DAIF`, `SPSel`, `CNTFRQ_EL0`, `ID_AA64MMFR0_EL1`,
    `ID_AA64PFR0_EL1`, `CNTHCTL_EL2` as OLD, `SCTLR_EL1`, `VBAR_EL1`, `VBAR_EL2`) and prints six lines, and refuses, before anything
-   is written, in this order: an image whose stub or vector tables are not 2 KiB aligned inside it (`REFUSED=ENTRY`); `HCR_EL2.E2H`
+   is written, in this order: an image that does not hold the stub and both vector tables, or whose tables are not 2 KiB aligned or whose
+   stub is not 4-byte aligned (`REFUSED=ENTRY`); `HCR_EL2.E2H`
    set (`REFUSED=E2H`: an `MSR SCTLR_EL1` would then write `SCTLR_EL2`); no AArch64 EL1 (`REFUSED=NO_EL1_AARCH64`); `DAIF` not all
    masked (`REFUSED=DAIF_NOT_MASKED`); `SPSel` not 1 (`REFUSED=SPSEL_NOT_EL2H`: the handler runs on the SP the payload had); OLD with
    bit 12, 13 or 14 set (`REFUSED=OLD_HAS_BITS_12_TO_14`); less than 16 KiB of its stack left (`REFUSED=STACK`).
 2. **Announce, then wait eight seconds.** `NEXT EL1 EXCURSION AFTER 8 S`, then eight seconds on the runner's counter, so that a hang or a
-   reset leaves a page that was already photographed. A counter that does not run (two million equal reads in a row) ends the payload
-   with `REFUSED=COUNTER_STUCK`: nothing was written.
+   reset leaves a page that was already photographed. A counter that does not run (two million equal reads in a row) or that runs
+   backwards (a read below the first, which would end the wait at once) ends the payload with `REFUSED=COUNTER_STUCK`: nothing was written.
 3. **Make the image visible to a core that fetches without its caches.** `DC CIVAC` over the whole image, `DSB`, `IC IVAU` over it,
    `DSB`, `ISB`, in 16-byte steps (the smallest line the architecture allows). EL1 runs with its MMU and caches off (below), so its
    instruction fetches see physical memory, not this core's data cache: the stub and the vector tables the payload just built must
@@ -41,18 +42,23 @@ asks for it; it is not it.
 4. **The probe.** `HVC #2` at EL2 under the payload's own EL2 vectors, before anything but `VBAR_EL2` has been changed. HVC is
    enabled by `SCR_EL3.HCE` and `HCR_EL2.HCD` (INFERRED), and an HVC that is UNDEFINED at EL1 would send the EL1 vectors, which
    report by HVC, into a loop nothing could end. If the probe does not come back as an HVC the payload prints `HVC_AT_EL2=FAILED`
-   and why, `REFUSED=HVC_AT_EL2`, puts `VBAR_EL2` back and returns 2: **no EL1 code runs.** Otherwise `HVC_AT_EL2=OK`.
+   and why, `REFUSED=HVC_AT_EL2`, puts `VBAR_EL2` back and returns 2: **no EL1 code runs.** Otherwise `HVC_AT_EL2=OK`; the probe's handler
+   also keeps `SPSR_EL2`, which that exception entry filled with the caller's PSTATE ([below](#the-callers-pstate)).
 5. **Announce again, then the window.** The `WRITES` line, `NEXT EL1 EXCURSION`, then, with **no line printed from the first write to
    the last read-back**: write `VBAR_EL1`, `SCTLR_EL1`, `CNTHCTL_EL2`, `HCR_EL2` (in that order), `ISB`, read the four back. If one of the
-   bits that decide whether EL1 can be entered and left is not as written (`HCR_EL2` RW, E2H, TGE, VM, HCD, FMO, IMO, AMO;
+   bits that decide whether EL1 can be entered and left is not as written (`HCR_EL2` RW, E2H, TGE, VM, DC, HCD, FMO, IMO, AMO;
    `SCTLR_EL1` M, A, C, I, WXN, E0E, EE; the whole of `VBAR_EL1`; `CNTHCTL_EL2.ECV`) nothing is run: `REFUSED=WRITE_NOT_HELD`.
 6. **The excursion** (`el1trap_run`, assembly). It saves `x19`-`x30`, `SP`, `SPSR_EL2`, `ELR_EL2` and `VBAR_EL2`, installs the payload's EL2
    vector table **before the first `ERET`**, and `ERET`s to the stub at EL1h with `D`, `A`, `I`, `F` masked. Every exception to EL2 enters one
    handler (below), which records each trapped read, skips it, and ends the excursion on the stub's `HVC #0` or, with a reason, on
-   anything else. Ending is an `ERET` to the code after the first one, at EL2h, which restores what it saved and returns.
+   anything else. Ending is an `ERET` to the code after the first one, at EL2h with `D`, `A`, `I`, `F` masked and with the caller's `SSBS`,
+   `PAN`, `UAO`, `DIT` and `TCO` ([below](#the-callers-pstate)), which restores what it saved and returns.
 7. **Put back, in the reverse order, and report.** `HCR_EL2`, `CNTHCTL_EL2`, `SCTLR_EL1`, `VBAR_EL1`, `ISB`; then all five registers
    (those four and `VBAR_EL2`) are read back and each one that differs gets **one more write**: the only retry. A register that still
    differs is `NOT_RESTORED`, loudly, and the payload returns **3**. The page reports the read-back, each access, the verdict and the end.
+   `SPSR_EL2` and `ELR_EL2` are put back by the assembly and are **not** read back, and `RESTORED=YES` does not speak for them: they hold
+   nothing at EL2 outside an exception (the next entry overwrites both), so a failed put-back of them would change nothing that runs
+   and could not be seen on the page. Harmless; said here so that it is not taken for a gap.
 
 Returns: 0 if the stub finished at its `HVC #0` and everything is back; 2 if the excursion did not run or ended any other way and
 everything is back; 3 if a register could not be put back. A return value never stops the chain, but the page says it and the stop rule does.
@@ -63,7 +69,7 @@ everything is back; 3 if a register could not be put back. A return value never 
 | Register | Written by | Value | When |
 | --- | --- | --- | --- |
 | `VBAR_EL2` | `el1trap_run` | the payload's EL2 vector table, then the value found | installed before the first `ERET` or `HVC`, put back before it returns (probe and excursion); one more write from C if the put-back did not hold |
-| `SPSR_EL2`, `ELR_EL2` | `el1trap_run` and its handler | `0x3C5` and the stub's address; the next instruction after each trapped read; `0x3C9` and the resume address | saved first, restored before it returns |
+| `SPSR_EL2`, `ELR_EL2` | `el1trap_run` and its handler | `0x3C5` and the stub's address; the next instruction after each trapped read; `0x3C9` with the caller's five bits ([below](#the-callers-pstate)) and the resume address | saved first, restored before it returns (not read back) |
 | `VBAR_EL1` | C | the payload's EL1 vector table | first of the four writes |
 | `SCTLR_EL1` | C | `0x30500800` | second |
 | `CNTHCTL_EL2` | C | V, the monitor's formula (below) | third |
@@ -81,6 +87,7 @@ The formula for V, V = `(OLD & ~3) | (1 << 14) | (1 << 13)`, is VERIFIED against
 | 34 | `E2H` | clear | the non-VHE layout; set is refused before anything is written |
 | 27 | `TGE` | clear | no routing of EL1 to EL2 |
 | 0 | `VM` | clear | no stage 2: the stub and the vectors are fetched by physical address |
+| 12 | `DC` | clear | `DC` set behaves as `VM` set, with whatever `VTTBR_EL2` the firmware left: it is checked like `VM` |
 | 29 | `HCD` | clear | HVC is enabled: the stub and the EL1 vectors end by HVC |
 | 5:3 | `AMO`, `IMO`, `FMO` | clear | no physical interrupt or SError is routed to EL2 while EL1 runs (and none is taken at EL1: `SPSR_EL2` masks `D`, `A`, `I`, `F`) |
 | the rest | every trap bit | clear | only what `CNTHCTL_EL2` traps reaches EL2 |
@@ -120,6 +127,25 @@ The bits of `CNTHCTL_EL2`, for the `HCR_EL2.E2H = 0` layout the unit runs in, as
 What it never touches, and a test checks the source and the binary for each: **`CNTPOFF_EL2`** (a read of it never returned on this
 unit and the board restarted, INFERRED from a line count), `CNTVOFF_EL2`, `CNTKCTL_EL1`, `CNTHCTL_EL2.ECV` (bit 12), `SP_EL1`, the
 timer control registers, any device. The stub reads `CNTVCT_EL0`, `CNTV_CTL_EL0`, `CNTFRQ_EL0` and `CNTPCT_EL0` and nothing else.
+
+### The caller's PSTATE
+
+The last `ERET` of an excursion builds the PSTATE the runner gets back from `SPSR_EL2`, so what is in `SPSR_EL2` then is what the caller
+sees: `SSBS`, `DIT`, `PAN`, `UAO`, `TCO` (and the rest) of a C caller are not saved by a callee, and this payload must not change them. The
+unit's `SCTLR_EL2` is `0x0000100030C5183D` (OBSERVED, [the results](SP11-PAYLOAD-RESULTS.md)): `DSSBS` (bit 44) is set, so every exception
+entered at EL2 sets `PSTATE.SSBS`, and the caller's own `SSBS` can differ from what the handler runs with. An earlier version of this payload
+ended with the constant `0x3C9` (EL2h, `D`, `A`, `I`, `F` masked), which cleared all five bits; the probe's `ERET` always kept them.
+
+Now the probe's handler, which runs on the exception entry of `HVC #2` (where `SPSR_EL2` holds the caller's PSTATE), reads `SPSR_EL2` into the
+record; the C code copies it into the excursion's record; and the end of the excursion returns with `0x3C9` plus those of its bits that are
+`SSBS` (bit 12) and `PAN`, `UAO`, `DIT`, `TCO` (bits 22 to 25): the mask `0x3C01000`, built from the immediates `0x1000` and `0x3C0 << 16`. A
+record with no capture (the probe did not run or failed) is zero, so the return is `0x3C9`, as before. Not passed on: the flags
+(not part of a C call), `ALLINT` and any bit this payload does not know; `D`, `A`, `I`, `F` and the exception level are always as the
+runner left them (masked, EL2h: the payload refuses to run otherwise). The assembly is audited from the disassembly (`asm_problems` in
+`tools/test-q1n1-sp11-payload-el1trap.py`, with eleven seeded edits of the assembly it must name), and under QEMU a copy of the payload that
+sets `SSBS`, `PAN`, `UAO` and `DIT` before the probe prints them after the excursion: `PSTATE_KEPT=0X1C01000`. `TCO` is not among them: with this
+QEMU configuration it reads back as 0 even when set (OBSERVED; no tag memory is the likely reason, INFERRED), so that bit is checked in the
+disassembly only. OBSERVED under QEMU; the unit is NOT RUN.
 
 ## The EL1 stub, the vector tables and the handler
 
@@ -187,7 +213,7 @@ immediates, `eret`, `dc civac`, `ic ivau`. The older policies are unchanged.
 <!-- el1trap-instructions -->
 | Kind | Operands allowed | Sites | Where | Why |
 | --- | --- | --- | --- | --- |
-| `MRS` | `CurrentEL`, `HCR_EL2`, `DAIF`, `SPSel`, `CNTFRQ_EL0`, `ID_AA64MMFR0_EL1`, `ID_AA64PFR0_EL1`, `CNTHCTL_EL2`, `SCTLR_EL1`, `VBAR_EL1`, `VBAR_EL2`, `SPSR_EL2`, `ELR_EL2`, `ESR_EL2`, `FAR_EL2`, `CNTPCT_EL0`, `ESR_EL1`, `ELR_EL1`, `FAR_EL1`, `CNTVCT_EL0`, `CNTV_CTL_EL0` | 27 | context, read-backs, the handler, the stub's four | what it reports |
+| `MRS` | `CurrentEL`, `HCR_EL2`, `DAIF`, `SPSel`, `CNTFRQ_EL0`, `ID_AA64MMFR0_EL1`, `ID_AA64PFR0_EL1`, `CNTHCTL_EL2`, `SCTLR_EL1`, `VBAR_EL1`, `VBAR_EL2`, `SPSR_EL2`, `ELR_EL2`, `ESR_EL2`, `FAR_EL2`, `CNTPCT_EL0`, `ESR_EL1`, `ELR_EL1`, `FAR_EL1`, `CNTVCT_EL0`, `CNTV_CTL_EL0` | 28 | context, read-backs, the handler, the probe's `SPSR_EL2`, the stub's four | what it reports |
 | `MSR` | `VBAR_EL2` 4, `ELR_EL2` 4, `SPSR_EL2` 3, `HCR_EL2` 1, `CNTHCTL_EL2` 1, `SCTLR_EL1` 1, `VBAR_EL1` 1 | 15 | one C helper each; the assembly | the only writes |
 | `HVC` | `#1` 16, `#0` 1, `#2` 1 | 18 | the EL1 vector entries; the stub; the probe | report, finish, probe |
 | `ERET` | - | 4 | to the stub; after the probe; after a trapped read; to the resume code | the excursion |
@@ -199,7 +225,8 @@ immediates, `eret`, `dc civac`, `ic ivau`. The older policies are unchanged.
 <!-- /el1trap-instructions -->
 
 Nothing else: no other `MSR` (the policy names every allowed one), no `DMB`, no `TLBI`, `AT`, `SYS`, `SMC`, `SVC`, `WFI`, `WFE`, `SEV`, no exclusive or atomic
-instruction, and **neither `CNTPOFF_EL2` nor `CNTVOFF_EL2` is named** by the source or the binary.
+instruction, and **neither `CNTPOFF_EL2` nor `CNTVOFF_EL2` is named** by the source or the binary. Every `MSR VBAR_EL2` of the assembly (three: the
+install, the put-back, the fatal path) is followed at once by an `ISB`, and a test checks that in the disassembly.
 
 ## What it prints
 
@@ -221,7 +248,7 @@ three 64-bit values. Every line begins `PAYLOAD EL1TRAP `. Values are printed as
 | `STUB_OFFSET=0X.. EL1_VECTORS_OFFSET=0X.. EL2_VECTORS_OFFSET=0X..` | where they are in the image |
 | `REFUSED=E2H`, `REFUSED=NO_EL1_AARCH64`, `REFUSED=DAIF_NOT_MASKED`, `REFUSED=SPSEL_NOT_EL2H`, `REFUSED=OLD_HAS_BITS_12_TO_14`, `REFUSED=STACK` | a precondition: nothing was written |
 | `NEXT EL1 EXCURSION AFTER 8 S` | what follows starts eight seconds after this line |
-| `REFUSED=COUNTER_STUCK` | the counter does not run: the wait cannot be made and nothing was written |
+| `REFUSED=COUNTER_STUCK` | the counter does not run or runs backwards: the wait cannot be made and nothing was written |
 | `HVC_AT_EL2=OK` | the probe came back as an HVC |
 | `HVC_AT_EL2=FAILED NONE\|EL2_EXCEPTION ENTRIES=0X.. VECTOR=0X..`, `HVC_AT_EL2 ESR_EL2=0X.. ELR_EL2=0X..`, `REFUSED=HVC_AT_EL2` | it did not (or `VBAR_EL2` did not come back): no EL1 code ran |
 | `WRITES HCR_EL2=0X.. CNTHCTL_EL2=0X.. SCTLR_EL1=0X..` | the values about to be written (the fourth is the EL1 table's address, which depends on the load address, shown in the next lines) |
@@ -404,7 +431,8 @@ Status of the staging: **proposed, NOT RUN**.
 OBSERVED, QEMU 11.1.3 (`virt,virtualization=on,gic-version=3`, TCG, EDK2 AArch64, one CPU), by `tools/test-q1n1-sp11-payload-qemu-el1trap.py`, the real binary
 at a real EL2 with its MMU on: the only place the assembly runs, on QEMU's model of a core. With `-cpu max` (ECV 2) the reads of `CNTVCT_EL0` and `CNTV_CTL_EL0` and the
 control trap with the ISS above, the read of `CNTFRQ_EL0` does not, and the verdict is `TRAPS_EFFECTIVE`; with `-cpu cortex-a76` (ECV 0) only the control traps,
-the bits read back as zero and the verdict is `TRAPS_INERT`. The page of `-cpu max`:
+the bits read back as zero and the verdict is `TRAPS_INERT`: the stub's reads then return values, and in that outcome the values are the only evidence that they ran, so the test pins them (the
+virtual count is not zero, `CNTV_CTL_EL0` reads `0X0`, `CNTFRQ_EL0` is the frequency the context line printed). The page of `-cpu max`:
 
 <!-- el1trap-qemu-panel -->
 ```
@@ -434,12 +462,13 @@ RESTORED=YES
 The three offsets are those of this build and move with it; the suite only asserts that the tables are 2 KiB aligned, 2 KiB apart, that the stub follows the EL1 table and that `VBAR_EL1`
 was set to the EL1 table. What the suite asserts, besides this page and the `-cpu cortex-a76` one: the wait is between 7 and 40 seconds of wall-clock time between the `NEXT` line and the
 probe's answer (the serial log is read every 0.2 s); in a chain `state`, `el1trap`, `state` every register the `state` payload prints (`HCR_EL2`, `SCTLR_EL2`, `TCR_EL2`, `TTBR0_EL2`, `MAIR_EL2`,
-`VBAR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `CNTFRQ_EL0`, `DAIF`, `SPSEL`) is identical before and after; and nine copies of the source, each edited once (the edit is asserted to apply once), in each way an
+`VBAR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `CNTFRQ_EL0`, `DAIF`, `SPSEL`) is identical before and after; and ten copies of the source, each edited once (the edit is asserted to apply once), nine in each way an
 excursion can go wrong: a probe HVC that is UNDEFINED (no EL1 code runs and nothing is written), a stub whose first instruction is UNDEFINED or an SVC (reported by an EL1 vector through `HVC #1`,
 `ESR_EL1` `0x2000000` and `0x56000000`), a stub ending in `HVC #5` (`UNEXPECTED_HVC_IMM`), a stub looping on trapping reads (`BUDGET`, 9 entries, 8 records, in program order), a deadline that has
 passed (`DEADLINE` at the first entry), two registers never put back (`RESTORED=NO`, return 3, and the next `state` page shows `HCR_EL2=0X80000000` and `CNTHCTL_EL2=0X6000`: the failure is seen
 by the next payload, not hidden), a stub that never returns (the last line is `NEXT EL1 EXCURSION`, nothing follows, and the panel stays the quiet one), and a handler that faults (it stops after 24 entries,
-puts the runner's `VBAR_EL2` back and executes `UDF`: the runner's own fault page, the red bar of the panel, and no `PAYLOAD DONE`). No file of the stick changes.
+puts the runner's `VBAR_EL2` back and executes `UDF`: the runner's own fault page, the red bar of the panel, and no `PAYLOAD DONE`); the tenth sets `SSBS`, `PAN`, `UAO` and `DIT` before the probe and prints
+them after the excursion (`PSTATE_KEPT=0X1C01000`, [the caller's PSTATE](#the-callers-pstate)). No file of the stick changes.
 
 What QEMU cannot show: the unit's EL3 (UNKNOWN: whether `SCR_EL3.ECVEn` makes the bits do anything, whether `SCR_EL3.HCE` enables HVC, what traps EL3 adds), the unit's counter, the cache
 behaviour of the stub's fetch (TCG has no such cache), and whether any of this hangs or restarts the board. QEMU's `-cpu max` implements FEAT_ECV and its `EL1TVT` and `EL1TVCT` fields, so that
@@ -451,9 +480,9 @@ Hardware: NOT RUN. Every command writes only under `build/`.
 
 | Command | What it runs |
 | --- | --- |
-| `python3 tools/test-q1n1-sp11-payload-el1trap.py` | the host program `tools/test-q1n1-sp11-payload-el1trap.c` (nine suites over a modelled machine: five registers whose writes can be ignored, come up wrong or stop working, a counter, an EL1 whose reads trap or do not, scripted ends; a predictor and a checker of the order and the page; 6000 random worlds) under ASan and UBSan; 127 seeded-bug mutants and an unmutated control; the source audits; the allow-list on the binary with 40 seeded bad binaries and a flat binary patched behind the disassembly; the EL1 stub and both vector tables, entry by entry; the stick, the manifest tool and the runner's own validator |
+| `python3 tools/test-q1n1-sp11-payload-el1trap.py` | the host program `tools/test-q1n1-sp11-payload-el1trap.c` and its tail `-el1trap-tail.h` (nine suites over a modelled machine: five registers whose writes can be ignored, come up wrong or stop working, a counter that can run backwards, an EL1 whose reads trap or do not, the PSTATE of the caller, tables that are not aligned, scripted ends; a predictor and a checker of the order and the page; 6000 random worlds) under ASan and UBSan; 137 seeded-bug mutants (`tools/sp11_payload_el1trap_mutants.py`) and an unmutated control; the source audits; the allow-list on the binary with 40 seeded bad binaries and a flat binary patched behind the disassembly; the audit of the assembly in the disassembly (the saves and put-backs, an `ISB` after every `MSR VBAR_EL2`, the class, the reports, the last `ERET`) with 11 seeded edits of the assembly; the EL1 stub and both vector tables, entry by entry; the stick, the manifest tool and the runner's own validator |
 | `python3 tools/test-q1n1-sp11-payload-qemu-el1trap.py` | the QEMU boots above |
-| `python3 tools/test-q1n1-sp11-payload-el1trap-doc.py` | this document against the source, the host model and the binary, with 48 seeded mistakes in the document |
+| `python3 tools/test-q1n1-sp11-payload-el1trap-doc.py` | this document against the source, the host model and the binary, with 57 seeded mistakes in the document |
 | `python3 tools/test-q1n1-sp11-payload-build.py` | `make payloads` builds `el1trap.bin`, the ELF check, the allow-list of every payload, two builds byte-identical, the same bytes at another link address |
 | `python3 tools/test-q1n1-sp11-payload-el1trap.py facts` | the size, digest and instruction inventory of the built binary |
 
@@ -482,7 +511,7 @@ A normal run is 20 lines. The stick is `el1trap` alone, so the first row is the 
   has written; the `CNTPOFF_EL2` stall is INFERRED to come from an EL3 gate, and whether any EL3 trap covers these writes is UNKNOWN.
 * **The cache work is the payload's own claim** (`DC CIVAC` to the point of coherency and `IC IVAU` over the image, behind `DSB` and `ISB`), because EL1 fetches with its MMU off. TCG cannot show it.
 * **While `VBAR_EL2` is the payload's, an exception of the payload's own code enters its handler**, which counts, ends the excursion and, after 24, puts the runner's table back and faults.
-* **The restore is the payload's own claim** (all five registers are read back), and it covers the registers, not any effect of the excursion, which is none beyond the counter reads (INFERRED).
+* **The restore is the payload's own claim** (all five registers are read back), and it covers the registers, not any effect of the excursion, which is none beyond the counter reads (INFERRED). `SPSR_EL2` and `ELR_EL2` are put back and not read back (they hold nothing at EL2), and the caller's `SSBS`, `PAN`, `UAO`, `DIT` and `TCO` come back from the probe's capture ([above](#the-callers-pstate)): OBSERVED under QEMU for the first four, the unit NOT RUN.
 * **E2H.** The payload refuses `E2H` set; the unit's value is OBSERVED clear.
 * The stub runs under this payload's `HCR_EL2` and `SCTLR_EL1`, not the monitor's guest's: a finding here is about the mechanism, and the monitor's own run is another experiment.
 

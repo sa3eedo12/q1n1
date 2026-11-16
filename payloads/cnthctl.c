@@ -24,8 +24,8 @@
  * thing), and an OLD that already has bit 12, 13 or 14 set (then the write could not show whether it makes a bit stick, and ECV
  * would not be left as found by a payload that never sets it). It prints CurrentEL, HCR_EL2, ID_AA64MMFR0_EL1.ECV, CNTFRQ_EL0 and OLD, then
  * the line NEXT CNTHCTL_EL2 WRITE AFTER 8 S and waits eight seconds on the runner's counter, so that a hang or a reset at the write
- * leaves a page that was already photographed. A counter that does not run stops the payload before the write: the wait cannot
- * be made. The write sequence follows with nothing printed inside it.
+ * leaves a page that was already photographed. A counter that does not run, or runs backwards, stops the payload before the write:
+ * the wait cannot be made (REFUSED=COUNTER_STUCK). The write sequence follows with nothing printed inside it.
  *
  * What the answer means (INFERRED; the Arm ARM text for the ECV-gated fields was not re-read, and no section is quoted): where
  * SCR_EL3.ECVEn is clear the fields EL1TVT and EL1TVCT are expected to be RES0 for what they DO, while a direct read of the
@@ -121,13 +121,15 @@ OUT_OF_LINE void row(struct pl_line *line)
 
 /* ---- The wait -------------------------------------------------------------------------------------------------------- */
 
-/* Waits `seconds` on the runner's counter at `hz` ticks a second; 0 if the counter does not run. */
+/* Waits `seconds` on the runner's counter at `hz` ticks a second; 0 if the counter does not run or runs backwards (a read below the
+ * first would make now - start huge and end the wait at once: the photograph window is not given up for a counter that lies). */
 OUT_OF_LINE int wait_seconds(const struct q1n1_payload_args *a, uint64_t hz, unsigned seconds)
 {
     uint64_t start = a->ops.counter(), last = start;
     uint32_t same = 0;
     for (;;) {
         uint64_t now = a->ops.counter();
+        if (now < start) return 0;
         if (now - start >= hz * seconds) return 1;
         if (now == last) {
             if (++same >= COUNTER_STUCK_READS) return 0;
