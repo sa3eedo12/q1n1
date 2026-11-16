@@ -6,7 +6,10 @@ the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-b
 [line catalogue](SP11-PAYLOAD.md#line-catalogue) are defined there and not repeated. Its closest relatives are
 [`timer`](SP11-PAYLOAD-TIMER.md), which only reads the timer registers, and [`cpuon`](SP11-PAYLOAD-CPUON.md), the first payload
 that wrote the machine. Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
-**EXPERIMENTAL; hardware NOT RUN.** Its successor, [`el1trap`](SP11-PAYLOAD-EL1TRAP.md), is T-HW2 and only runs after this one.
+**EXPERIMENTAL; ran once on the unit (2026-11-16, boot 11, in one boot with `el1trap`; one unit, one boot).** Which page is which:
+[What it prints](#what-it-prints) and [What QEMU shows](#what-qemu-shows) are **models** (the host model and QEMU);
+[What the unit showed](#what-the-unit-showed-boot-11) is **the unit's**, read by the coordinator from frames of a video. Its successor,
+[`el1trap`](SP11-PAYLOAD-EL1TRAP.md), is T-HW2; the documents proposed it only after this one's page was read, and the operator ran both in that one boot.
 
 `cnthctl` answers one question of the Surface Pro 11 monitor port (Snapintosh `docs/SP11-MONITOR-PORT.md`, section 6, experiment
 T-HW1): **can `CNTHCTL_EL2` be written at EL2 with exactly the value the monitor writes, does the register read back bits 14
@@ -16,11 +19,12 @@ are meant to be trapped to EL2 by those two bits (FEAT_ECV level 1). The monitor
 it back, and its gate only checks that `ID_AA64MMFR0_EL1.ECV` is not zero; on the unit that field is 2 (OBSERVED), which says
 nothing about whether the two bits do anything. A "do not stick" answer here eliminates option O1 of the audit (the A16
 recipe); a "stick" answer does **not** decide it, because a register can hold bits that trap nothing: that is
-[T-HW2](SP11-PAYLOAD-EL1TRAP.md). Nothing here says what the unit does: **no value of this payload has been OBSERVED on the unit.**
+[T-HW2](SP11-PAYLOAD-EL1TRAP.md). Nothing here but the unit's own page says what the unit does: **no value of this payload was OBSERVED on the
+unit before boot 11**, and the model pages are not the unit's.
 
 It is the second payload that changes the machine, after `cpuon`, and it writes an **EL2 system register**: it needs the operator's
-named, SHA-256-pinned authorisation before any run on the unit ([Authorisation](#authorisation-and-the-stop-rule)). This document
-asks for it; it is not it.
+named, SHA-256-pinned authorisation before any run on the unit ([Authorisation](#authorisation-and-the-stop-rule)); boot 11's run had it
+(about 11:20, for that one boot). This document asks for it; it is not it.
 
 ## What it does, in order
 
@@ -78,7 +82,8 @@ core: the payload and the runner are EL2 code, and the eleven secondaries read O
 one). (3) `CNTHCTL_EL2` controls accesses made at EL0 and EL1 and the event stream (whose bits 11:2 V keeps as found); an EL2
 access to a counter or a timer is not trapped by it when `E2H` is 0 (INFERRED from the architecture, which was not re-read). (4) The
 register belongs to this core: no other core sees it. (5) The window is six short calls (nine with the retry); the payload prints
-nothing inside it. None of these is measured: hardware NOT RUN.
+nothing inside it. None of these is measured as such; boot 11's run showed no disturbance (the page went on and the register was put back:
+OBSERVED once), which fits the five points and proves none.
 
 What it never touches, and a test checks the source and the binary for each: **`CNTPOFF_EL2`** (a read of it never returned on this
 unit and the board restarted, boot 4, INFERRED from a line count), `CNTVOFF_EL2`, `CNTKCTL_EL1`, `CNTHCTL_EL2.ECV` (bit 12), the
@@ -182,7 +187,7 @@ write shows the difference, and a host suite asserts that. That is why a "stick"
 
 ## What each outcome means for the monitor's timer options
 
-INFERRED throughout: nothing below has been observed on the unit. The options are those of section 6.3 of the monitor port audit: **O1**
+INFERRED throughout, except the row marked **OBSERVED** (boot 11); every other row was not reached. The options are those of section 6.3 of the monitor port audit: **O1**
 the A16 recipe (24 MHz for the guest by trapping its counter and timer, plus a `CNTHCTL_EL2` read-back refusal and a `CNTVOFF_EL2` = 0
 check; needs bits 13 and 14 effective at EL2), **O2** 19.2 MHz everywhere with no scaling (profile changes only), **O3** patching the
 guest away from architectural counter reads, **O4** `CNTPOFF_EL2` / ECV level 2 ("never": a read of it stalls the board). The "next
@@ -191,7 +196,7 @@ step" is a proposal for a separate, authorised change, never something this payl
 <!-- cnthctl-decisions -->
 | Outcome on the page | What it means | O1 to O4, and the next step |
 | --- | --- | --- |
-| `BITS13_14_STUCK=YES R_EQ_V=YES`, `RESTORED=YES` | the register holds the monitor's exact value and gives the old one back; whether the bits trap anything is not shown | O1 is **not eliminated and not decided**: the bits may be stuck but inert. Next: `el1trap` (T-HW2), on its own stick. O2 and O3 unchanged; O4 unchanged (never): this payload never set ECV nor touched `CNTPOFF_EL2` |
+| `BITS13_14_STUCK=YES R_EQ_V=YES`, `RESTORED=YES` | **OBSERVED (boot 11): `OLD=0X3 V=0X6000`, `R=0X6000 R2=0X3`.** The register holds the monitor's exact value and gives the old one back; whether the bits trap anything is not shown by this page | O1 is **not eliminated and not decided** by this payload: the bits may be stuck but inert. Next: `el1trap` (T-HW2), which the unit ran in the same boot ([its answer](SP11-PAYLOAD-EL1TRAP.md#what-the-unit-showed-boot-11)). O2 and O3 unchanged; O4 unchanged (never): this payload never set ECV nor touched `CNTPOFF_EL2` |
 | `BITS13_14_STUCK=NO`, `RESTORED=YES` | bits 13 and 14 read back as zero: they are not implemented or are gated (INFERRED, for example by `SCR_EL3.ECVEn` clear, which no payload can read) | **O1 is eliminated**: the monitor's recipe cannot trap the guest's counter and timer on this unit. `el1trap` has nothing to test. Next: O2 (an A16 run at 19.2 MHz, the operator's decision) or, if that fails, O3 |
 | `BITS13_14_STUCK=PARTIAL` | only one of `EL1TVT` and `EL1TVCT` is held | O1 as designed (both bits) is eliminated; a design that traps only the counter or only the timer is another design, UNKNOWN. Next: O2 or O3 first |
 | `BITS13_14_STUCK=YES R_EQ_V=NO` | the bits are held but R is not exactly V: bits 1:0 or others differ | the monitor never reads the register back, and its planned refusal must compare bits 14 and 13 (not the whole register) to be of use; `el1trap` still decides O1 |
@@ -205,6 +210,40 @@ step" is a proposal for a separate, authorised change, never something this payl
 | `FREQ=DEFAULT` on the OLD line | `CNTFRQ_EL0` is outside 1 MHz to 1 GHz | the wait used 19.2 MHz; the value is the finding (the unit's is `0x124F800`, OBSERVED) |
 <!-- /cnthctl-decisions -->
 
+## What the unit showed (boot 11)
+
+The unit's page (2026-11-16, 11:44): `cnthctl` and `el1trap` ran in one boot from one stick, `cnthctl` first. These are the eight lines between its
+`CALL 0` and `DONE` lines, read by the coordinator from frames of a video (two frames agree on every line; not CRC-checked). **They are the unit's;
+the pages above are the model's.** The whole page of 37 lines, `el1trap`'s included, is in
+[the results](SP11-PAYLOAD-RESULTS.md#payloads-cnthctl-and-el1trap-boot-11).
+
+<!-- cnthctl-unit-page -->
+```
+PAYLOAD CNTHCTL CURRENTEL=0X8 HCR_EL2=0X88000010 E2H=0X0
+PAYLOAD CNTHCTL ID_AA64MMFR0_EL1=0X2100122100001024 ECV=0X2
+PAYLOAD CNTHCTL CNTHCTL_EL2 OLD=0X3 CNTFRQ_EL0=0X124F800
+PAYLOAD CNTHCTL NEXT CNTHCTL_EL2 WRITE AFTER 8 S
+PAYLOAD CNTHCTL OLD=0X3 V=0X6000
+PAYLOAD CNTHCTL R=0X6000 R2=0X3
+PAYLOAD CNTHCTL BITS13_14_STUCK=YES R_EQ_V=YES
+PAYLOAD CNTHCTL RESTORED=YES
+```
+<!-- /cnthctl-unit-page -->
+
+Around it the runner printed `LOADED INDEX=0 BASE=0XCEA8D000 BYTES=3094 SHA=9F06B31DA4BDC395 TYPE=1` (the size and digest prefix of the binary this tree builds),
+`VERIFY=OK`, `CALL 0 9F06B31DA4BDC395` and `DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0`. What it shows, OBSERVED once:
+
+* **The page has the shape of the model's normal page** (`bits stick`, above): the lines are the same but for the unit's own value of `ID_AA64MMFR0_EL1`
+  (`0X2100122100001024`, ECV 2, against the model's `0X2100032310201126`). `CURRENTEL=0X8` (EL2), `HCR_EL2` `0x88000010` with E2H clear, `CNTHCTL_EL2` as found
+  `0x3` (bits 12 to 14 clear), `CNTFRQ_EL0` `0x124F800` (19.2 MHz): no refusal applied.
+* **Bits 14 and 13 stuck, exactly.** V is `0x6000`, R reads `0x6000` (`BITS13_14_STUCK=YES R_EQ_V=YES`): the register held the monitor's value as written, bits 1:0
+  cleared, bit 12 not set. The old value came back (`R2=0X3`, `RESTORED=YES`), the payload returned 0 and the write, the read-backs and the restore caused no fault,
+  no hang and no restart (the video runs 61 s).
+* **The row it matches** is the first of [the decision table](#what-each-outcome-means-for-the-monitors-timer-options), now marked OBSERVED. This payload does not
+  say whether the bits trap anything: O1 stays not decided here, and [`el1trap`](SP11-PAYLOAD-EL1TRAP.md#what-the-unit-showed-boot-11) read what they do in the same boot.
+* **Not shown, UNKNOWN:** any other value of `OLD`, another boot or unit (one unit, one boot), and the refusals (`E2H`, bits 12 to 14 set, a stuck counter), which
+  did not apply. Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read).
+
 ## Authorisation and the stop rule
 
 **Authorisation.** This payload writes `CNTHCTL_EL2`, an EL2 system register. The runner's rule for anything beyond a read applies
@@ -217,23 +256,28 @@ it, and the page shows its first eight bytes in `PAYLOAD LOADED` and `PAYLOAD CA
 **Stop rule.** After the run the operator reads the page before anything else is run. The sequence stops, and the unit is power-cycled,
 on any of: `RESTORED=NO` or `NOT_RESTORED`; a page that ends at the `NEXT` line; a fault page; a board restart; `REFUSED=OLD_HAS_BITS_12_TO_14`
 with bit 12 set; any value the decision table does not list. `el1trap` is staged only after `BITS13_14_STUCK=YES` with `RESTORED=YES`
-was read and the operator has authorised it by name and digest in turn. There is no retry of the payload in the same boot.
+was read and the operator has authorised it by name and digest in turn (boot 11 ran both in one boot by the operator's decision, [below](#staging-plan):
+the rule stands for later runs, and no stop condition occurred). There is no retry of the payload in the same boot.
 
 ## Staging plan
 
-One manifest per stick, and `cnthctl` **alone** on its stick: it is the one payload of its boot, so that its page is the only page, its
-risk is the only risk, and a restart costs nothing else. (The runner would take it after `psci`, and a test shows the validator accepts that
-chain; the proposal is not to.) With the runner and the payloads built as in [SP11-PAYLOAD.md](SP11-PAYLOAD.md#build):
+**What was done.** Boot 11 (2026-11-16) ran `cnthctl` and `el1trap` in **one boot**: one stick, one manifest (624 bytes) listing `CNTHCTL.BIN` then `EL1TRAP.BIN`, under
+slbounce's `SLBOUNCE-DEVHE-MARK.EFI` and the runner (`Q1N1-PAYLOAD.EFI --el2`), started by one autorun step and filmed from the Shell's countdown on. That is not
+what this document proposed: `cnthctl` **alone** on its stick, so that its page is the only page, its risk the only risk and a restart costs nothing else, and `el1trap` on a
+second stick only after a normal answer ([its staging plan](SP11-PAYLOAD-EL1TRAP.md#staging-plan)). The operator decided otherwise for that boot, naming both payloads and their SHA-256 (about 11:20), and `el1trap` ran behind
+its own refusals without this page read first: **that changed the documented rule by the operator's decision for that boot**. The stop rules above stand for every later run,
+and none was triggered. The one-payload form below remains the way to run `cnthctl` by itself, and a manifest of both is made the same way with both files. With the runner
+and the payloads built as in [SP11-PAYLOAD.md](SP11-PAYLOAD.md#build):
 
 ```sh
 python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/cnthctl.bin
 ```
 
-writes `build/stick/SP11/PAYLOAD.MAN` and `build/stick/SP11/CNTHCTL.BIN`. The stick holds exactly `SP11\Q1N1-PAYLOAD.EFI` (not written by the
+writes `build/stick/SP11/PAYLOAD.MAN` and `build/stick/SP11/CNTHCTL.BIN`. The stick of the proposal holds exactly `SP11\Q1N1-PAYLOAD.EFI` (not written by the
 tool), `SP11\PAYLOAD.MAN` and `SP11\CNTHCTL.BIN`, and the run is, from the UEFI Shell with slbounce loaded as for the other payloads,
 `SP11\Q1N1-PAYLOAD.EFI --el2`. The conditions of every run: AC power or at least 50% battery, the page filmed or photographed from the
-`NEXT` line on, one hardware client at a time. The second stick, only after a normal answer, lists `EL1TRAP.BIN` alone
-([SP11-PAYLOAD-EL1TRAP.md](SP11-PAYLOAD-EL1TRAP.md#staging-plan)). Status of the staging: **proposed, NOT RUN**.
+`NEXT` line on, one hardware client at a time. (The runner would take `cnthctl` after `psci`, and a test shows the validator accepts that chain.) Status of the staging:
+**boot 11 ran both payloads in one boot by the operator's decision; the one-payload proposal was not run.**
 
 ## What QEMU shows
 
@@ -262,19 +306,20 @@ log is read every 0.2 s); in a chain `state`, `cnthctl`, `state` every register 
 of the source that never writes OLD back (one edit, asserted to apply once) prints `RESTORED=NO`, `NOT_RESTORED OLD=0X3 NOW=0X6000` and returns 2, and
 the second `state` page shows `CNTHCTL_EL2=0X6000`: the failure is seen by the next payload, not hidden; no file of the stick changes.
 
-What QEMU cannot show: the unit's EL3 (UNKNOWN: whether `SCR_EL3.ECVEn` lets the bits be held, or lets a write of them do anything), the unit's
-counter, any trap (QEMU's `-cpu max` holds the bits and, per the next payload's suite, traps with them: that is QEMU, not the unit), and
-whether a write of `CNTHCTL_EL2` hangs the board. The unit's rows of the decision table are UNKNOWN.
+What QEMU cannot show: the unit's EL3, the unit's counter, any trap on the unit (QEMU's `-cpu max` holds the bits and, per the next payload's suite, traps with
+them: that is QEMU, not the unit), and whether a write of `CNTHCTL_EL2` hangs the board. Boot 11 answered the last two ([above](#what-the-unit-showed-boot-11):
+the next payload's traps worked and the write hung nothing: one unit, one boot); whether `SCR_EL3.ECVEn` lets the bits be held, or lets a write of them do anything,
+stays UNKNOWN (no payload can read `SCR_EL3`). The unit's other rows of the decision table are UNKNOWN.
 
 ## Tests
 
-Hardware: NOT RUN. Every command writes only under `build/`.
+Hardware: NOT RUN by these commands (they check a model, QEMU and this document; the unit's one run is [above](#what-the-unit-showed-boot-11)). Every command writes only under `build/`.
 
 | Command | What it runs |
 | --- | --- |
 | `python3 tools/test-q1n1-sp11-payload-cnthctl.py` | the host program `tools/test-q1n1-sp11-payload-cnthctl.c` (six suites over a modelled machine whose register can hold the bits, lose them as RES0, hold one, or refuse the restore: the exact events, the wait to the read, the window, an independent oracle of the page, 6000 random worlds) under ASan and UBSan; 64 seeded-bug mutants and an unmutated control; the source audits; the allow-list on the binary with 37 seeded bad binaries and a flat binary patched behind the disassembly; the stick, the manifest tool and the runner's own validator |
 | `python3 tools/test-q1n1-sp11-payload-qemu-cnthctl.py` | the QEMU boots above |
-| `python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py` | this document against the source, the host model and the binary, with 43 seeded mistakes in the document |
+| `python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py` | this document against the source, the host model and the binary, with 67 seeded mistakes in the document |
 | `python3 tools/test-q1n1-sp11-payload-build.py` | `make payloads` builds `cnthctl.bin`, the ELF check, the allow-list of every payload, two builds byte-identical, the same bytes at another link address |
 | `python3 tools/test-q1n1-sp11-payload-cnthctl.py facts` | the size, digest and instruction inventory of the built binary |
 
@@ -295,13 +340,14 @@ A normal run is 8 lines, so even the first row has room to spare.
 
 ## Residual risks
 
-* **The write itself is UNKNOWN on this unit.** A write of `CNTHCTL_EL2` at EL2 is an ordinary EL2 access, and `state` and `timer` already read it,
-  but no payload has written it. The `CNTPOFF_EL2` stall is INFERRED to come from an EL3 gate (`SCR_EL3.ECVEn`); whether any EL3 trap covers
-  a write of `CNTHCTL_EL2` or of its ECV-gated fields is UNKNOWN. A hang or a reset there is the `NEXT`-line row of the table.
+* **The write was OBSERVED once on this unit (boot 11), which does not make it safe in general.** A write of `CNTHCTL_EL2` at EL2 is an ordinary EL2 access, and
+  `state` and `timer` already read it; boot 11 wrote it (V, then OLD) and the page went on. The `CNTPOFF_EL2` stall is INFERRED to come from an EL3 gate
+  (`SCR_EL3.ECVEn`); boot 11 neither confirms nor refutes that, and whether bits 13 and 14 depend on that gate is UNKNOWN
+  ([the results](SP11-PAYLOAD-RESULTS.md#payloads-cnthctl-and-el1trap-boot-11)). A hang or a reset on another boot or unit is still the `NEXT`-line row of the table.
 * **A board restart is not a surprise to plan for, and not one to blame on this payload.** Restarts of the board have been seen after the
   `cpuon` payload, INFERRED to be associated with its core power cycling (cause UNKNOWN), and a runner flow with a read-only `psci` payload
   stayed up for 224 s and 268 s in two boots ([the restart control](SP11-PAYLOAD-RESULTS.md#the-restart-control), 2026-11-16).
-  `cnthctl` powers no core off. A restart in its run is a finding about its write, to be reported with the last line of the page.
+  `cnthctl` powers no core off. A restart in its run is a finding about its write, to be reported with the last line of the page; boot 11's video (61 s) shows none.
 * **The restore is the payload's own claim** (R2 and R3 are read back, which is what `RESTORED=YES` says), and it covers the register,
   not the effect of the window, which is none (the temporary-value argument above, INFERRED).
 * **The read-back says little about function.** A held bit is a stored bit; the next payload is the one that looks at what it does.
@@ -311,6 +357,7 @@ A normal run is 8 lines, so even the first row has room to spare.
 
 ## Status
 
-EXPERIMENTAL. Hardware NOT RUN. OBSERVED on the unit by other payloads and by q1n1's page: `HCR_EL2` `0x88000010`, `CNTHCTL_EL2` `0x3` at handoff,
+EXPERIMENTAL. Ran once on the unit (boot 11, 2026-11-16, one unit, one boot): OBSERVED, [above](#what-the-unit-showed-boot-11): bits 14 and 13 stuck, the old value
+came back, no refusal, no fault page, no restart. Also OBSERVED on the unit by other payloads and by q1n1's page: `HCR_EL2` `0x88000010`, `CNTHCTL_EL2` `0x3` at handoff,
 `CNTFRQ_EL0` `0x124F800`, `ID_AA64MMFR0_EL1.ECV` 2, `DAIF` `0x3C0` (Snapintosh `docs/SP11-MONITOR-PORT.md`, section 6.2, which cites its sources).
-OBSERVED under QEMU only: the pages above and the behaviours listed under them. UNKNOWN: everything this payload would print on the unit.
+OBSERVED under QEMU only: the pages above and the behaviours listed under them. UNKNOWN: what this payload prints on another boot or unit, and the refusal paths on the unit.

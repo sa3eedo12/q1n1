@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""The results document of the Surface Pro 11 stick payload runner (docs/SP11-PAYLOAD-RESULTS.md): the page the unit showed in boot 5
-and the page of boots 8 and 9, and what the document says about them, against the usbsmmu source and the other payload documents.
+"""The results document of the Surface Pro 11 stick payload runner (docs/SP11-PAYLOAD-RESULTS.md): the page the unit showed in boot 5,
+the page of boots 8 and 9 and the page of boot 11, and what the document says about them, against the usbsmmu source and the other payload
+documents.
 
     python3 tools/test-q1n1-sp11-payload-results-doc.py
 
@@ -15,7 +16,10 @@ and the page of boots 8 and 9, and what the document says about them, against th
     runner lines are the ones of docs/SP11-PAYLOAD-CPUON.md); the page of boots 8 and 9 (36 lines of `hashbig` and `el2mem`) is well
     formed, carries the numbers the unit printed and agrees with the arithmetic of its own values and with the rest of the section
     (the declared ranges, the placement of the file, the timing), with the writability of the bank, the cache clean and the EL3
-    emulation of the three reads labelled as unknown or inferred and no VERIFIED anywhere in the section; the document has its
+    emulation of the three reads labelled as unknown or inferred and no VERIFIED anywhere in the section; the page of boot 11 (37 lines of
+    `cnthctl` and `el1trap`) is well formed, carries the numbers the unit printed, and its values obey the monitor's formula, the ISS decode and
+    the two forced bits of `SCTLR_EL1`, with the guest regime, the `SCR_EL3.ECVEn` dependence and the first-code claims labelled as the
+    corrected facts say and no VERIFIED in the section; the document has its
     licence line, stays within the size limit and its links resolve; docs/SP11-PAYLOAD.md lists this suite and says what the boots
     showed.
   * ResultsDocMutants: seeded mistakes in the results document and in the register table of the usbsmmu document, each of which an
@@ -40,6 +44,16 @@ MAIN = DOCS / 'SP11-PAYLOAD.md'
 CPUON = DOCS / 'SP11-PAYLOAD-CPUON.md'
 SOURCE = ROOT / 'payloads' / 'usbsmmu.c'
 PAGE_FONT = re.compile(r'^[A-Z0-9 :\-./=?()_]*$')
+# What the unit printed in boot 11, a piece of the page each: every one must be on the page of the results document.
+UNIT11_VALUES = ('LOADED INDEX=0 BASE=0XCEA8D000 BYTES=3094 SHA=9F06B31DA4BDC395', 'LOADED INDEX=1 BASE=0XCEA88000 BYTES=15156 SHA=5074712516C1CF08',
+                 'CNTHCTL_EL2 OLD=0X3 CNTFRQ_EL0=0X124F800', 'OLD=0X3 V=0X6000', 'R=0X6000 R2=0X3', 'BITS13_14_STUCK=YES R_EQ_V=YES', 'PAYLOAD CNTHCTL RESTORED=YES',
+                 'ID_AA64MMFR0_EL1=0X2100122100001024 ECV=0X2', 'ID_AA64PFR0_EL1=0X1201201023111111 EL1=0X1', 'OLD CNTHCTL_EL2=0X3 SCTLR_EL1=0X100030D0198D',
+                 'OLD VBAR_EL1=0XA7004000 VBAR_EL2=0XCE879000', 'STUB_OFFSET=0X1790 EL1_VECTORS_OFFSET=0X1000 EL2_VECTORS_OFFSET=0X800',
+                 'WRITES HCR_EL2=0X80000000 CNTHCTL_EL2=0X6000 SCTLR_EL1=0X30500800', 'READBACK SCTLR_EL1=0X30500980 VBAR_EL1_OFFSET=0X1000',
+                 'CNTVCT_EL0 TRAPPED EC=0X18 ISS=0X34F801 ISS_OK=YES', 'CNTV_CTL_EL0 TRAPPED EC=0X18 ISS=0X32F827 ISS_OK=YES',
+                 'CNTFRQ_EL0 NOT_TRAPPED VALUE=0X124F800', 'CNTPCT_EL0 CONTROL TRAPPED EC=0X18 ISS=0X32F861 ISS_OK=YES',
+                 'VERDICT=TRAPS_EFFECTIVE BITS13_14_IN_READBACK=YES', 'EXCURSION OK ENTRIES=0X4 TRAPS=0X3', 'PAYLOAD EL1TRAP RESTORED=YES',
+                 'RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0', 'RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=20 DROPPED=0')
 # What the unit printed in boots 8 and 9, a piece of the page each: every one must be on the page of the results document.
 UNIT_VALUES = ('LOADED INDEX=2 BASE=0XC3E65000 BYTES=150994944', 'FILE INDEX=2 BASE=0XC3E65000 BYTES=150994944 MIB=144',
                'ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1', 'HASH BYTES=150994944 TICKS=14204400 MS=739 MIBS=194',
@@ -253,7 +267,7 @@ class ResultsDocAgreement(unittest.TestCase):
         self.assertEqual(int(re.search(r'CONV_MIB=(\d+)', text).group(1)), 32105 - (size >> 20), 'boot 6 held 32,105 MiB of Conventional memory')
 
     def test_the_section_of_boots_8_and_9_agrees_with_its_page_and_labels_what_it_does_not_show(self):
-        section = self.flat[self.flat.index('## Payloads `hashbig` and `el2mem` (boots 8 and 9)'):self.flat.index('## Payload `timer` (boot 4)')]
+        section = self.flat[self.flat.index('## Payloads `hashbig` and `el2mem` (boots 8 and 9)'):self.flat.index('## Payloads `cnthctl` and `el1trap` (boot 11)')]
         text = '\n'.join(self.unit_page())
         base, size = int(re.search(r'LOADED INDEX=2 BASE=0X([0-9A-F]+)', text).group(1), 16), 144 << 20
         self.assertNotIn('VERIFIED', section, 'a hardware result is OBSERVED, and a decode of it INFERRED')
@@ -287,7 +301,7 @@ class ResultsDocAgreement(unittest.TestCase):
                        'but whether it is writable at EL2 stage 1, whether a cache clean reaches DRAM there and whether a page there survives the bounce are UNKNOWN',
                        'three hazard reads of `el2mem` was trapped to EL3 and emulated there (all three returned; the page cannot tell: INFERRED only)',
                        'Boots 8 and 9 ([below](#payloads-hashbig-and-el2mem-boots-8-and-9)) add two read-only boots with no restart in their videos',
-                       'six of its nine payloads ran on the Surface Pro 11'):
+                       'eight of its nine payloads ran on the Surface Pro 11'):
             self.mentions(phrase)
         main = ' '.join(self.main.split())
         for phrase in ('ran together in boots 8 and 9 with a 144 MiB data file (OBSERVED, one unit, two boots:', 'was hashed at 194 MiB/s;',
@@ -297,6 +311,84 @@ class ResultsDocAgreement(unittest.TestCase):
             self.assertIn(phrase, main)
         for stale in ('as are the two read-only memory payloads', 'measures what hashing one in place costs, hardware NOT RUN',
                       'the high bank is untried (UNKNOWN)', 'Partly answered (OBSERVED, boot 5)'):
+            self.assertNotIn(stale, main)
+            self.assertNotIn(stale, self.flat)
+
+    def boot11_page(self):
+        found = re.search(r'<!-- boot11-panel -->\n```\n(.*?)```\n<!-- /boot11-panel -->', self.results, re.S)
+        self.assertIsNotNone(found, 'the results document has no <!-- boot11-panel --> block')
+        return found.group(1).splitlines()
+
+    def test_the_page_of_boot_11_is_well_formed_pinned_and_agrees_with_its_arithmetic(self):
+        lines = self.boot11_page()
+        text = '\n'.join(lines)
+        self.assertEqual(len(lines), 37)
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertTrue(line.startswith('PAYLOAD '))
+                self.assertLessEqual(len(line), 100)
+                self.assertRegex(line, PAGE_FONT)
+        calls = [i for i, line in enumerate(lines) if line.startswith('PAYLOAD CALL ')]
+        dones = [i for i, line in enumerate(lines) if line.startswith('PAYLOAD DONE ')]
+        self.assertEqual((len(calls), len(dones)), (2, 2))
+        self.assertEqual([line.split()[1] for line in lines[:calls[0] - 1]], ['LOADED', 'LOADED', 'READY'])
+        for call, done in zip(calls, dones):
+            self.assertEqual(lines[call - 1], 'PAYLOAD VERIFY=OK')
+            self.assertEqual(int(re.search(r' LINES=(\d+) ', lines[done]).group(1)), done - call - 1, lines[done])
+        self.assertEqual([int(re.search(r' LINES=(\d+) ', lines[done]).group(1)) for done in dones], [8, 20])
+        self.assertTrue(all(line.startswith('PAYLOAD CNTHCTL ') for line in lines[calls[0] + 1:dones[0]]))
+        self.assertTrue(all(line.startswith('PAYLOAD EL1TRAP ') for line in lines[calls[1] + 1:dones[1]]))
+        for piece in UNIT11_VALUES:
+            self.assertIn(piece, text)
+        value = lambda pattern: int(re.search(pattern, text).group(1), 16)  # noqa: E731
+        old, v, r, r2 = (value(rf'\b{key}=0X([0-9A-F]+)') for key in ('OLD', 'V', 'R', 'R2'))
+        self.assertEqual(v, (old & ~3) | (1 << 14) | (1 << 13), "V is the monitor's formula")
+        self.assertEqual((r >> 13 & 3, r == v, r2 == old), (3, True, True), 'BITS13_14_STUCK=YES, R_EQ_V=YES and RESTORED=YES follow from the values')
+        pfr0 = value(r'ID_AA64PFR0_EL1=0X([0-9A-F]+)')
+        self.assertEqual((value(r'ID_AA64MMFR0_EL1=0X([0-9A-F]+)') >> 60 & 15, text.count('ECV=0X2'), pfr0 & 15, pfr0 >> 4 & 15), (2, 2, 1, 1), 'ECV 2, EL0 and EL1 AArch64 only')
+        self.assertEqual(value(r'CNTFRQ_EL0=0X([0-9A-F]+)'), 19200000)
+        iss = lambda op0, op1, crn, crm, op2, rt: op0 << 20 | op2 << 17 | op1 << 14 | crn << 10 | rt << 5 | crm << 1 | 1  # noqa: E731
+        self.assertEqual([value(rf'{register} (?:CONTROL )?TRAPPED EC=0X18 ISS=0X([0-9A-F]+)') for register in ('CNTVCT_EL0', 'CNTV_CTL_EL0', 'CNTPCT_EL0')],
+                         [iss(3, 3, 14, 0, 2, 0), iss(3, 3, 14, 3, 1, 1), iss(3, 3, 14, 0, 1, 3)], 'the ISS of CNTVCT_EL0 into X0, CNTV_CTL_EL0 into X1, CNTPCT_EL0 into X3')
+        self.assertEqual((value(r'ENTRIES=0X([0-9A-F]+)'), value(r'TRAPS=0X([0-9A-F]+)'), text.count(' TRAPPED EC=0X18 ')), (4, 3, 3), 'one entry per trapped read and one for the end')
+        written = value(r'WRITES HCR_EL2=0X[0-9A-F]+ CNTHCTL_EL2=0X[0-9A-F]+ SCTLR_EL1=0X([0-9A-F]+)')
+        self.assertEqual(value(r'READBACK SCTLR_EL1=0X([0-9A-F]+)') ^ written, 0x180, 'bits 7 and 8 differ')
+        self.assertEqual(value(r'OLD CNTHCTL_EL2=0X[0-9A-F]+ SCTLR_EL1=0X([0-9A-F]+)') & 0x180, 0x180, 'and are set in the old SCTLR_EL1 too')
+        stub, el1, el2 = (value(rf'{key}_OFFSET=0X([0-9A-F]+)') for key in ('STUB', 'EL1_VECTORS', 'EL2_VECTORS'))
+        self.assertEqual((el1 - el2, el1 % 2048, el2 % 2048, value(r'VBAR_EL1_OFFSET=0X([0-9A-F]+)')), (2048, 0, 0, el1))
+        self.assertTrue(el1 < stub < el1 + 2048 + 256 and stub < 15156)
+        memhash = '\n'.join(self.unit_page())
+        for index in (0, 1):
+            self.assertEqual(re.search(rf'LOADED INDEX={index} BASE=0X([0-9A-F]+)', text).group(1), re.search(rf'LOADED INDEX={index} BASE=0X([0-9A-F]+)', memhash).group(1),
+                             'the runner placed the two files where it did in boots 8 and 9')
+
+    def test_the_section_of_boot_11_agrees_with_its_page_and_labels_what_it_does_not_show(self):
+        section = self.flat[self.flat.index('## Payloads `cnthctl` and `el1trap` (boot 11)'):self.flat.index('## Payload `timer` (boot 4)')]
+        self.assertNotIn('VERIFIED', section, 'a hardware result is OBSERVED, and a decode of it INFERRED')
+        for phrase in ('The plan `timers` (2026-11-16, 11:44, after the `memhash` boots) ran one autorun step from the same stick',
+                       'The operator authorised both by name and SHA-256 (about 11:20) for this one boot.',
+                       "the operator's decision for this boot, and the stop rules stand", 'that agree on every line; it is not CRC-checked',
+                       'Both payloads returned 0 (`RETURN=0X0 STACK=OK`) and printed `RESTORED=YES`; no refusal, no fault page, no stop rule, and the video shows no restart.',
+                       "the register held exactly V and gave OLD back | OBSERVED |", '`HVC_AT_EL2=OK` | OBSERVED; that `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear is INFERRED |',
+                       "OBSERVED, the first runner payload to do so (the X2 image's T02 had run an EL1 stub with an `ERET` path on the unit: 2026-11-11 and 2026-11-14, OBSERVED,",
+                       'that the stub ran at EL1 follows from the traps (INFERRED)', '`CNTPCT_EL0 CONTROL TRAPPED EC=0X18 ISS=0X32F861 ISS_OK=YES` | OBSERVED |',
+                       'OBSERVED; why two bits differ: INFERRED, below', '**The decode (INFERRED: the Arm ARM was not re-read).**',
+                       '**What follows for the monitor port (INFERRED).**', 'is **supported, not decided**',
+                       "Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read); boot 11 neither confirms nor refutes the INFERRED explanation of boot 4's `timer` stall",
+                       "**Not shown, UNKNOWN.** The traps were measured for the payload's own `HCR_EL2` `0x80000000` and `SCTLR_EL1` `0x30500800`, not for the monitor's guest regime",
+                       'the payloads wrote nothing to it'):
+            self.mentions(phrase, section)
+        for phrase in ('eight of its nine payloads ran on the Surface Pro 11', 'in boot 11 (2026-11-16), `cnthctl` and `el1trap`, which write registers, in one boot',
+                       "Whether `timer` stalls at the CNTPOFF_EL2 read (INFERRED only), why (SCR_EL3.ECVEn clear is INFERRED; boot 11 neither confirms nor refutes it,",
+                       "hold in the monitor's guest regime, and whether bits 13 and 14 depend on `SCR_EL3.ECVEn`. NOT RUN: the monitor's entry, the timer interrupt through the GIC (PPI 26),"):
+            self.mentions(phrase)
+        main = ' '.join(self.main.split())
+        for phrase in ('boots 4, 5, 7, 8, 9 and 11, build `A9F00F9CCBB5`; one unit, one boot each of those', '`el1trap` ([SP11-PAYLOAD-EL1TRAP.md](SP11-PAYLOAD-EL1TRAP.md)',
+                       'ran together in boot 11 with that authorisation (OBSERVED, one unit, one boot: bits 14 and 13 of `CNTHCTL_EL2` stick and the old value comes back;',
+                       '`el1trap` is the first runner payload to run code below EL2:', 'while `state` is **hardware NOT RUN**.'):
+            self.assertIn(phrase, main)
+        for stale in ('Neither have `cnthctl` and `el1trap`.', 'as are the two timer payloads that WRITE EL2 state', 'first code below EL2', 'INFERRED to need', 'do not fit it',
+                      'the cause of the stall is UNKNOWN until it is'):
             self.assertNotIn(stale, main)
             self.assertNotIn(stale, self.flat)
 
@@ -377,8 +469,50 @@ RESULTS_DOC_MUTANTS = [
     ('the-boot-8-words-are-wrong', _replace('`LOW_LAST(0XC3E64FFC)=0XEC6A2481`', '`LOW_LAST(0XC3E64FFC)=0XEC6A2480`')),
     ('a-restart-is-claimed-in-boots-8-and-9', _replace('page) and neither video shows a restart', 'page) and the board restarted in both')),
     ('the-redraw-is-called-a-restart', _replace('It is not a restart:', 'It is a restart:')),
-    ('the-intro-counts-the-payloads-of-before', _replace('six of its nine payloads ran on the Surface Pro 11', 'four of its five payloads ran on the Surface Pro 11')),
+    ('the-intro-counts-the-payloads-of-before', _replace('eight of its nine payloads ran on the Surface Pro 11', 'four of its five payloads ran on the Surface Pro 11')),
 ]
+
+
+def _in_panel11(old, new):
+    """A change inside the boot 11 page block only (the page of the CNTHCTL and EL1TRAP documents is checked against it elsewhere)."""
+    def mutate(doc):
+        start, end = doc.index('<!-- boot11-panel -->'), doc.index('<!-- /boot11-panel -->')
+        assert old in doc[start:end], old
+        return doc[:start] + doc[start:end].replace(old, new, 1) + doc[end:]
+    return mutate
+
+
+# The page of boot 11 and the section around it: every number and label of the page, and the claims the section must not make.
+RESULTS_DOC_MUTANTS += [(f'the-boot-11-{name}', _in_panel11(old, new)) for name, old, new in (
+    ('old-value-is-changed', 'CNTHCTL_EL2 OLD=0X3 CNTFRQ_EL0=0X124F800', 'CNTHCTL_EL2 OLD=0X1 CNTFRQ_EL0=0X124F800'), ('written-value-is-changed', 'OLD=0X3 V=0X6000', 'OLD=0X3 V=0X4000'),
+    ('readback-is-changed', 'R=0X6000 R2=0X3', 'R=0X4000 R2=0X3'), ('restore-readback-is-changed', 'R=0X6000 R2=0X3', 'R=0X6000 R2=0X1'),
+    ('stuck-verdict-is-changed', 'BITS13_14_STUCK=YES', 'BITS13_14_STUCK=NO'), ('equality-verdict-is-changed', 'R_EQ_V=YES', 'R_EQ_V=NO'),
+    ('cnthctl-restore-verdict-is-changed', 'PAYLOAD CNTHCTL RESTORED=YES', 'PAYLOAD CNTHCTL RESTORED=NO'),
+    ('el1trap-restore-verdict-is-changed', 'PAYLOAD EL1TRAP RESTORED=YES', 'PAYLOAD EL1TRAP RESTORED=NO'),
+    ('counter-iss-is-changed', 'ISS=0X34F801', 'ISS=0X34F800'), ('timer-iss-is-changed', 'ISS=0X32F827', 'ISS=0X32F825'), ('control-iss-is-changed', 'ISS=0X32F861', 'ISS=0X32F860'),
+    ('sctlr-readback-is-the-written-value', 'READBACK SCTLR_EL1=0X30500980', 'READBACK SCTLR_EL1=0X30500800'),
+    ('old-sctlr-is-changed', 'SCTLR_EL1=0X100030D0198D', 'SCTLR_EL1=0X100030D0198C'), ('old-vbar-is-changed', 'OLD VBAR_EL1=0XA7004000', 'OLD VBAR_EL1=0XA7004001'),
+    ('entries-are-changed', 'ENTRIES=0X4', 'ENTRIES=0X3'), ('traps-are-changed', 'TRAPS=0X3', 'TRAPS=0X4'),
+    ('cnthctl-line-count-is-changed', 'REFUSED=0 LINES=8 DROPPED=0', 'REFUSED=0 LINES=9 DROPPED=0'),
+    ('el1trap-line-count-is-changed', 'REFUSED=0 LINES=20 DROPPED=0', 'REFUSED=0 LINES=21 DROPPED=0'), ('verdict-is-inert', 'VERDICT=TRAPS_EFFECTIVE', 'VERDICT=TRAPS_INERT'),
+    ('frequency-read-is-trapped', 'CNTFRQ_EL0 NOT_TRAPPED VALUE=0X124F800', 'CNTFRQ_EL0 TRAPPED EC=0X18 ISS=0X30F841 ISS_OK=YES'),
+    ('base-is-changed', 'BASE=0XCEA88000', 'BASE=0XCEA89000'), ('digest-is-changed', 'SHA=5074712516C1CF08', 'SHA=5074712516C1CF09'), ('size-is-changed', 'BYTES=3094', 'BYTES=3095'),
+    ('ecv-field-is-changed', 'ECV=0X2', 'ECV=0X0'), ('page-loses-a-line', 'PAYLOAD CNTHCTL NEXT CNTHCTL_EL2 WRITE AFTER 8 S\n', ''))]
+RESULTS_DOC_MUTANTS += [(f'the-boot-11-{name}', _replace(old, new)) for name, old, new in (
+    ('first-runner-payload-becomes-the-first-code-on-the-unit', 'the first runner payload to do so', 'the first code below EL2 run on the unit'),
+    ('t02-citation-is-denied', 'T02 had run', 'T02 had not run'),
+    ('ecven-dependence-is-called-known', 'Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read)', 'The traps need `SCR_EL3.ECVEn`'),
+    ('timer-stall-is-called-explained', "boot 11 neither confirms nor refutes the INFERRED\nexplanation of boot 4's `timer` stall", "boot 11 explains boot 4's `timer` stall"),
+    ('operator-decision-is-dropped', "the operator's decision for this boot, and the stop rules stand", 'the documented rule'),
+    ('answers-are-called-verified', '**What the unit answered** (OBSERVED unless a cell says otherwise):', '**What the unit answered** (VERIFIED):'),
+    ('decode-is-called-observed', '**The decode (INFERRED: the Arm ARM was not re-read).**', '**The decode (OBSERVED).**'),
+    ('o1-is-called-decided', 'is **supported, not decided**', 'is **decided**'),
+    ('guest-regime-limit-is-dropped', "not for the monitor's guest\nregime", "also for the monitor's guest\nregime"),
+    ('hvc-claim-is-called-known', '| OBSERVED; that `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear is INFERRED |', '| OBSERVED; `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear |'),
+    ('stub-at-el1-is-called-observed', 'that the stub ran at EL1 follows from the traps (INFERRED)', 'the stub ran at EL1 (OBSERVED)'),
+    ('unknown-list-forgets-the-guest-regime', "guest\n  regime, and whether bits 13 and 14 depend on `SCR_EL3.ECVEn`.", 'guest\n  regime.'),
+    ('timer-bullet-is-called-refuted', 'boot 11 neither confirms nor\n  refutes it', 'boot 11 refutes it'),
+    ('intro-forgets-the-run', 'in boot 11 (2026-11-16), `cnthctl` and `el1trap`, which write', 'in boot 11 (2026-11-16), nothing, which write'))]
 USBSMMU_DOC_MUTANTS = [
     ('a-boot-5-value-in-the-register-table-is-wrong', _replace('boot 5 OBSERVED `0x400` (bank 3;', 'boot 5 OBSERVED `0x401` (bank 3;')),
     ('a-boot-5-bus-error-is-wrong', _replace('boot 5 OBSERVED 0 (`BERR=0X0`, no latched bus error)', 'boot 5 OBSERVED 1 (`BERR=0X1`, a latched bus error)')),

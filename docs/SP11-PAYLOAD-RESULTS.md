@@ -1,17 +1,19 @@
 <!-- SPDX-License-Identifier: MIT -->
-# SP11 payload runner: what the unit showed (boots 4, 5, 7, 8 and 9, the restart probe and the restart control)
+# SP11 payload runner: what the unit showed (boots 4, 5, 7, 8, 9 and 11, the restart probe and the restart control)
 
-The stick payload runner of [SP11-PAYLOAD.md](SP11-PAYLOAD.md) and six of its nine payloads ran on the Surface Pro 11
+The stick payload runner of [SP11-PAYLOAD.md](SP11-PAYLOAD.md) and eight of its nine payloads ran on the Surface Pro 11
 (Snapdragon X1E80100): `psci`, `usbsmmu` and `timer` in boot 4 and `psci` and `usbsmmu` in boot 5 (2026-11-14), and `cpuon`,
 alone, in boot 7 (2026-11-15), each from the boot stick plugged in directly (no hub). Later boots of the same stick ran `cpuon`
 twice more ([the restart probe](#the-restart-probe), 2026-11-15), `psci` alone twice ([the restart control](#the-restart-control),
-2026-11-16) and, in boots 8 and 9 (2026-11-16), `hashbig` and `el2mem` with a 144 MiB data file
-([the `memhash` plan](#payloads-hashbig-and-el2mem-boots-8-and-9)). This document records what the photographs and videos of those
+2026-11-16), in boots 8 and 9 (2026-11-16) `hashbig` and `el2mem` with a 144 MiB data file
+([the `memhash` plan](#payloads-hashbig-and-el2mem-boots-8-and-9)) and, in boot 11 (2026-11-16), `cnthctl` and `el1trap`, which write
+registers, in one boot ([below](#payloads-cnthctl-and-el1trap-boot-11)). This document records what the photographs and videos of those
 boots showed, and what they did not. Boot 6 was not a payload boot (an EL2 test image) and is not recorded here.
 The line formats are in [the line catalogue](SP11-PAYLOAD.md#line-catalogue); what each payload reads, and what its answers would
 mean for the port, is in its own document: [`psci`](SP11-PAYLOAD-PSCI.md), [`timer`](SP11-PAYLOAD-TIMER.md),
-[`usbsmmu`](SP11-PAYLOAD-USBSMMU.md), [`cpuon`](SP11-PAYLOAD-CPUON.md), [`hashbig`](SP11-PAYLOAD-HASHBIG.md) and
-[`el2mem`](SP11-PAYLOAD-EL2MEM.md). The `state` payload has not run on the unit: NOT RUN. Neither have `cnthctl` and `el1trap`.
+[`usbsmmu`](SP11-PAYLOAD-USBSMMU.md), [`cpuon`](SP11-PAYLOAD-CPUON.md), [`hashbig`](SP11-PAYLOAD-HASHBIG.md),
+[`el2mem`](SP11-PAYLOAD-EL2MEM.md), [`cnthctl`](SP11-PAYLOAD-CNTHCTL.md) and [`el1trap`](SP11-PAYLOAD-EL1TRAP.md). The `state` payload has not
+run on the unit: NOT RUN.
 
 Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
 **One unit, at most four boots of any payload: nothing here is a distribution**; another unit, or another boot of this one, may
@@ -34,19 +36,21 @@ Boot 3 was not a payload boot; it is here because two results below lean on it.
 
 OBSERVED in the boots named, unless a line says otherwise.
 
-* **The bounce was taken and q1n1's page was drawn at EL2** in all three boots: `ENTRY EL 1`, `CURRENT EL 2`. In boots 8 and 9
-  both payloads read `CURRENTEL=0X8` (EL2) on their `START` lines.
-* **`EfiLoaderCode` memory executes at EL2.** Both payloads of boot 5, `cpuon` of boot 7 and of the probe's step 3, and `hashbig`
-  and `el2mem` of boots 8 and 9 were allocated as `EfiLoaderCode` and ran there, with no fault page. That answers the first of the
+* **The bounce was taken and q1n1's page was drawn at EL2** in all three boots: `ENTRY EL 1`, `CURRENT EL 2`. In boots 8, 9 and 11
+  every payload read `CURRENTEL=0X8` (EL2) on its first lines.
+* **`EfiLoaderCode` memory executes at EL2.** Both payloads of boot 5, `cpuon` of boot 7 and of the probe's step 3, `hashbig` and
+  `el2mem` of boots 8 and 9, and `cnthctl` and `el1trap` of boot 11 were allocated as `EfiLoaderCode` and ran there, with no fault
+  page. That answers the first of the
   [open questions](SP11-PAYLOAD.md#open-questions-for-the-operator). No `EfiLoaderData` payload was tried (`BIG.DAT` was read, never
   executed), so whether the unit maps that no-execute stays UNKNOWN.
 * **The ABI v1 ops the payloads used work.** `puts`: every line reached the panel. `load32`: `usbsmmu` made 213 guarded loads and
-  `el2mem` four, `FAULTS=0 REFUSED=0`. Each payload of boots 5, 7, 8 and 9 returned to the runner (`RETURN=0X0 STACK=OK`, guard
+  `el2mem` four, `FAULTS=0 REFUSED=0`. Each payload of boots 5, 7, 8, 9 and 11 returned to the runner (`RETURN=0X0 STACK=OK`, guard
   words intact, `DROPPED=0`).
 * **The second hash at EL2 passes.** Right before each call the runner re-hashed the preload table and the payload where the
   bounce left it (`PAYLOAD VERIFY=OK`): the files at `0xCEC90000` (`psci`) and `0xCEA89000` (`usbsmmu`) were intact (boot 5),
   and so was `cpuon` at `0xCEA8B000` (boot 7), `0xCE5E5000` (step 2: it was called, which the runner does only after a passed second
-  hash) and `0xCE60A000` (step 3), and `hashbig` at `0xCEA8D000` and `el2mem` at `0xCEA88000` (boots 8 and 9). The memory map at
+  hash) and `0xCE60A000` (step 3), `hashbig` at `0xCEA8D000` and `el2mem` at `0xCEA88000` (boots 8 and 9), and `cnthctl` at `0xCEA8D000` and
+  `el1trap` at `0xCEA88000` (boot 11). The memory map at
   EL2 had 235 entries (boot 5) and 234 (boot 8). A 144 MiB data file, which the runner hashes only before the bounce, arrived
   intact: `hashbig`'s digest at EL2 equals the runner's ([below](#payloads-hashbig-and-el2mem-boots-8-and-9)).
 * **The panel.** The layout function (a copy of the survey's `stk_layout`, pinned by a host test) places the region right of
@@ -54,7 +58,7 @@ OBSERVED in the boots named, unless a line says otherwise.
   emblem, and it has 89 rows. That is computed from the function (VERIFIED as a computation), not measured. What the unit
   showed: 58 lines in the right-hand panel in boot 4 (counted from the geometry of a photograph that cut the column off; the
   text was not captured), all 41 lines of boot 5 (read in full), all 45 of boot 7 (read with some blur) and of step 3 (read
-  crisp from a video) and all 36 of boots 8 and 9 (read from videos). So that payload lines reach the right-hand column is
+  crisp from a video), all 36 of boots 8 and 9 and all 37 of boot 11 (read from videos). So that payload lines reach the right-hand column is
   OBSERVED, and 58 is the most it was seen to hold; the 89 rows are not.
 * **The heartbeat** (`UPTIME`) counts from before the chain, not from its end: `start` is read before the runner is called
   (`platform/uefi/main.c`, line 1626 against 1641), and the loop at lines 1645 to 1655 first draws `(counter - start) / frequency`
@@ -62,7 +66,8 @@ OBSERVED in the boots named, unless a line says otherwise.
   boot 4 (the chain did not return: INFERRED, below) and in the photographs taken during the chains of boot 7 and of step 2 of
   [the restart probe](#the-restart-probe); after chains that returned, 3 S and 10 S in boot 5, 16 S in boot 7 (the first heartbeat
   after the chain's two eight-second waits) and 224 S and 268 S in [the restart control](#the-restart-control). Step 3's video
-  shows it advancing to about 36 S, and the videos of boots 8 and 9 show `UPTIME 101 S` (110 s into the video) and `42 S` (54 s in).
+  shows it advancing to about 36 S, the videos of boots 8 and 9 show `UPTIME 101 S` (110 s into the video) and `42 S` (54 s in), and
+  boot 11's shows `33 S` (42 s in) and `49 S` (58 s).
 * **q1n1's own page, left column** (boots 4 and 5; boot 7's page showed the same `HCR_EL2`, `SCTLR_EL2`, `TTBR0_EL2`, `MAIR_EL2`,
   `CNTFRQ_EL0` and `MPIDR_EL1` and boot 8's the same `MIDR`, `HCR_EL2`, `SCTLR_EL2`, `TCR_EL2`, `TTBR0_EL2` and `MAIR_EL2`; its
   lines, not a payload's): `ENTRY EL 1`, `CURRENT EL 2`, `MIDR` `0x512F0011`,
@@ -361,8 +366,8 @@ from RAM: `BANK_FIRST(0X880000000)=0X59ADB1EB`, `BANK_LAST(0XFFFFFFFFC)=0XF30F15
 `LOW_LAST(0XC3E64FFC)=0XEC6A2481` (boot 9: `0X1F8A08BE`, `0X9F6636DA`, `0X380001`, `0X1D11B2F9`). Three of the four words differ between
 the boots; every address, size, count and attribute is the same.
 
-**q1n1's own page** (boot 8, `UPTIME 101 S`) shows the registers of the left column above (`HCR_EL2` `0x88000010`, `SCTLR_EL2`
-`0x100030C5183D`, `TCR_EL2` `0x80843514`, `TTBR0_EL2` `0xA7F2E000`, `MAIR_EL2` `0xFFBB4400`), `MEMORY DESCRIPTORS` `0xEA` (234: the
+**q1n1's own page** (boot 8, `UPTIME 101 S`) shows the registers of the left column above (the same `HCR_EL2`, `SCTLR_EL2`, `TCR_EL2`,
+`TTBR0_EL2` and `MAIR_EL2`), `MEMORY DESCRIPTORS` `0xEA` (234: the
 `MAP DESC=234` that `el2mem` read in place) and the six ranges the runner declared, each in one descriptor (`DESC=1`): the image at
 `0xCE86F000` (size `0x163000`), the map at `0xCEA36000` (`0x40000`), the preload table at `0xCEA86000` (`0x13A0`), the payload at
 `0xCEA88000`, the first file at `0xCEA8D000` (`0x3000`) and the second at `0xC3E65000` (`0x9000000`): the bases of the `LOADED` lines,
@@ -400,13 +405,104 @@ by about 42 s, so about 45 s from the Shell step to the end. The runner's read o
 bounce therefore fit into the six seconds or so between the autorun text and q1n1's page (INFERRED by subtraction: no frame shows
 them). In both videos q1n1's status text shows again over the payload text now and then (at about 50 and 110 s of boot 8's video, 54 s
 of boot 9's) and the payload text is back in the next frame, 10 s later. It is not a restart: `UPTIME` keeps counting (101 S at 110 s,
-42 S at 54 s). The cause of the redraw is UNKNOWN; a photograph of the status text does not show a restart, `UPTIME` does.
+42 S at 54 s). The cause of the redraw is UNKNOWN.
 
 **Not shown, UNKNOWN.** Whether the bank is writable at EL2 stage 1 (`el2mem` stores nothing and asks `AT S1E2R` only), whether a cache
 clean reaches DRAM, and whether a page in the bank survives the bounce (nothing was placed there or compared across the bounce). And
 the cause of the restart after `cpuon`: these boots issued no `CPU_ON` and neither video shows a restart (boot 8 to `UPTIME` about
 110 S, boot 9 to 42 S and a few seconds more), which adds a longer read-only chain to [the restart control](#the-restart-control) and
 changes none of its labels.
+
+## Payloads `cnthctl` and `el1trap` (boot 11)
+
+The plan `timers` (2026-11-16, 11:44, after the `memhash` boots) ran one autorun step from the same stick: slbounce's
+`SLBOUNCE-DEVHE-MARK.EFI` (sha256 prefix `4107c28c`), then the runner of boot 4 (`Q1N1-PAYLOAD.EFI --el2`, prefix `c2057909`). Its
+manifest (624 bytes) lists, in call order, `CNTHCTL.BIN` (3,094 bytes, `9F06B31DA4BDC395`) and `EL1TRAP.BIN` (15,156 bytes,
+`5074712516C1CF08`): [`cnthctl`](SP11-PAYLOAD-CNTHCTL.md) writes one system register and [`el1trap`](SP11-PAYLOAD-EL1TRAP.md) seven, and
+runs code below EL2. The operator authorised both by name and SHA-256 (about 11:20) for this one boot. The documents had proposed `cnthctl`
+alone and `el1trap` on a stick of its own after that page was read; the operator chose one boot with one manifest, so `el1trap` ran without
+that page read first, behind its own refusals: the operator's decision for this boot, and the stop rules stand. The sizes and digest
+prefixes on the `LOADED` lines are those of the binaries this tree builds. The boot was filmed (61.2 s); the coordinator read the page below
+from full-resolution crops of two frames (34 s and 38 s in) that agree on every line; it is not CRC-checked. Both payloads returned 0
+(`RETURN=0X0 STACK=OK`) and printed `RESTORED=YES`; no refusal, no fault page, no stop rule, and the video shows no restart.
+
+Boot 11's page, 37 lines (the page font has capitals only):
+
+<!-- boot11-panel -->
+```
+PAYLOAD LOADED INDEX=0 BASE=0XCEA8D000 BYTES=3094 SHA=9F06B31DA4BDC395 TYPE=1
+PAYLOAD LOADED INDEX=1 BASE=0XCEA88000 BYTES=15156 SHA=5074712516C1CF08 TYPE=1
+PAYLOAD READY FILES=2 RANGES=5 CODE=2
+PAYLOAD VERIFY=OK
+PAYLOAD CALL 0 9F06B31DA4BDC395
+PAYLOAD CNTHCTL CURRENTEL=0X8 HCR_EL2=0X88000010 E2H=0X0
+PAYLOAD CNTHCTL ID_AA64MMFR0_EL1=0X2100122100001024 ECV=0X2
+PAYLOAD CNTHCTL CNTHCTL_EL2 OLD=0X3 CNTFRQ_EL0=0X124F800
+PAYLOAD CNTHCTL NEXT CNTHCTL_EL2 WRITE AFTER 8 S
+PAYLOAD CNTHCTL OLD=0X3 V=0X6000
+PAYLOAD CNTHCTL R=0X6000 R2=0X3
+PAYLOAD CNTHCTL BITS13_14_STUCK=YES R_EQ_V=YES
+PAYLOAD CNTHCTL RESTORED=YES
+PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0
+PAYLOAD VERIFY=OK
+PAYLOAD CALL 1 5074712516C1CF08
+PAYLOAD EL1TRAP CURRENTEL=0X8 HCR_EL2=0X88000010 E2H=0X0
+PAYLOAD EL1TRAP DAIF=0X3C0 SPSEL=0X1 CNTFRQ_EL0=0X124F800
+PAYLOAD EL1TRAP ID_AA64MMFR0_EL1=0X2100122100001024 ECV=0X2
+PAYLOAD EL1TRAP ID_AA64PFR0_EL1=0X1201201023111111 EL1=0X1
+PAYLOAD EL1TRAP OLD CNTHCTL_EL2=0X3 SCTLR_EL1=0X100030D0198D
+PAYLOAD EL1TRAP OLD VBAR_EL1=0XA7004000 VBAR_EL2=0XCE879000
+PAYLOAD EL1TRAP STUB_OFFSET=0X1790 EL1_VECTORS_OFFSET=0X1000 EL2_VECTORS_OFFSET=0X800
+PAYLOAD EL1TRAP NEXT EL1 EXCURSION AFTER 8 S
+PAYLOAD EL1TRAP HVC_AT_EL2=OK
+PAYLOAD EL1TRAP WRITES HCR_EL2=0X80000000 CNTHCTL_EL2=0X6000 SCTLR_EL1=0X30500800
+PAYLOAD EL1TRAP NEXT EL1 EXCURSION
+PAYLOAD EL1TRAP READBACK HCR_EL2=0X80000000 CNTHCTL_EL2=0X6000
+PAYLOAD EL1TRAP READBACK SCTLR_EL1=0X30500980 VBAR_EL1_OFFSET=0X1000
+PAYLOAD EL1TRAP CNTVCT_EL0 TRAPPED EC=0X18 ISS=0X34F801 ISS_OK=YES
+PAYLOAD EL1TRAP CNTV_CTL_EL0 TRAPPED EC=0X18 ISS=0X32F827 ISS_OK=YES
+PAYLOAD EL1TRAP CNTFRQ_EL0 NOT_TRAPPED VALUE=0X124F800
+PAYLOAD EL1TRAP CNTPCT_EL0 CONTROL TRAPPED EC=0X18 ISS=0X32F861 ISS_OK=YES
+PAYLOAD EL1TRAP VERDICT=TRAPS_EFFECTIVE BITS13_14_IN_READBACK=YES
+PAYLOAD EL1TRAP EXCURSION OK ENTRIES=0X4 TRAPS=0X3
+PAYLOAD EL1TRAP RESTORED=YES
+PAYLOAD DONE INDEX=1 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=20 DROPPED=0
+```
+<!-- /boot11-panel -->
+
+**What the unit answered** (OBSERVED unless a cell says otherwise):
+
+| Asked | What the page says | Label |
+| --- | --- | --- |
+| T-HW1: does `CNTHCTL_EL2` hold the monitor's value, bits 14 and 13 included, and give the old one back? | `OLD=0X3 V=0X6000`, `R=0X6000 R2=0X3`, `BITS13_14_STUCK=YES R_EQ_V=YES`, `RESTORED=YES`: the register held exactly V and gave OLD back | OBSERVED |
+| Does `HVC` work at EL2? | `HVC_AT_EL2=OK` | OBSERVED; that `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear is INFERRED |
+| Can a runner payload run code below EL2 and come back? | `EXCURSION OK ENTRIES=0X4 TRAPS=0X3`, then `RESTORED=YES`: four entries into EL2 (three trapped reads and the final `HVC #0`) and the five registers as found | OBSERVED, the first runner payload to do so (the X2 image's T02 had run an EL1 stub with an `ERET` path on the unit: 2026-11-11 and 2026-11-14, OBSERVED, Snapintosh `docs/SURFACE-PRO-11.md`); that the stub ran at EL1 follows from the traps (INFERRED) |
+| T-HW2: with V in `CNTHCTL_EL2`, do EL1 reads of `CNTVCT_EL0` and `CNTV_CTL_EL0` trap to EL2? | both `TRAPPED EC=0X18` with ISS `0X34F801` and `0X32F827` (`ISS_OK=YES`); `VERDICT=TRAPS_EFFECTIVE BITS13_14_IN_READBACK=YES` | OBSERVED |
+| The controls | `CNTFRQ_EL0 NOT_TRAPPED VALUE=0X124F800` (19.2 MHz); `CNTPCT_EL0 CONTROL TRAPPED EC=0X18 ISS=0X32F861 ISS_OK=YES` | OBSERVED |
+| Did the writes hold? | `READBACK HCR_EL2=0X80000000 CNTHCTL_EL2=0X6000`; `SCTLR_EL1` `0X30500980` for `0X30500800` written | OBSERVED; why two bits differ: INFERRED, below |
+
+**The decode (INFERRED: the Arm ARM was not re-read).** The ISS of a trapped `MRS` is `(Op0 << 20) + (Op2 << 17) + (Op1 << 14) + (CRn << 10) + (Rt << 5)
++ (CRm << 1) + 1`: `0x34F801` is Op0 3, Op1 3, CRn 14, CRm 0, Op2 2, Rt 0, a read: `CNTVCT_EL0` into X0; `0x32F827` is `CNTV_CTL_EL0` (CRm 3,
+Op2 1) into X1; `0x32F861` is `CNTPCT_EL0` (CRm 0, Op2 1) into X3. The payload checked all three itself (`ISS_OK=YES`). `SCTLR_EL1` `0x30500980` is
+`0x30500800` plus bits 7 and 8, which the unit forces to 1 (they are also set in the old value): ITD and SED, RES1 with no AArch32 at EL0
+(`ID_AA64PFR0_EL1` `0x1201201023111111`: `EL0` and `EL1` 1, AArch64 only). The payload compares only the bits that decide whether EL1 can be entered
+and left, so it did not print `WRITE_NOT_HELD`. The old `SCTLR_EL1` `0x100030D0198D` has `M`, `C` and `I` set, the firmware's leftover EL1 state.
+
+**What follows for the monitor port (INFERRED).** With the monitor's `CNTHCTL_EL2` formula, EL1 reads of `CNTVCT_EL0` and `CNTV_CTL_EL0` trap to EL2 with
+the register's own ISS and `CNTFRQ_EL0` does not, for an EL1 stub under the payload's own `HCR_EL2` and `SCTLR_EL1`: option O1 of the port's timer
+options (the A16 recipe) is **supported, not decided**; the guest's frequency, the `CNTVOFF_EL2` check and the read-back refusal stay the monitor's
+own design. Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read); boot 11 neither confirms nor refutes the INFERRED
+explanation of boot 4's `timer` stall (`ECVEn` clear).
+
+**Timing** (frames of the video). The video starts at 11:44:26, at the Shell's countdown, and the Shell's marker `DONE1.TXT`
+(`AUTORUN timers STEP 1 STARTED`, 31 bytes) is stamped 11:44. The autorun text shows at about 6 s, q1n1's page at about 10 s, the payload
+text from about 14 s and the page is complete by about 30 s. q1n1's status text shows over it now and then
+(`UPTIME 33 S` at 42 s, `49 S` at 58 s): not a restart. The stick, re-read at 11:49, holds every file of the staged tree byte for byte (but for
+the known `SP11\SLBOUNCE.EFI`) and one new file, the Shell's `DONE1.TXT`: the payloads wrote nothing to it.
+
+**Not shown, UNKNOWN.** The traps were measured for the payload's own `HCR_EL2` `0x80000000` and `SCTLR_EL1` `0x30500800`, not for the monitor's guest
+regime (`HCR_EL2` with `VM`, `TVM` and the rest), which is the monitor's own test; one unit, one boot. The rest that no boot has shown is in
+[Still UNKNOWN](#still-unknown).
 
 ## Payload `timer` (boot 4)
 
@@ -442,7 +538,8 @@ page stayed readable.
 * Why U0's state differs from S0's (a reset between the firmware's last use and EL2, the topology, or the unit).
 * SMMU stage 2 for streams `0x1420` and `0x1460`, and whether DMA by an EL2 xHCI driver works.
 * What the context bank's fault record means (FSR `0x400`, FAR, FSYNR0).
-* Whether `timer` stalls at the CNTPOFF_EL2 read (INFERRED only), why (SCR_EL3.ECVEn is INFERRED), and what its own lines said.
+* Whether `timer` stalls at the CNTPOFF_EL2 read (INFERRED only), why (SCR_EL3.ECVEn clear is INFERRED; boot 11 neither confirms nor
+  refutes it, [above](#payloads-cnthctl-and-el1trap-boot-11)), and what its own lines said.
 * DRAM retention across a reset (the study's M10: NOT RUN). After boot 4's automatic reset the board booted something other
   than the stick (operator report), so a log path that dumps retained DRAM on the next stick boot needs the operator to boot the
   stick again, and whether DRAM survived is not known.
@@ -465,3 +562,7 @@ page stayed readable.
   bounce are UNKNOWN: every file the runner placed sat below 4 GiB, the 144 MiB one at `0xC3E65000`.
 * Whether the runner places another file size at the top of the same low extent (INFERRED from one size), and that none of the
   three hazard reads of `el2mem` was trapped to EL3 and emulated there (all three returned; the page cannot tell: INFERRED only).
+* Whether the `CNTHCTL_EL2` traps of boot 11 (an EL1 stub under `HCR_EL2` `0x80000000`, one unit, one boot) hold in the monitor's guest
+  regime, and whether bits 13 and 14 depend on `SCR_EL3.ECVEn`. NOT RUN: the monitor's entry, the timer interrupt through the GIC (PPI 26),
+  PAuth under QARMA5, a guest in the bank, the real kernelcache bundle, stage-2 syndromes, the wrapper's refusal paths and whether a
+  `DC CVAC` alone reaches DRAM.

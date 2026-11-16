@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """docs/SP11-PAYLOAD-EL1TRAP.md against the source, the host model, the binary and the QEMU suite of the el1trap payload, and the same
-agreement tests against 57 seeded mistakes in the document.
+agreement tests against 94 seeded mistakes in the document.
 
     python3 tools/test-q1n1-sp11-payload-el1trap-doc.py
 
-What it holds the document to: the house rules (the licence line, the size limit, no machine identifier, the evidence labels, hardware
-NOT RUN, no run authorised); the write, `HCR_EL2`, `SCTLR_EL1` and bit tables against the source's constants; the stub table against the
-ISS computed from the words of the built stub (not from the payload's own table); the handler and bounds tables against the source;
-the instruction table against the built binary; the pages against what the host program prints; every keyword the payload can print
-against the document and every keyword of the line catalogue against the payload; the decision table (which verdict supports O1, which
-kills it, which is void); the numbers; the chain arithmetic against the runner's planning table; the QEMU panel against the QEMU suite's
-patterns; the counts of the tests table; the authorisation, the stop rule and the staging plan. Writes only under build/. Hardware: NOT RUN."""
+What it holds the document to: the house rules (licence line, size limit, no machine identifier, the evidence labels, the unit's one run said
+as it was, no run authorised); the write, `HCR_EL2`, `SCTLR_EL1` and bit tables against the source's constants; the stub table against the
+ISS computed from the words of the built stub; the handler and bounds tables against the source; the instruction table against the built
+binary; the pages against the host program; the unit's page of boot 11 against the model's page and the arithmetic of its values; every
+keyword the payload can print against the document; the decision table (which verdict supports O1, kills it or is void, which row the unit
+matched); the numbers; the chain arithmetic; the QEMU panel against the QEMU suite; the counts of the tests table; the authorisation, the
+stop rule and the staging plan. Writes only under build/. Hardware: NOT RUN."""
 import re
 import struct
 import sys
@@ -33,6 +33,10 @@ _PROGRAM_OUTPUT = {}
 _BINARY = []
 WORLDS = {'bits do not stick': 11, 'stuck but inert': 11, 'only bit 14 sticks': 11, 'control not trapped': 11, 'hvc undefined at el2': 8,
           'write not held': 11, 'restore fails': 11}
+# The six lines of the unit's page that are not the model's: the unit's own values, each a piece of the page.
+UNIT_VALUES = ('ID_AA64MMFR0_EL1=0X2100122100001024 ECV=0X2', 'ID_AA64PFR0_EL1=0X1201201023111111 EL1=0X1', 'OLD CNTHCTL_EL2=0X3 SCTLR_EL1=0X100030D0198D',
+               'OLD VBAR_EL1=0XA7004000 VBAR_EL2=0XCE879000', 'STUB_OFFSET=0X1790 EL1_VECTORS_OFFSET=0X1000 EL2_VECTORS_OFFSET=0X800',
+               'READBACK SCTLR_EL1=0X30500980 VBAR_EL1_OFFSET=0X1000')
 
 
 def read_doc(name):
@@ -105,8 +109,12 @@ class El1trapDocAgreement(unittest.TestCase):
         self.assertLess(len(self.text.encode('utf-8')), 50 * 1024)
         for label in ('VERIFIED', 'OBSERVED', 'INFERRED', 'EXPERIMENTAL', 'UNIMPLEMENTED', 'UNKNOWN'):
             self.assertIn(label, self.text)
-        self.assertIn('hardware NOT RUN', self.text)
-        self.says('No value of this payload has been OBSERVED on the unit')
+        self.assertIn('ran once on the unit', self.text)
+        self.says('**EXPERIMENTAL; ran once on the unit (2026-11-16, boot 11, in one boot after `cnthctl`; one unit, one boot).**')
+        self.says('No value of this payload was OBSERVED on the unit before boot 11')
+        for stale in ('**EXPERIMENTAL; hardware NOT RUN.**', 'No value of this payload has been OBSERVED on the unit', 'EXPERIMENTAL. Hardware NOT RUN.', 'nothing below has been observed on the unit',
+                      "The unit's rows of the decision table are UNKNOWN", 'the unit NOT RUN', 'which no payload has done', 'The writes are UNKNOWN on this unit'):
+            self.assertNotIn(stale, self.flat)
         paths = '|'.join(['/Us' + 'ers/', '/ho' + 'me/', '/Vol' + 'umes/'])
         pattern = re.compile(paths + r'|\.loc' + r'al\b|\bsae' + r'ed\b|host' + r'name|\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b', re.I)
         for number, line in enumerate(self.text.splitlines(), 1):
@@ -122,7 +130,7 @@ class El1trapDocAgreement(unittest.TestCase):
     def test_nothing_is_authorised_here_and_the_authorisation_stop_rule_and_staging_are_stated(self):
         self.says('No run is authorised by this document, by its test, or by the fact that the file is on the stick.')
         self.says('the operator names the payload and its SHA-256 in writing before it runs on the unit')
-        self.says('**runs code at EL1**, which no payload has done')
+        self.says('**runs code at EL1**, which no payload had done before boot 11')
         self.says('**Stop rule.** After the run the operator reads the page before anything else is run.')
         for word in ('`RESTORED=NO` or `NOT_RESTORED`', 'a page that ends at a `NEXT` line', 'a fault page', 'a board restart'):
             self.assertIn(word, self.text)
@@ -130,7 +138,12 @@ class El1trapDocAgreement(unittest.TestCase):
         self.says('it is not run in the same boot as `cpuon`')
         self.assertIn('python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/el1trap.bin', self.text)
         self.assertIn('build/stick/SP11/EL1TRAP.BIN', self.text)
-        self.says('Status of the staging: **proposed, NOT RUN**.')
+        self.says('Boot 11 (2026-11-16) ran `el1trap` straight after `cnthctl`, in **one boot**: one stick, one manifest (624 bytes) listing `CNTHCTL.BIN` then `EL1TRAP.BIN`')
+        self.says('That is not what this document proposed')
+        self.says("**that changed the documented rule by the operator's decision for that boot**")
+        self.says('The stop rules above stand for every later run, and none was triggered.')
+        self.says("**boot 11 ran both payloads in one boot by the operator's decision; the one-payload proposal was not run.**")
+        self.assertNotIn('Status of the staging: **proposed, NOT RUN**.', self.flat)
 
     # -- what it writes ---------------------------------------------------------------------------------------------------------
     def test_the_write_table_and_the_values_are_the_sources(self):
@@ -208,6 +221,10 @@ class El1trapDocAgreement(unittest.TestCase):
         self.assertEqual([row[1].split(' (')[0].split(':')[0] for row in table[:4]],
                          ['traps', 'traps', 'does not trap', 'the control'])
         self.assertEqual(0x62000000 | iss[0], 0x6234F801)
+        unit = [row[3] for row in table]
+        self.assertTrue(all(cell.startswith('**OBSERVED:**') for cell in unit), 'the unit read the four registers of the stub and finished it')
+        self.assertEqual(['not trapped' in cell for cell in unit[:4]], [False, False, True, False])
+        self.assertTrue(all(f'`{n:#X}`'.replace('0X', '0x') in cell for n, cell in ((iss[0], unit[0]), (iss[1], unit[1]), (iss[3], unit[3]))) and '`0x124F800`' in unit[2])
         self.says('the layout of the architecture (INFERRED, not re-read) and the numbers above OBSERVED under QEMU')
         self.says('`ISS_OK=NO`')
         for number in ('0x34F801', '0x32F827', '0x32F861'):
@@ -281,6 +298,47 @@ class El1trapDocAgreement(unittest.TestCase):
                 self.assertEqual(pages[title][:start], first[:start], 'the first lines are the same in every world')
         self.says('For `hvc undefined at el2` the tail starts at line 8')
 
+    def test_the_units_page_has_the_models_shape_with_the_units_values_and_the_arithmetic_holds(self):
+        unit = block(self.text, 'el1trap-unit-page').replace('```', '').strip().splitlines()
+        model, mask = self.pages()['traps effective'], lambda line: re.sub(r'0X[0-9A-F]+', '0X#', line)  # noqa: E731
+        self.assertEqual(len(unit), 20)
+        self.assertTrue(all(re.fullmatch(r'PAYLOAD EL1TRAP [A-Z0-9 :\-./=?()_]*', line) and len(line) <= 100 for line in unit))
+        self.assertEqual([mask(line) for line in unit], [mask(line) for line in model], "the model's traps-effective page, with the unit's values")
+        self.assertEqual({i for i, (u, m) in enumerate(zip(unit, model)) if u != m}, {2, 3, 4, 5, 6, 12}, "only the unit's own six lines differ")
+        page = ' '.join(unit)
+        self.assertTrue(all(piece in page for piece in UNIT_VALUES))
+        value = lambda pattern: int(re.search(pattern, page).group(1), 16)  # noqa: E731
+        f, iss = built()
+        self.assertEqual([value(rf'{register} (?:CONTROL )?TRAPPED EC=0X18 ISS=0X([0-9A-F]+)') for register in ('CNTVCT_EL0', 'CNTV_CTL_EL0', 'CNTPCT_EL0')],
+                         [iss[0], iss[1], iss[3]], 'the ISS the unit gave are those of the built stub')
+        self.assertEqual((value(r'ENTRIES=0X([0-9A-F]+)'), value(r'TRAPS=0X([0-9A-F]+)'), page.count(' TRAPPED EC=')), (4, 3, 3), 'one entry per trapped read and one for the end')
+        old, written = value(r'OLD CNTHCTL_EL2=0X([0-9A-F]+)'), value(r'WRITES HCR_EL2=0X[0-9A-F]+ CNTHCTL_EL2=0X([0-9A-F]+)')
+        self.assertEqual((written, value(r'READBACK HCR_EL2=0X[0-9A-F]+ CNTHCTL_EL2=0X([0-9A-F]+)')), ((old & ~3) | (1 << 14) | (1 << 13),) * 2, "V is the monitor's formula, read back as written")
+        pfr0 = value(r'ID_AA64PFR0_EL1=0X([0-9A-F]+)')
+        self.assertEqual((value(r'ID_AA64MMFR0_EL1=0X([0-9A-F]+)') >> 60 & 15, value(r'ECV=0X([0-9A-F]+)'), pfr0 & 15, pfr0 >> 4 & 15, value(r' EL1=0X([0-9A-F]+)')), (2, 2, 1, 1, 1))
+        self.assertEqual(value(r'READBACK SCTLR_EL1=0X([0-9A-F]+)') ^ value(r'SCTLR_EL1=0X(30500800)'), 0x180, 'bits 7 and 8 differ')
+        self.assertEqual(value(r'OLD CNTHCTL_EL2=0X[0-9A-F]+ SCTLR_EL1=0X([0-9A-F]+)') & 0x180, 0x180, 'and are set in the old value too')
+        stub, el1, el2, el1_base = (value(rf'{key}=0X([0-9A-F]+)') for key in ('STUB_OFFSET', 'EL1_VECTORS_OFFSET', 'EL2_VECTORS_OFFSET', 'VBAR_EL1_OFFSET'))
+        self.assertEqual((el1 - el2, el1 % 2048, el2 % 2048, el1_base), (2048, 0, 0, el1))
+        self.assertTrue(el1 < stub < el1 + 2048 + 256 and stub < f['bytes'], 'the stub follows the EL1 table inside the image')
+        digest = f['sha256'][:16].upper()
+        self.says(f'`LOADED INDEX=1 BASE=0XCEA88000 BYTES={f["bytes"]} SHA={digest} TYPE=1`')
+        self.says(f'`CALL 1 {digest}`')
+        self.says('`DONE INDEX=1 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=20 DROPPED=0`')
+        results = read_doc('SP11-PAYLOAD-RESULTS.md')
+        panel = re.search(r'<!-- boot11-panel -->\n```\n(.*?)```\n<!-- /boot11-panel -->', results, re.S).group(1).splitlines()
+        self.assertEqual([line for line in panel if line.startswith('PAYLOAD EL1TRAP ')], unit, 'the results document carries the same lines')
+        section = self.flat[self.flat.index('## What the unit showed (boot 11)'):self.flat.index('## Authorisation and the stop rule')]
+        self.assertNotIn('VERIFIED', section, 'a hardware result is OBSERVED')
+        for phrase in ("**They are the unit's; the pages above and the QEMU page are models.**", 'What it shows, OBSERVED once (the decodes are INFERRED):',
+                       '**HVC works at EL2** (`HVC_AT_EL2=OK`; that `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear is INFERRED)',
+                       "**The first runner payload to run code below EL2 came back** (the X2 image's T02 had run an EL1 stub with an `ERET` path on the unit, 2026-11-11 and 2026-11-14, OBSERVED;",
+                       "Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read); boot 11 neither confirms nor refutes boot 4's explanation of the `timer` stall.",
+                       '**`SCTLR_EL1` read back `0x30500980` for `0x30500800` written:** bits 7 and 8 read 1 (INFERRED:',
+                       "the traps were measured for this payload's own `HCR_EL2` `0x80000000` and `SCTLR_EL1` `0x30500800`"):
+            self.assertIn(' '.join(phrase.split()), section)
+        self.assertNotRegex(self.flat, r'first code below EL2|does not fit|firmware sets `SCR_EL3\.ECVEn`|INFERRED to need|which no payload has done')
+
     def test_the_most_lines_and_the_numbers_are_the_sources(self):
         self.assertEqual(self.program('lines-report').strip(), f'LINES_MAX={driver.LINES_MAX}')
         self.says(f'At most {driver.LINES_MAX} lines')
@@ -342,6 +400,9 @@ class El1trapDocAgreement(unittest.TestCase):
         self.assertIn('the experiment is **void**: no answer about O1', void[2])
         self.assertNotIn('eliminated', void[2])
         self.assertIn('O1 undecided', hang[2])
+        observed = [row for row in decisions if row[1].startswith('**OBSERVED (boot 11)')]
+        self.assertEqual(observed, [effective], 'only the row the unit matched is marked OBSERVED')
+        self.says('INFERRED throughout, except the first row, marked **OBSERVED** (boot 11), and the four reads of [the stub table]')
         for word in ('NOT_RESTORED', 'RESTORED=NO', 'HVC_AT_EL2=FAILED', 'WRITE_NOT_HELD'):
             self.assertIn(word, self.code)
 
@@ -359,8 +420,14 @@ class El1trapDocAgreement(unittest.TestCase):
         self.says('stayed up for 224 s and 268 s in two boots')
         self.says('An EL1 excursion is a different kind of risk from a register write, and from a core power cycle.')
         self.says('that is QEMU, not the unit')
+        # Boot 11 is OBSERVED once; it neither confirms nor refutes the explanation of the stall, and it does not show what the EL3 setting is.
+        self.says("the unit's EL3 (UNKNOWN: whether `SCR_EL3.ECVEn` makes the bits do anything, what traps EL3 adds;")
+        self.says("Boot 11 ran it once and it came back (OBSERVED, one unit, one boot); what the unit's EL3 does with other accesses from EL1 is UNKNOWN.")
+        self.says('The `CNTPOFF_EL2` stall is INFERRED to come from an EL3 gate; boot 11 neither confirms nor refutes that.')
+        self.says('On the unit the payload returned to the runner and the page went on (boot 11), which does not show those five bits: UNKNOWN.')
+        self.says('Boot 11 answered the last question and the effect of the bits for its one regime')
 
-    # -- the QEMU block and the tests table ----------------------------------------------------------------------------------------
+    # -- the QEMU block and the tests table ------------------------------------------------------------------------------------------------------------
     def test_the_qemu_panel_has_the_shape_the_qemu_suite_asserts(self):
         lines = block(self.text, 'el1trap-qemu-panel').replace('```', '').strip().splitlines()
         self.assertEqual(len(lines), len(qemu.EFFECTIVE))
@@ -411,6 +478,15 @@ def _replace(old, new, count=1):
     return mutate
 
 
+def _in_unit_page(old, new):
+    """A change inside the unit's page block only (the model's pages above it have the same lines)."""
+    def mutate(doc):
+        start, end = doc.index('<!-- el1trap-unit-page -->'), doc.index('<!-- /el1trap-unit-page -->')
+        assert old in doc[start:end], old
+        return doc[:start] + doc[start:end].replace(old, new, 1) + doc[end:]
+    return mutate
+
+
 DOC_MUTANTS = [
     ('the-end-is-said-to-return-the-constant', _replace('the end of the excursion returns with `0x3C9` plus those of its bits', 'the end of the excursion returns with `0x3C9` and none of its bits')),
     ('the-unread-registers-are-said-to-be-read-back', _replace('are put back by the assembly and are **not** read back, and `RESTORED=YES` does not speak for them', 'are put back by the assembly and read back, and `RESTORED=YES` speaks for them')),
@@ -434,7 +510,7 @@ DOC_MUTANTS = [
     ('bit-13-is-renumbered', _replace('| 13 | `EL1TVT`', '| 15 | `EL1TVT`')),
     ('an-iss-is-wrong', _replace('| `mrs x0, cntvct_el0` | traps (`EL1TVCT`) | `0x34F801` |', '| `mrs x0, cntvct_el0` | traps (`EL1TVCT`) | `0x34F800` |')),
     ('cntfrq-is-said-to-trap', _replace('| `mrs x2, cntfrq_el0` | does not trap:', '| `mrs x2, cntfrq_el0` | traps:')),
-    ('the-stub-has-a-branch', _replace('| `hvc #0` | the stub is finished: returns to EL2 | - |\n', '| `b .` | the stub loops | - |\n')),
+    ('the-stub-has-a-branch', _replace('| `hvc #0` | the stub is finished: returns to EL2 | - | **OBSERVED:** `EXCURSION OK`, the fourth entry |\n', '| `b .` | the stub loops | - | **OBSERVED:** `EXCURSION OK`, the fourth entry |\n')),
     ('the-mrs-count-is-wrong', _replace('| 28 | context, read-backs', '| 27 | context, read-backs')),
     ('an-msr-count-is-wrong', _replace('`VBAR_EL2` 4, `ELR_EL2` 4,', '`VBAR_EL2` 3, `ELR_EL2` 4,')),
     ('the-hvc-immediates-are-wrong', _replace('`#1` 16, `#0` 1, `#2` 1', '`#1` 15, `#0` 1, `#2` 1')),
@@ -462,16 +538,47 @@ DOC_MUTANTS = [
     ('the-qemu-variant-count-is-wrong', _replace('ten copies of the source, each edited once', 'nine copies of the source, each edited once')),
     ('the-mutant-count-is-wrong', _replace(f'{len(driver.MUTANTS)} seeded-bug mutants', f'{len(driver.MUTANTS) + 1} seeded-bug mutants')),
     ('the-licence-line-goes', lambda doc: doc.split('\n', 1)[1]),
-    ('hardware-is-called-run', _replace('**EXPERIMENTAL; hardware NOT RUN.**', '**EXPERIMENTAL; hardware RUN.**')),
-    ('the-unit-is-said-to-have-been-observed', _replace('No value of this payload has been OBSERVED on the unit', 'Its values have been OBSERVED on the unit')),
+    ('the-unit-run-is-denied', _replace('**EXPERIMENTAL; ran once on the unit (', '**EXPERIMENTAL; hardware NOT RUN (')),
+    ('the-unit-is-said-to-have-been-observed-earlier', _replace('**No value of this payload was OBSERVED on the unit before boot 11.**', '**Its values were OBSERVED on the unit before boot 11.**')),
     ('a-run-is-authorised', _replace('No run is authorised by this document', 'A run is authorised by this document')),
     ('it-is-staged-after-any-answer', _replace('**only after** `cnthctl` printed `BITS13_14_STUCK=YES` with `RESTORED=YES`', '**after** `cnthctl` printed anything')),
     ('an-el3-setting-is-called-known', _replace("the unit's EL3 (UNKNOWN: whether `SCR_EL3.ECVEn`", "the unit's EL3 (known: whether `SCR_EL3.ECVEn`")),
     ('a-link-is-broken', _replace('(SP11-PAYLOAD-CNTHCTL.md) (T-HW1', '(SP11-PAYLOAD-CNTHCTL-X.md) (T-HW1')),
     ('an-anchor-is-broken', _replace('#the-chain-several-payloads-in-one-boot)', '#the-chain-several-payloads-in-one-boots)')),
     ('a-machine-identifier-appears', _replace('# SP11 payload `el1trap`', '# SP11 payload `el1trap` at /Us' + 'ers/x')),
+    # What the document says about the run of boot 11 (the mistakes in the unit's page itself are generated after the list).
+    ('the-unit-size-is-changed', _replace('BYTES=15156 SHA=5074712516C1CF08', 'BYTES=15157 SHA=5074712516C1CF08')),
+    ('the-unit-digest-is-changed', _replace('CALL 1 5074712516C1CF08', 'CALL 1 5074712516C1CF09')),
+    ('the-unit-line-count-is-changed', _replace('REFUSED=0 LINES=20 DROPPED=0', 'REFUSED=0 LINES=21 DROPPED=0')),
+    ('the-unit-page-is-called-the-models', _replace('the pages above and the QEMU page are models.**', "the pages above and the QEMU page are the unit's.**")),
+    ('the-effective-row-is-not-marked-observed', _replace('**OBSERVED (boot 11): `ENTRIES=0X4 TRAPS=0X3`.** ', '')),
+    ('another-row-is-marked-observed', _replace('| the bits read back as written', '| **OBSERVED (boot 11): the bits read back as written')),
+    ('a-stub-row-is-not-observed', _replace('**OBSERVED:** not trapped, value `0x124F800`', '**OBSERVED:** trapped, ISS `0x30F841`')),
+    ('a-stub-row-is-denied', _replace('| **OBSERVED:** `EXCURSION OK`, the fourth entry |', '| the stub did not finish |')),
+    ('the-first-runner-payload-becomes-the-first-code-on-the-unit', _replace('**The first runner payload to run code below EL2 came back**', '**The first code below EL2 run on the unit came back**')),
+    ('the-t02-citation-is-denied', _replace('T02 had run', 'T02 had not run')),
+    ('the-ecven-dependence-is-called-known', _replace('Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read)', 'The firmware sets `SCR_EL3.ECVEn`')),
+    ('the-timer-stall-is-called-explained', _replace("boot 11 neither\n  confirms nor refutes boot 4's explanation of the `timer` stall.", "boot 11 explains boot 4's `timer` stall.")),
+    ('the-hvc-claim-is-called-known', _replace('(`HVC_AT_EL2=OK`; that `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear is INFERRED)', '(`HVC_AT_EL2=OK`; `SCR_EL3.HCE` is set and `HCR_EL2.HCD` clear)')),
+    ('the-staging-is-called-as-proposed', _replace('That is not what this document proposed', 'That is what this document proposed')),
+    ('the-rule-change-is-not-the-operators', _replace("**that changed the documented rule by the\noperator's decision for that boot**", '**that followed the documented rule**')),
+    ('the-status-is-called-not-run-again', _replace('EXPERIMENTAL. Ran once on the unit (boot 11', 'EXPERIMENTAL. Hardware NOT RUN. Ran once on the unit (boot 11')),
+    ('the-writes-are-called-unknown-again', _replace('**The writes held once on this unit**', '**The writes are UNKNOWN on this unit.**')),
+    ('the-excursion-risk-is-called-untried', _replace('once and it came back (OBSERVED, one unit, one boot)', 'has never been tried')),
+    ('the-authorisation-says-no-payload-has-done-it', _replace('payload had done before boot 11.', 'payload has done.')),
     ('the-document-is-too-big', lambda doc: doc + '\n' + 'x' * 52000),
 ]
+DOC_MUTANTS += [(f'the-unit-{name}', _in_unit_page(old, new)) for name, old, new in (
+    ('id-register-is-the-models', 'ID_AA64MMFR0_EL1=0X2100122100001024', 'ID_AA64MMFR0_EL1=0X2100032310201126'), ('ecv-field-is-changed', 'ECV=0X2', 'ECV=0X0'),
+    ('pfr0-is-changed', 'ID_AA64PFR0_EL1=0X1201201023111111 EL1=0X1', 'ID_AA64PFR0_EL1=0X1201201023111111 EL1=0X2'),
+    ('old-sctlr-is-changed', 'SCTLR_EL1=0X100030D0198D', 'SCTLR_EL1=0X100030D0198C'), ('old-vbar-is-changed', 'OLD VBAR_EL1=0XA7004000', 'OLD VBAR_EL1=0XA7004001'),
+    ('written-hcr-is-changed', 'WRITES HCR_EL2=0X80000000', 'WRITES HCR_EL2=0X88000000'), ('layout-is-unaligned', 'EL2_VECTORS_OFFSET=0X800', 'EL2_VECTORS_OFFSET=0X801'),
+    ('sctlr-readback-is-the-written-value', 'READBACK SCTLR_EL1=0X30500980', 'READBACK SCTLR_EL1=0X30500800'), ('hvc-is-failed', 'HVC_AT_EL2=OK', 'HVC_AT_EL2=FAILED'),
+    ('entries-are-changed', 'ENTRIES=0X4', 'ENTRIES=0X3'), ('traps-are-changed', 'TRAPS=0X3', 'TRAPS=0X4'), ('counter-iss-is-changed', 'ISS=0X34F801', 'ISS=0X34F800'),
+    ('timer-iss-is-changed', 'ISS=0X32F827', 'ISS=0X32F825'), ('control-iss-is-changed', 'ISS=0X32F861', 'ISS=0X32F860'),
+    ('frequency-read-is-trapped', 'CNTFRQ_EL0 NOT_TRAPPED VALUE=0X124F800', 'CNTFRQ_EL0 TRAPPED EC=0X18 ISS=0X30F841 ISS_OK=YES'),
+    ('verdict-is-inert', 'VERDICT=TRAPS_EFFECTIVE', 'VERDICT=TRAPS_INERT'), ('restore-verdict-is-changed', 'RESTORED=YES', 'RESTORED=NO'),
+    ('page-loses-a-line', 'PAYLOAD EL1TRAP NEXT EL1 EXCURSION AFTER 8 S\n', ''))]
 
 
 class El1trapDocMutants(unittest.TestCase):

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """docs/SP11-PAYLOAD-CNTHCTL.md against the source, the host model and the binary of the cnthctl payload, and the same agreement
-tests against 43 seeded mistakes in the document.
+tests against 67 seeded mistakes in the document.
 
     python3 tools/test-q1n1-sp11-payload-cnthctl-doc.py
 
 What it holds the document to: the house rules (the licence line, the size limit, no machine identifier, the evidence labels,
-hardware NOT RUN, no run authorised); the write table, the bit table and the instruction table against the source and the built
+the unit's one run said as it was, no run authorised); the write table, the bit table and the instruction table against the source and the built
 binary (the encoding of `msr cnthctl_el2` is read from llvm-mc, not from the allow-list); the pages against what the host program
-prints; every keyword the payload can print against the document and every keyword of the line catalogue against the payload; the
-decision table (which outcome kills O1, which leaves it open); the numbers (eight seconds, the frequency bounds, the stuck-counter
-read count, the most lines); the chain arithmetic against the runner's planning table; the QEMU panel's shape; the counts of the
-tests table; the authorisation, the stop rule and the staging plan. Writes only under build/. Hardware: NOT RUN."""
+prints; the unit's page of boot 11 (the model's normal page with the unit's own ID register, the arithmetic of its values, the size and digest of
+the built binary, the same lines in the results document); every keyword the payload can print against the document and every keyword of the
+line catalogue against the payload; the decision table (which outcome kills O1, which leaves it open, which row the unit matched); the numbers
+(eight seconds, the frequency bounds, the stuck-counter read count, the most lines); the chain arithmetic against the runner's planning table;
+the QEMU panel's shape; the counts of the tests table; the authorisation, the stop rule and the staging plan (what was done in boot 11).
+Writes only under build/. Hardware: NOT RUN (this checks a document)."""
 import re
 import sys
 import unittest
@@ -79,9 +81,12 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.assertLess(len(self.text.encode('utf-8')), 50 * 1024)
         for label in ('VERIFIED', 'OBSERVED', 'INFERRED', 'EXPERIMENTAL', 'UNIMPLEMENTED', 'UNKNOWN'):
             self.assertIn(label, self.text)
-        self.assertIn('hardware NOT RUN', self.text)
-        self.says('**EXPERIMENTAL; hardware NOT RUN.**')
-        self.says('no value of this payload has been OBSERVED on the unit')
+        self.assertIn('ran once on the unit', self.text)
+        self.says('**EXPERIMENTAL; ran once on the unit (2026-11-16, boot 11, in one boot with `el1trap`; one unit, one boot).**')
+        self.says('no value of this payload was OBSERVED on the unit before boot 11')
+        for stale in ('**EXPERIMENTAL; hardware NOT RUN.**', 'no value of this payload has been OBSERVED on the unit', 'None of these is measured: hardware NOT RUN',
+                      'but no payload has written it', "The unit's rows of the decision table are UNKNOWN", 'EXPERIMENTAL. Hardware NOT RUN.'):
+            self.assertNotIn(stale, self.flat)
         paths = '|'.join(['/Us' + 'ers/', '/ho' + 'me/', '/Vol' + 'umes/'])
         pattern = re.compile(paths + r'|\.loc' + r'al\b|\bsae' + r'ed\b|host' + r'name|\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b', re.I)
         for number, line in enumerate(self.text.splitlines(), 1):
@@ -106,7 +111,14 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.assertIn('build/stick/SP11/PAYLOAD.MAN', self.text)
         self.assertIn('build/stick/SP11/CNTHCTL.BIN', self.text)
         self.assertIn('python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/cnthctl.bin', self.text)
-        self.says('Status of the staging: **proposed, NOT RUN**.')
+        # What was done in boot 11: one boot and one manifest for both payloads, by the operator's decision; the stop rules stand.
+        self.says('Boot 11 (2026-11-16) ran `cnthctl` and `el1trap` in **one boot**: one stick, one manifest (624 bytes) listing `CNTHCTL.BIN` then `EL1TRAP.BIN`')
+        self.says("That is not what this document proposed")
+        self.says("that changed the documented rule by the operator's decision for that boot")
+        self.says('The stop rules above stand for every later run, and none was triggered.')
+        self.says("**boot 11 ran both payloads in one boot by the operator's decision; the one-payload proposal was not run.**")
+        self.assertNotIn('Status of the staging: **proposed, NOT RUN**.', self.flat)
+        self.assertNotIn('only runs after this one', self.flat)
 
     # -- the write, the bits, the instructions -----------------------------------------------------------------------------------
     def test_the_write_table_is_the_sources_three_writes_and_the_encoding_is_llvm_mcs(self):
@@ -137,13 +149,16 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.assertIn('`ECV`', table['12'][1])
         self.says('`V = (OLD & ~3) | (1 << 14) | (1 << 13)`')
 
-    def test_the_instruction_table_is_the_binary(self):
+    def facts(self):
         driver.need_tools()
         if not _BINARY_FACTS:
             done, elf, flat = driver.Builder(driver.BUILD / 'doc-binary').build('cnthctl', 'cnthctl', [])
             self.assertEqual(done.returncode, 0, done.stderr)
             _BINARY_FACTS.append(driver.facts(elf, flat))
-        f = _BINARY_FACTS[0]
+        return _BINARY_FACTS[0]
+
+    def test_the_instruction_table_is_the_binary(self):
+        f = self.facts()
         section = block(self.text, 'cnthctl-instructions')
         self.assertIn('| `MSR` | `CNTHCTL_EL2`, 1 site |', section)
         self.assertEqual(dict(f['msr']), {'cnthctl_el2': 1})
@@ -198,6 +213,40 @@ class CnthctlDocAgreement(unittest.TestCase):
                 self.assertEqual(pages[title][:4], first[:4], 'the first four lines are the same in every world')
         # A stuck-but-inert machine prints the first page: the host suite asserts it, the document says it.
         self.says('prints exactly the first page')
+
+    def test_the_units_page_has_the_models_shape_with_the_units_values_and_the_arithmetic_holds(self):
+        unit = block(self.text, 'cnthctl-unit-page').replace('```', '').strip().splitlines()
+        model = self.pages()['bits stick']
+        self.assertEqual(len(unit), 8)
+        for line in unit:
+            self.assertRegex(line, r'^PAYLOAD CNTHCTL [A-Z0-9 :\-./=?()_]*$')
+            self.assertLessEqual(len(line), 100)
+        self.assertEqual([line for i, line in enumerate(unit) if i != 1], [line for i, line in enumerate(model) if i != 1],
+                         'the unit prints the lines of the normal page of the model, but for the ID register')
+        page = ' '.join(unit)
+        value = lambda key: int(re.search(rf'\b{key}=0X([0-9A-F]+)', page).group(1), 16)  # noqa: E731
+        old, v, r, r2, idreg = (value(key) for key in ('OLD', 'V', 'R', 'R2', 'ID_AA64MMFR0_EL1'))
+        self.assertEqual((old, v, r, r2, idreg), (0x3, 0x6000, 0x6000, 0x3, 0x2100122100001024))
+        self.assertEqual(v, (old & ~3) | (1 << 14) | (1 << 13), "V is the monitor's formula")
+        self.assertEqual((r >> 13 & 3, r == v, r2 == old), (3, True, True), 'BITS13_14_STUCK=YES, R_EQ_V=YES and RESTORED=YES follow from the values')
+        self.assertEqual(idreg >> 60 & 15, value('ECV'))
+        self.assertEqual(value('CNTFRQ_EL0'), 19200000)
+        f = self.facts()
+        digest = f['sha256'][:16].upper()
+        self.says(f'`LOADED INDEX=0 BASE=0XCEA8D000 BYTES={f["bytes"]} SHA={digest} TYPE=1`')
+        self.says(f'`CALL 0 {digest}`')
+        self.says('`DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0`')
+        results = read_doc('SP11-PAYLOAD-RESULTS.md')
+        panel = re.search(r'<!-- boot11-panel -->\n```\n(.*?)```\n<!-- /boot11-panel -->', results, re.S).group(1).splitlines()
+        self.assertEqual([line for line in panel if line.startswith('PAYLOAD CNTHCTL ')], unit, 'the results document carries the same lines')
+        section = self.flat[self.flat.index('## What the unit showed (boot 11)'):self.flat.index('## Authorisation and the stop rule')]
+        self.assertNotIn('VERIFIED', section, 'a hardware result is OBSERVED')
+        for phrase in ("**They are the unit's; the pages above are the model's.**", 'What it shows, OBSERVED once:',
+                       'V is `0x6000`, R reads `0x6000` (`BITS13_14_STUCK=YES R_EQ_V=YES`)', 'The old value came back (`R2=0X3`, `RESTORED=YES`)',
+                       "the unit's own value of `ID_AA64MMFR0_EL1` (`0X2100122100001024`, ECV 2, against the model's `0X2100032310201126`)",
+                       '`CNTFRQ_EL0` `0x124F800` (19.2 MHz)', 'the video runs 61 s', 'is the first of [the decision table]', 'now marked OBSERVED',
+                       'O1 stays not decided here', 'Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read).'):
+            self.assertIn(' '.join(phrase.split()), section)
 
     def test_the_most_lines_and_the_numbers_are_the_sources(self):
         self.assertEqual(self.program('lines-report').strip(), f'LINES_MAX={driver.LINES_MAX}')
@@ -257,6 +306,9 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.assertIn('**O1 is eliminated**', no[2])
         self.assertIn('eliminated', partial[2])
         self.assertIn('**O1 is eliminated**', hang[2])
+        observed = [row for row in decisions if row[1].startswith('**OBSERVED (boot 11)')]
+        self.assertEqual(observed, [yes], 'only the row the unit matched is marked OBSERVED')
+        self.says('INFERRED throughout, except the row marked **OBSERVED** (boot 11); every other row was not reached.')
         for word in ('NOT_RESTORED', 'RESTORED=NO'):
             self.assertIn(word, self.code)
 
@@ -270,6 +322,9 @@ class CnthctlDocAgreement(unittest.TestCase):
         self.says('INFERRED from the architecture, which was not re-read')
         self.says('INFERRED, for example by `SCR_EL3.ECVEn` clear, which no payload can read')
         self.says('A write of `CNTHCTL_EL2` at EL2 is an ordinary EL2 access')
+        self.says('**The write was OBSERVED once on this unit (boot 11), which does not make it safe in general.**')
+        self.says('boot 11 neither confirms nor refutes that, and whether bits 13 and 14 depend on that gate is UNKNOWN')
+        self.assertNotRegex(self.flat, r'INFERRED to need that gate|the two inferences do not fit', 'boot 11 does not show that bits 13 and 14 need ECVEn')
         for at in re.finditer(r'ECVEn', self.flat):
             self.assertRegex(self.flat[max(0, at.start() - 200):at.end() + 200], r'INFERRED|UNKNOWN', 'ECVEn is said as a fact')
         self.assertNotRegex(self.flat, r'(?i)OBSERVED[^.]{0,80}\bbits? 13\b')
@@ -304,7 +359,8 @@ class CnthctlDocAgreement(unittest.TestCase):
     def test_the_other_documents_are_the_ones_it_names(self):
         for name in ('SP11-PAYLOAD.md', 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-CPUON.md'):
             self.assertTrue((ROOT / 'docs' / name).exists(), name)
-        self.says('Its successor, [`el1trap`](SP11-PAYLOAD-EL1TRAP.md), is T-HW2 and only runs after this one.')
+        self.says("Its successor, [`el1trap`](SP11-PAYLOAD-EL1TRAP.md), is T-HW2; the documents proposed it only after this one's page was read, "
+                  'and the operator ran both in that one boot.')
 
 
 # ---- seeded mistakes in the document --------------------------------------------------------------------------------------------
@@ -313,6 +369,15 @@ def _replace(old, new, count=1):
     def mutate(doc):
         assert old in doc, old
         return doc.replace(old, new, count)
+    return mutate
+
+
+def _in_unit_page(old, new):
+    """A change inside the unit's page block only (the model's pages above it have the same lines)."""
+    def mutate(doc):
+        start, end = doc.index('<!-- cnthctl-unit-page -->'), doc.index('<!-- /cnthctl-unit-page -->')
+        assert old in doc[start:end], old
+        return doc[:start] + doc[start:end].replace(old, new, 1) + doc[end:]
     return mutate
 
 
@@ -351,8 +416,8 @@ DOC_MUTANTS = [
     ('the-mutant-count-is-wrong', _replace(f'{len(driver.MUTANTS)} seeded-bug mutants', f'{len(driver.MUTANTS) + 1} seeded-bug mutants')),
     ('the-bad-binary-count-is-wrong', _replace(f'{len(driver.BAD_BINARIES)} seeded bad binaries', f'{len(driver.BAD_BINARIES) - 1} seeded bad binaries')),
     ('the-licence-line-goes', lambda doc: doc.split('\n', 1)[1]),
-    ('hardware-is-called-run', _replace('**EXPERIMENTAL; hardware NOT RUN.**', '**EXPERIMENTAL; hardware RUN.**')),
-    ('the-unit-is-said-to-have-been-observed', _replace('no value of this payload has been OBSERVED on the unit', 'its values have been OBSERVED on the unit')),
+    ('the-unit-run-is-denied', _replace('**EXPERIMENTAL; ran once on the unit (', '**EXPERIMENTAL; hardware NOT RUN (')),
+    ('the-unit-is-said-to-have-been-observed-earlier', _replace('**no value of this payload was OBSERVED on the\nunit before boot 11**', '**its values were OBSERVED on the\nunit before boot 11**')),
     ('a-run-is-authorised', _replace('No run is authorised by this document', 'A run is authorised by this document')),
     ('the-stop-rule-forgets-the-restore', _replace('`RESTORED=NO` or `NOT_RESTORED`; a page', 'a page')),
     ('it-is-staged-with-psci', _replace('`cnthctl` **alone** on its stick', '`cnthctl` after `psci` on its stick')),
@@ -361,6 +426,31 @@ DOC_MUTANTS = [
     ('a-link-is-broken', _replace('(SP11-PAYLOAD-TIMER.md)', '(SP11-PAYLOAD-TIMER-X.md)')),
     ('an-anchor-is-broken', _replace('#the-chain-several-payloads-in-one-boot)', '#the-chain-several-payloads-in-one-boots)')),
     ('a-machine-identifier-appears', _replace('# SP11 payload `cnthctl`', '# SP11 payload `cnthctl` at /Us' + 'ers/x')),
+    # The unit's page and what the document says about the run of boot 11.
+    ('the-unit-old-value-is-changed', _in_unit_page('CNTHCTL_EL2 OLD=0X3', 'CNTHCTL_EL2 OLD=0X1')),
+    ('the-unit-written-value-is-changed', _in_unit_page('OLD=0X3 V=0X6000', 'OLD=0X3 V=0X4000')),
+    ('the-unit-readback-is-changed', _in_unit_page('R=0X6000 R2=0X3', 'R=0X4000 R2=0X3')),
+    ('the-unit-restore-readback-is-changed', _in_unit_page('R=0X6000 R2=0X3', 'R=0X6000 R2=0X1')),
+    ('the-unit-stuck-verdict-is-changed', _in_unit_page('BITS13_14_STUCK=YES', 'BITS13_14_STUCK=NO')),
+    ('the-unit-equality-verdict-is-changed', _in_unit_page('R_EQ_V=YES', 'R_EQ_V=NO')),
+    ('the-unit-restore-verdict-is-changed', _in_unit_page('RESTORED=YES', 'RESTORED=NO')),
+    ('the-unit-ecv-field-is-changed', _in_unit_page('ECV=0X2', 'ECV=0X0')),
+    ('the-unit-id-register-is-the-models', _in_unit_page('ID_AA64MMFR0_EL1=0X2100122100001024', 'ID_AA64MMFR0_EL1=0X2100032310201126')),
+    ('the-unit-frequency-is-the-qemus', _in_unit_page('CNTFRQ_EL0=0X124F800', 'CNTFRQ_EL0=0X3B9ACA00')),
+    ('the-unit-page-loses-a-line', _in_unit_page('PAYLOAD CNTHCTL NEXT CNTHCTL_EL2 WRITE AFTER 8 S\n', '')),
+    ('the-unit-size-is-changed', _replace('BYTES=3094 SHA=9F06B31DA4BDC395', 'BYTES=3095 SHA=9F06B31DA4BDC395')),
+    ('the-unit-digest-is-changed', _replace('CALL 0 9F06B31DA4BDC395', 'CALL 0 9F06B31DA4BDC396')),
+    ('the-unit-line-count-is-changed', _replace('REFUSED=0 LINES=8 DROPPED=0', 'REFUSED=0 LINES=9 DROPPED=0')),
+    ('the-unit-page-is-called-the-models', _replace("the pages above are the model's.**", "the pages above are the unit's.**")),
+    ('the-unit-row-is-not-marked-observed', _replace('**OBSERVED (boot 11): `OLD=0X3 V=0X6000`, `R=0X6000 R2=0X3`.** ', '')),
+    ('another-row-is-marked-observed', _replace('| `BITS13_14_STUCK=NO`, `RESTORED=YES` | bits 13 and 14 read back as zero', '| `BITS13_14_STUCK=NO`, `RESTORED=YES` | **OBSERVED (boot 11): bits 13 and 14 read back as zero')),
+    ('the-staging-is-called-as-proposed', _replace('That is not\nwhat this document proposed', 'That is\nwhat this document proposed')),
+    ('the-rule-change-is-not-the-operators', _replace("that changed the documented rule by the operator's decision for that boot", 'that followed the documented rule')),
+    ('the-status-is-called-not-run-again', _replace('EXPERIMENTAL. Ran once on the unit (boot 11', 'EXPERIMENTAL. Hardware NOT RUN. Ran once on the unit (boot 11')),
+    ('the-write-is-called-unknown-again', _replace('**The write was OBSERVED once on this unit (boot 11), which does not make it safe in general.**', '**The write itself is UNKNOWN on this unit.**')),
+    ('the-ecven-inference-is-called-known', _replace('boot 11 neither confirms nor refutes that, and whether bits 13 and 14 depend on that gate is UNKNOWN', 'boot 11 shows that bits 13 and 14 need that gate open')),
+    ('the-ecven-dependence-is-called-known', _replace('Whether bits 13 and 14 depend on `SCR_EL3.ECVEn` is UNKNOWN (the Arm ARM was not re-read).', 'Bits 13 and 14 depend on `SCR_EL3.ECVEn`.')),
+    ('the-successor-is-run-after-this-one-again', _replace("is T-HW2; the documents proposed it only after this one's page was read, and the operator ran both in that one boot.", 'is T-HW2 and only runs after this one.')),
     ('the-document-is-too-big', lambda doc: doc + '\n' + 'x' * 52000),
 ]
 
