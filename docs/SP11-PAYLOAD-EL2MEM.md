@@ -7,19 +7,21 @@ and the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-o
 [`state`](SP11-PAYLOAD-STATE.md), which reads EL2's registers, and [`cpuon`](SP11-PAYLOAD-CPUON.md), whose `NEXT` line and eight
 seconds of counter it reuses before the reads that may go to EL3; its companion is [`hashbig`](SP11-PAYLOAD-HASHBIG.md), with
 which it shares the code that asks the MMU and reads the memory map (`payloads/payload-mmu.h`) and a chain. Evidence labels as
-there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; hardware NOT RUN.**
+there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN. **EXPERIMENTAL; it ran on the unit twice (boots 8 and 9,
+2026-11-16): OBSERVED, one unit, two boots.**
 
 `el2mem` is **read only** and asks the machine two things the monitor port needs before it can place itself (the monitor-port
 document of the Snapintosh repository, work item 2, unknowns U1 and U5):
 
 1. **Does the EL2 stage-1 map that UEFI and slbounce left reach the conventional RAM a monitor would use**, in particular the
-   30 GiB bank `0x880000000` to `0x1000000000`, and with which memory attributes? Nothing has shown it. `AT S1E2R` answers without
-   touching the memory at the address: the MMU walks EL2's tables and reports in `PAR_EL1`.
-2. **A handful of registers the monitor reads at launch** and no page has shown: `ID_AA64DFR1_EL1`, `ID_AA64ISAR2_EL1`,
-   `ID_AA64MMFR1_EL1` (its PAN field was never read cleanly: a photographed value failed its CRC check), `ID_AA64PFR2_EL1`,
-   `AIDR_EL1`, `REVIDR_EL1`, `MDCR_EL2`, `MDSCR_EL1`, `OSLSR_EL1` and `ICC_SRE_EL2`.
+   30 GiB bank `0x880000000` to `0x1000000000`, and with which memory attributes? Nothing had shown it before boots 8 and 9
+   ([below](#what-the-unit-showed-boots-8-and-9)). `AT S1E2R` answers without touching the memory at the address: the MMU walks
+   EL2's tables and reports in `PAR_EL1`.
+2. **A handful of registers the monitor reads at launch** and no page had shown before boots 8 and 9: `ID_AA64DFR1_EL1`,
+   `ID_AA64ISAR2_EL1`, `ID_AA64MMFR1_EL1` (its PAN field had never been read cleanly: a photographed value failed its CRC check),
+   `ID_AA64PFR2_EL1`, `AIDR_EL1`, `REVIDR_EL1`, `MDCR_EL2`, `MDSCR_EL1`, `OSLSR_EL1` and `ICC_SRE_EL2`.
 
-**No value of this payload has been OBSERVED on the unit.** What the design rests on, OBSERVED on earlier runs
+**No value of this payload had been OBSERVED on the unit before boots 8 and 9.** What the design rested on, OBSERVED on earlier runs
 ([the results](SP11-PAYLOAD-RESULTS.md)): q1n1 runs at EL2 with `HCR_EL2` E2H 0, `SCTLR_EL2` `0x0000100030C5183D` (MMU and caches
 on), `TCR_EL2` `0x80843514`, `MAIR_EL2` `0xFFBB4400` (attribute 0 `0x00` Device, 1 `0x44` non-cacheable, 2 `0xBB` write-through,
 3 `0xFF` write-back) and `CNTFRQ_EL0` `0x124F800` (19.2 MHz); and the final memory map of boot 6 held 32,105 MiB of Conventional
@@ -52,7 +54,8 @@ memory, the 30 GiB bank among it (the monitor-port document). The largest low ex
 7. **The ID registers that cannot trap** (INFERRED): one `ID` group with the registers above, and the three fields of
    `ID_AA64MMFR1_EL1` the monitor's launch checks ask about, decoded: `PAN` (bits 23:20), `VH` (11:8), `HAFDBS` (3:0).
 8. **The three reads that may go to EL3**, last: `MDSCR_EL1`, `OSLSR_EL1`, `ICC_SRE_EL2` (INFERRED: `MDCR_EL3.TDA`, `MDCR_EL3.TDOSA`
-   and `ICC_SRE_EL3.Enable` may route them there; none was ever tried on this unit). Each is preceded by `NEXT <REG> AFTER 8 S` and
+   and `ICC_SRE_EL3.Enable` may route them there; none had been tried on this unit before boots 8 and 9, where all three
+   returned). Each is preceded by `NEXT <REG> AFTER 8 S` and
    eight seconds of waiting on the counter, so a hang or a reset leaves a page that was photographed and names the register. A wait
    that cannot be made (no counter op, or a counter that does not run or runs backwards) means the read is **not** made
    (`SKIPPED=NO_COUNTER` or `SKIPPED=COUNTER_STUCK`).
@@ -205,30 +208,87 @@ The worst page the host tests measure over every world they script is the full 2
 non-cacheable and faulting runs, a page that is not an identity map, a fault in the low extent and a load that aborts); a page built
 with only 14 or 10 lines drops lines and counts them, and never drops a `NEXT` line or the last one.
 
+## What the unit showed (boots 8 and 9)
+
+OBSERVED on the unit, 2026-11-16, in two boots of the `memhash` plan (two autorun steps, each `hashbig`, then `el2mem`, with a 144 MiB
+data file: [the staging plan](#the-staging-plan-as-run-boots-8-and-9); [the results](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9)
+have the whole page, the timing and what was not shown). One unit, two boots; the values were read by hand from the last frame of a
+video each and are not CRC-checked. The page below is boot 9's; boot 8's differs only in the four words of the two `LOAD` lines
+(`0X59ADB1EB`, `0XF30F158`, `0X380001`, `0XEC6A2481`). The host-model page above and the QEMU page below are **models**; this one is
+the unit's.
+
+<!-- el2mem-unit-page -->
+```
+PAYLOAD EL2MEM START CURRENTEL=0X8 FREQ=19200000
+PAYLOAD EL2MEM MAP DESC=234 STRIDE=48 CONV_EXTENTS=17 CONV_MIB=31961
+PAYLOAD EL2MEM KEY RESULT=WB.OS.NS1 PROBES=16014 FIRST=0X815A0000 LAST=0XFFFFFF000
+PAYLOAD EL2MEM SCAN EXTENTS=17 PROBES=16014 ALL=MAPPED ATTR=WB SH=OS NS=1
+PAYLOAD EL2MEM BANK CONV_MIB=30720 PROBES=15361 ALL=MAPPED RESULT=WB.OS.NS1
+PAYLOAD EL2MEM CONTROL T1=WB.OS.NS1 T2=WB.OS.NS1 T3=WB.OS.NS1 T4=WB.OS.NS1 T5=WB.OS.NS1 T6=WB.OS.NS1
+PAYLOAD EL2MEM CONTROL CODE=WB.OS.NS1 STACK=WB.OS.NS1
+PAYLOAD EL2MEM LOAD BANK_FIRST(0X880000000)=0X1F8A08BE BANK_LAST(0XFFFFFFFFC)=0X9F6636DA
+PAYLOAD EL2MEM LOAD LOW_FIRST(0XA8000000)=0X380001 LOW_LAST(0XC3E64FFC)=0X1D11B2F9
+PAYLOAD EL2MEM ID DFR1=0X0 ISAR2=0X10000012 MMFR1=0X111111312120 PAN=3 VH=1 HAFDBS=0 PFR2=0X0
+PAYLOAD EL2MEM ID AIDR=0X0 REVIDR=0X0 MDCR_EL2=0X6
+PAYLOAD EL2MEM NEXT MDSCR_EL1 AFTER 8 S
+PAYLOAD EL2MEM MDSCR_EL1 RAW=0X0
+PAYLOAD EL2MEM NEXT OSLSR_EL1 AFTER 8 S
+PAYLOAD EL2MEM OSLSR_EL1 RAW=0X8 OSLK=0
+PAYLOAD EL2MEM NEXT ICC_SRE_EL2 AFTER 8 S
+PAYLOAD EL2MEM ICC_SRE_EL2 RAW=0XF SRE=1 ENABLE=1
+PAYLOAD EL2MEM DONE SCAN_ALL_MAPPED LOADS_OK=4 OF=4 HAZARD_READS=3
+```
+<!-- /el2mem-unit-page -->
+
+The runner's own `DONE` line closed it: `RETURN=0X0 STACK=OK LOADS=4 FAULTS=0 REFUSED=0 LINES=18 DROPPED=0`. All 18 lines were printed (of
+the 26 allowed), none dropped, no `SUPPRESSED`.
+
+* **The bank is mapped and readable (U1: yes, for reads).** The 17 merged Conventional extents (31,961 MiB, in a map of 234
+  descriptors, the count q1n1's own page printed) were probed 16,014 times and every probe was mapped with one result, `WB.OS.NS1`:
+  Normal write-back, outer-shareable, `PAR_EL1.NS` set. The bank alone, `0x880000000` to `0x1000000000` (30,720 MiB, 15,361 probes),
+  answered the same, and the four guarded loads (the bank's first and last word, the first and last word of the low extent) all
+  answered. The host model prints `WB.IS` and QEMU `WB.IS.NS1`: inner-shareable is not what the unit printed. No `OUTLIER` line was
+  printed, so no run of another result was found at the method's resolution (2 MiB), and the controls (`T1` to `T6`, `CODE`, `STACK`)
+  read the same: the method answered `mapped` where memory is certainly in use.
+* **What it did not ask.** `AT S1E2R` and loads only. Whether the bank is writable at EL2 stage 1 (`AT S1E2W`) is UNKNOWN, and so is
+  whether a cache clean reaches DRAM there.
+* **The low extent ends where `BIG.DAT` begins.** `LOW_LAST` is `0xC3E64FFC`, the last word before `0xC3E65000`, the base
+  [`hashbig`](SP11-PAYLOAD-HASHBIG.md#what-the-unit-showed-boots-8-and-9) found for the file: 446 MiB remain below it from `LOW_FIRST`,
+  `0xA8000000` (arithmetic). `CONV_MIB=31961` is boot 6's 32,105 less 144, the file's size (arithmetic; that the difference is the
+  file is INFERRED).
+* **The ID registers, the first values the unit has printed for them.** `MMFR1` `0x111111312120` with the payload's own decode
+  `PAN=3 VH=1 HAFDBS=0`, which agrees with the nibbles of the raw value (a consistency check of the reading, not a CRC); `ISAR2`
+  `0x10000012`; `DFR1`, `PFR2`, `AIDR` and `REVIDR` all `0x0`; `MDCR_EL2` `0x6`. The decode of their other fields is INFERRED (the
+  Arm ARM was not re-read) and is in [the results](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9).
+* **The three reads that may go to EL3 returned**, each after its eight seconds: `MDSCR_EL1` `0x0`, `OSLSR_EL1` `0x8` (`OSLK=0`: the
+  OS lock is not set) and `ICC_SRE_EL2` `0xF` (`SRE=1 ENABLE=1`). No hang, no reset, no fault page: the page reached `DONE`
+  (`HAZARD_READS=3`). That none was trapped to EL3 and emulated there is INFERRED: an EL3 handler that emulated a read would look the same.
+
 ## What each outcome means for the monitor
 
-INFERRED throughout: nothing below has been observed on the unit. The "next step" is a proposal for a separate, authorized change,
-never something this payload does.
+INFERRED throughout, except that a row whose outcome the unit printed says OBSERVED at the start of its second column (boots 8 and 9,
+[above](#what-the-unit-showed-boots-8-and-9)): the outcome is OBSERVED and its meaning stays INFERRED. The "next step" is a proposal
+for a separate, authorized change, never something this payload does.
 
 <!-- el2mem-decisions -->
 | Outcome on the page | What it means | Next step |
 | --- | --- | --- |
-| `BANK CONV_MIB=30720 ... ALL=MAPPED RESULT=WB.IS`, and `LOAD BANK_FIRST(...)=0X..` with a value | EL2's stage-1 reaches the whole bank as Normal write-back inner-shareable memory and a load there answers: U1 is answered yes for the bank, and a monitor placed there needs no map of its own | placement in the bank (the monitor-port decision D1) is open; U7 (a guest in the bank) still needs its own run |
+| `BANK CONV_MIB=30720 ... ALL=MAPPED RESULT=WB.IS` (`WB.OS.NS1` on the unit), and `LOAD BANK_FIRST(...)=0X..` with a value | OBSERVED (boots 8 and 9, `RESULT=WB.OS.NS1`): EL2's stage-1 reaches the whole bank as Normal write-back memory (outer-shareable on the unit) and a load there answers: U1 is answered yes for reads of the bank; a monitor placed there needs no map of its own only if the bank is also writable, which no payload has asked (UNKNOWN) | placement in the bank (the monitor-port decision D1) is open; U7 (a guest in the bank) still needs its own run |
 | `BANK NOT_CONVENTIONAL_IN_THE_MAP` | the final map has no free memory in the bank on this boot: the premise of the bank placement is false for this firmware state | read the `MAP` line against the map page of the earlier boots; the low extents are the only candidate |
 | `BANK ... FAULT=<n> SAME_AS_FIRST=<n> FIRST_FAULT=0X.. AT=FAULT=0X..:TRANS_L<n>` | part of the bank is not mapped at EL2; the level in the fault code says which table level has no entry (INFERRED) | the monitor must install its own EL2 mapping for what it uses, or place elsewhere; the stage-1 of EL2 is today someone else's |
 | `OUTLIER RESULT=DEVICE...` or `RESULT=NC...` inside Conventional memory | some Conventional memory is mapped Device or non-cacheable at EL2 | the monitor must not put code, tables or bulk-hashed data there; `hashbig` shows the attributes of the loaded file itself |
-| `KEY RESULT=WB.IS.NS1` (or `NS=1` on the `SCAN` line) | the PAR_EL1 NS bit is set for the translations; its meaning for a Non-secure EL2 translation is UNKNOWN, QEMU shows it set too | none: it is shown as it reads, not interpreted |
+| `KEY RESULT=WB.IS.NS1` (`WB.OS.NS1` on the unit) (or `NS=1` on the `SCAN` line) | OBSERVED (boots 8 and 9, `KEY RESULT=WB.OS.NS1`, `SCAN ... NS=1`): the PAR_EL1 NS bit is set for the translations; its meaning for a Non-secure EL2 translation is UNKNOWN, QEMU shows it set too | none: it is shown as it reads, not interpreted |
 | `NONIDENT` on a result | the output page is not the input page: the map is not an identity map there | the monitor's address arithmetic must not assume identity |
 | `CONTROL Tn=FAULT=...` for a type 1 to 6 page, or `CODE=FAULT` / `STACK=FAULT` | memory that is certainly in use reads as unmapped: the method is wrong, or the map the payload reads is not the one EL2 uses | distrust every `MAPPED` of this page; compare with the loads; do not decide U1 from it |
 | `LOAD ...=ERR<n>` after the AT said mapped | the translation exists but the access aborted (an unpopulated or protected region, or an external abort) | treat the range as unusable until explained; the AT answer is a translation answer, not a promise that memory answers |
 | `LOAD ...=SKIPPED_NOT_MAPPED` | the AT said the page is not mapped, so no load was made | as for a fault in the bank |
-| `ID ... PAN=<n>` | `ID_AA64MMFR1_EL1` bits 23:20 (INFERRED field position): 0 would fail the monitor's PAN requirement; 1 to 3 meet it | if 0, the launch gate must change; if not, the value of `MMFR1` replaces the photographed one that failed its CRC check |
-| `ID ... VH=<n> HAFDBS=<n>` | whether `FEAT_VHE` (1) and hardware access/dirty updates (1 or 2) exist | the monitor reads them at launch; the page shows what it will find |
-| `ID DFR1=... ISAR2=... PFR2=... MDCR_EL2=...` | the first values seen for these registers | compare with what the monitor's launch checks require (unknown U5) |
+| `ID ... PAN=<n>` | OBSERVED (boots 8 and 9, `PAN=3`, `MMFR1=0X111111312120`): `ID_AA64MMFR1_EL1` bits 23:20 (INFERRED field position): 0 would fail the monitor's PAN requirement; 1 to 3 meet it | the requirement is met (INFERRED); the value replaces the photographed one that failed its CRC check, though this one was read by hand from a video and is not CRC-checked either (its printed `PAN`, `VH` and `HAFDBS` agree with its nibbles) |
+| `ID ... VH=<n> HAFDBS=<n>` | OBSERVED (boots 8 and 9, `VH=1 HAFDBS=0`): whether `FEAT_VHE` (1) and hardware access/dirty updates (1 or 2) exist: VHE does, the updates do not | the monitor reads them at launch; the page shows what it will find |
+| `ID DFR1=... ISAR2=... PFR2=... MDCR_EL2=...` | OBSERVED (boots 8 and 9, `DFR1=0X0 ISAR2=0X10000012 PFR2=0X0`, `MDCR_EL2=0X6`): the first values seen for these registers | compare with what the monitor's launch checks require (U5: the unit's values are now on the page) |
 | `OSLSR_EL1 ... OSLK=1` | the OS lock is set: debug register writes may not take effect until it is cleared (INFERRED) | the monitor's debug programming must clear it first, or the probe must be left out |
-| `OSLSR_EL1 ... OSLK=0` | the OS lock is clear | none |
-| `MDSCR_EL1 RAW=0X..` | the debug control as it stands | compare with what the monitor's debug probe expects before it writes it |
-| `ICC_SRE_EL2 ... SRE=1 ENABLE=1` | the GIC system-register interface is enabled at EL2 and lower levels may use it (bit 3, INFERRED) | none; `SRE=0` means the monitor must set it before it uses `ICC_*` registers |
+| `OSLSR_EL1 ... OSLK=0` | OBSERVED (boots 8 and 9, `RAW=0X8 OSLK=0`): the OS lock is clear | none |
+| `MDSCR_EL1 RAW=0X..` | OBSERVED (boots 8 and 9, `RAW=0X0`): the debug control as it stands | compare with what the monitor's debug probe expects before it writes it |
+| `ICC_SRE_EL2 ... SRE=1 ENABLE=1` | OBSERVED (boots 8 and 9, `RAW=0XF SRE=1 ENABLE=1`): the GIC system-register interface is enabled at EL2 and lower levels may use it (bit 3, INFERRED) | none; `SRE=0` means the monitor must set it before it uses `ICC_*` registers |
 | the page ends at `NEXT MDSCR_EL1 AFTER 8 S`, `NEXT OSLSR_EL1 ...` or `NEXT ICC_SRE_EL2 ...`, or the board resets seconds after one | that register's read hangs or resets the board: it traps to EL3 and EL3 does not handle it (INFERRED) | photograph the page, power-cycle, and do **not** read that register at EL2 in the monitor without a handler; a second boot without that read is a change of this payload and a decision of its own |
 | `<REG> SKIPPED=NO_COUNTER` / `SKIPPED=COUNTER_STUCK` | the eight-second wait could not be made, so the read was not | the counter op is missing or the counter does not run: nothing about the register is learned |
 | `MAP_REFUSED <reason>`, `DONE MAP_REFUSED` | the final map the runner passed is not one this payload reads: nothing of it was read | the register groups still stand; the map itself is the finding (return 3) |
@@ -241,8 +301,9 @@ never something this payload does.
 
 OBSERVED, QEMU 11.1.3 (`virt,virtualization=on`, `-cpu max`, `-smp 1`, TCG, EDK2 AArch64), once per run of
 `tools/test-q1n1-sp11-payload-qemu-el2mem.py`: the payload runs at EL2 behind the runner after a real `ExitBootServices`, alone
-and in the chain, and returns 0. QEMU has no 30 GiB bank and no EL3, so the page below is the shape of a run, not the unit's. The
-addresses of the loads vary from run to run; the test asserts the shape and the cross-checks, not these values.
+and in the chain, and returns 0. QEMU has no 30 GiB bank and no EL3, so the page below is a model, the shape of a run and not the
+unit's (the unit's page is [above](#what-the-unit-showed-boots-8-and-9)). The addresses of the loads vary from run to run; the test
+asserts the shape and the cross-checks, not these values.
 
 <!-- el2mem-qemu -->
 ```
@@ -272,46 +333,56 @@ page is a byte of the `MAIR_EL2` the runner printed (`PAR_EL1.ATTR` is a MAIR by
 `ENABLE` are the fields of the raw values printed beside them; the runner counted the lines the payload printed and dropped none;
 no file on the stick changed.
 
-**What QEMU cannot show**, UNKNOWN on the unit: whether the bank is mapped, and with what; what the unit's firmware map looks like at
-EL2; whether `MDSCR_EL1`, `OSLSR_EL1` or `ICC_SRE_EL2` trap to EL3 (QEMU has no EL3 here); the values of the unit's ID registers; what
-`NS` means on the unit. Under QEMU `FREQ` is 1 GHz, the upper end of what the payload accepts.
+**What QEMU cannot show**, and what the unit showed instead ([above](#what-the-unit-showed-boots-8-and-9)): whether the bank is mapped,
+and with what (it is, `WB.OS.NS1`); what the unit's firmware map looks like at EL2 (234 descriptors, 17 Conventional extents); whether
+`MDSCR_EL1`, `OSLSR_EL1` or `ICC_SRE_EL2` return (QEMU has no EL3 here; on the unit all three returned); the values of the unit's ID
+registers (printed). Still UNKNOWN on the unit: what `NS` means, the bank's writability, and what another unit or boot would print.
+Under QEMU `FREQ` is 1 GHz, the upper end of what the payload accepts; the unit's is 19.2 MHz.
 
-## The proposed staging plan (not run)
+## The staging plan, as run (boots 8 and 9)
 
-One boot, three files, the runner's own limits (at most 5 files, each at most 256 MiB; [the manifest](SP11-PAYLOAD.md#the-manifest)).
-The plan is the coordinator's; nothing here has been run on hardware and no file has been written to a stick.
+One boot per step, three files, the runner's own limits (at most 5 files, each at most 256 MiB; [the manifest](SP11-PAYLOAD.md#the-manifest)).
+The plan is the coordinator's and ran twice on 2026-11-16 (the `memhash` plan: [the results](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9));
+the stick's manifest listed `HASHBIG.BIN`, `EL2MEM.BIN` and `BIG.DAT`, in that order, as below. How the stick was written is the
+operator's: the commands are the recipe, not a record.
 
 <!-- el2mem-staging -->
 ```sh
 dd if=/dev/urandom of=BIG.DAT bs=1048576 count=144
-python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/el2mem.bin build/uefi/payloads/hashbig.bin BIG.DAT
+python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/hashbig.bin build/uefi/payloads/el2mem.bin BIG.DAT
 # copy build/stick/SP11 to the stick with SP11\Q1N1-PAYLOAD.EFI and SP11\SLBOUNCE-DEVHE-MARK.EFI, then from the UEFI Shell:
 load SP11\SLBOUNCE-DEVHE-MARK.EFI
 SP11\Q1N1-PAYLOAD.EFI --el2
 ```
 <!-- /el2mem-staging -->
 
-`BIG.DAT` is 144 MiB, 150,994,944 bytes, of random bytes (the rate of SHA-256 does not depend on the content; random bytes keep any
-shortcut out). The manifest lists `EL2MEM.BIN`, `HASHBIG.BIN` and `BIG.DAT`, the first two payloads called in that order and the
-third data that `hashbig` finds through the preload table. The page: `(3 + 1) + 3 x 2 + 26 + 12 = 48` lines at the most (see below).
+`BIG.DAT` is 144 MiB, 150,994,944 bytes (the recipe makes it of random bytes: the rate of SHA-256 does not depend on the content, and
+random bytes keep any shortcut out; the page shows its size and the first 16 hex digits of its SHA-256, `F93155C96304AAD8`, not its
+content). The manifest lists `HASHBIG.BIN`, `EL2MEM.BIN` and `BIG.DAT` (indices 0, 1 and 2 on the `LOADED` lines), the first two
+payloads called in that order and the third data that `hashbig` finds through the preload table. The page:
+`(3 + 1) + 3 x 2 + 26 + 12 = 48` lines at the most (see below); the unit's had 36 (8 + 18 payload lines).
 
-**Order.** The runner's order rule is that what may stall the board goes last, and `el2mem`'s three hazard reads may. The plan keeps
-`el2mem` first as asked; a reset at one of its reads then loses `hashbig`'s page, and a run of the manifest tool with the two
-payloads swapped puts the read-only payload first. That is the operator's call and changes nothing else.
+**Order.** The runner's order rule is that what may stall the board goes last, and `el2mem`'s three hazard reads may. The stick had
+the read-only payload first, the swap this document had offered as the operator's call, so that a reset at one of those reads would
+have lost nothing of `hashbig`'s page. None did.
 
-**Proposed stop rule.** One boot, and no retry of the step that ended it. If the page ends at a `NEXT <REG> AFTER 8 S` line, or the
-board resets within seconds of one: photograph, power-cycle, and do not run `el2mem` again as it is. If q1n1's own fault page appears
-(an exception at EL2 from a read-only payload): stop and read `ELR` against the payload's base on the `LOADED` line. `ERR<n>`,
-`FAULT`, `SKIPPED` and `SCAN_HAS_FAULTS` are results, not stops. The runner reads the whole of `BIG.DAT` from the stick and hashes it
-before the bounce; how long that takes is UNKNOWN, and a refusal before the bounce leaves the stick as it was.
+**Stop rule (never triggered).** One boot per step, and no retry of the step that ended it. If the page ended at a `NEXT <REG> AFTER 8 S`
+line, or the board reset within seconds of one: photograph, power-cycle, and do not run `el2mem` again as it is. If q1n1's own fault
+page appeared (an exception at EL2 from a read-only payload): stop and read `ELR` against the payload's base on the `LOADED` line.
+`ERR<n>`, `FAULT`, `SKIPPED` and `SCAN_HAS_FAULTS` are results, not stops. In both boots the page reached `DONE` for both payloads.
+The runner reads the whole of `BIG.DAT` from the stick and hashes it before the bounce; that took less than the 6 s or so between
+the autorun text and q1n1's page (INFERRED by subtraction from the frames, plus or minus 3 s), and a refusal before the bounce would
+have left the stick as it was.
 
-OBSERVED (a restart control of 2026-11-16, reported to this work; no page of it is in this tree): the runner flow with a read-only PSCI
-payload alive at `UPTIME` 224 S and 268 S in two boots. A long-running read-only payload (this one waits 24 s on the counter) is
-not expected to restart the board by itself.
+OBSERVED (a restart control of 2026-11-16, [recorded in the results](SP11-PAYLOAD-RESULTS.md#the-restart-control)): the runner flow
+with a read-only PSCI payload alive at `UPTIME` 224 S and 268 S in two boots, and boots 8 and 9 ran this payload (24 s of waits on
+the counter) and `hashbig` with no restart in their videos (boot 8 to `UPTIME` about 110 S). A long-running read-only payload did not
+restart the board by itself in those four boots; the restart after `cpuon` stays unexplained (cause UNKNOWN).
 
 ## Tests
 
-Hardware: NOT RUN. Every command writes only under `build/`.
+The commands below are host and QEMU tests: none runs on hardware (the unit's two runs are
+[above](#what-the-unit-showed-boots-8-and-9)). Every command writes only under `build/`.
 
 | Command | What it runs |
 | --- | --- |
@@ -332,25 +403,33 @@ file and `READY` (files + 1), `VERIFY`, `CALL` and `DONE` for each payload (3), 
 | Chain | Lines | Fits the unit's 89 rows | Fits the 60 the layout asks for |
 | --- | --- | --- | --- |
 | `el2mem` alone | (1 + 1) + 3 + 26 = 31 | yes | yes |
-| `el2mem`, `hashbig` and `BIG.DAT`: the staging plan | (3 + 1) + 3 x 2 + 26 + 12 = 48 | yes | yes |
+| `hashbig`, `el2mem` and `BIG.DAT`: the `memhash` plan | (3 + 1) + 3 x 2 + 26 + 12 = 48 | yes | yes |
 | `psci`, `el2mem`, `hashbig` and `BIG.DAT` | (4 + 1) + 3 x 3 + 30 + 26 + 12 = 82 | yes | no |
 <!-- /el2mem-chain-budget -->
 
+The unit's page of the plan had 36 lines, `(3 + 1) + 3 x 2 + 8 + 18 = 36`: the formula above uses the budgets (12 and 26), the unit the
+lines printed.
+
 ## Residual risks
 
-* **Whether the three reads trap to EL3 is UNKNOWN**; they are last and announced for that. A reset leaves the lines before it.
+* **The three reads returned on the unit** (boots 8 and 9). They stay last and announced: another unit or firmware may differ, and
+  that none of them was trapped to EL3 and emulated there is INFERRED (the page cannot tell). A reset leaves the lines before it.
 * **`AT` is a translation answer.** A mapped page may still abort when read (an unpopulated region): that is what the four guarded
-  loads are for, and they are only four words.
+  loads are for, and they are only four words (all four answered on the unit). It says nothing about stores: the bank's writability
+  and whether a cache clean reaches DRAM are UNKNOWN.
 * **The method's resolution is 2 MiB.** A hole narrower than that, not at an edge of an extent, is missed; a bank mapped with
   4 KiB pages and holes would show only if a probe lands on one.
 * **What `NS` means** for a Non-secure EL2 translation is UNKNOWN; it is shown, never used.
 * **The field positions of `ID_AA64MMFR1_EL1`** (`PAN`, `VH`, `HAFDBS`) and of `OSLSR_EL1`, `ICC_SRE_EL2` are INFERRED from the
   architecture and were not re-read; the raw value is always printed beside the decoded field.
-* **QEMU shows the shape only** (no bank, no EL3): the unit's first run is the first observation of any value.
+* **QEMU shows the shape only** (no bank, no EL3); the unit's values are those of boots 8 and 9: one unit, two boots, read by hand
+  from videos (the four words loaded from RAM differed between the boots).
 * **The memory checker is conservative and assumes** what is stated above; a binary it passes was checked at the level of the base
   register of each access, with the offsets bounded by the host tests.
 
 ## Status
 
-EXPERIMENTAL. Hardware NOT RUN. OBSERVED on the unit by other payloads: the EL2 state values quoted at the top. OBSERVED under QEMU
-only: the page above and the behaviours listed under it. UNKNOWN: everything else this payload would print on the unit.
+EXPERIMENTAL. Hardware: ran in two boots (2026-11-16), one unit; OBSERVED, the lines of [what the unit showed](#what-the-unit-showed-boots-8-and-9)
+(their field decodes are INFERRED, and so is that no hazard read was emulated at EL3). OBSERVED under QEMU only: the QEMU page and the
+behaviours listed under it. UNKNOWN: whether the bank is writable at EL2, whether a cache clean reaches DRAM, and what another unit or
+boot would print.

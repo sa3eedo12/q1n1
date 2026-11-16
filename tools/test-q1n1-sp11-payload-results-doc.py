@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """The results document of the Surface Pro 11 stick payload runner (docs/SP11-PAYLOAD-RESULTS.md): the page the unit showed in boot 5
-and what the document says about it, against the usbsmmu source and the other payload documents.
+and the page of boots 8 and 9, and what the document says about them, against the usbsmmu source and the other payload documents.
 
     python3 tools/test-q1n1-sp11-payload-results-doc.py
 
@@ -12,8 +12,12 @@ and what the document says about it, against the usbsmmu source and the other pa
     docs/SP11-PAYLOAD-TIMER.md prints; the claims stay at one unit and a few boots with the inferences labelled (the restart: cause
     UNKNOWN, `UPTIME` counted from before the chain, the restart probe's times UNKNOWN or INFERRED and no window claimed; the restart
     control with `psci` alone: the runner flow alone is not the cause, INFERRED strongly, and its payload and lines are boot 5's; the
-    runner lines are the ones of docs/SP11-PAYLOAD-CPUON.md); the document has its
-    licence line, stays within the size limit and its links resolve; docs/SP11-PAYLOAD.md lists this suite.
+    runner lines are the ones of docs/SP11-PAYLOAD-CPUON.md); the page of boots 8 and 9 (36 lines of `hashbig` and `el2mem`) is well
+    formed, carries the numbers the unit printed and agrees with the arithmetic of its own values and with the rest of the section
+    (the declared ranges, the placement of the file, the timing), with the writability of the bank, the cache clean and the EL3
+    emulation of the three reads labelled as unknown or inferred and no VERIFIED anywhere in the section; the document has its
+    licence line, stays within the size limit and its links resolve; docs/SP11-PAYLOAD.md lists this suite and says what the boots
+    showed.
   * ResultsDocMutants: seeded mistakes in the results document and in the register table of the usbsmmu document, each of which an
     agreement test must refuse.
 
@@ -36,6 +40,12 @@ MAIN = DOCS / 'SP11-PAYLOAD.md'
 CPUON = DOCS / 'SP11-PAYLOAD-CPUON.md'
 SOURCE = ROOT / 'payloads' / 'usbsmmu.c'
 PAGE_FONT = re.compile(r'^[A-Z0-9 :\-./=?()_]*$')
+# What the unit printed in boots 8 and 9, a piece of the page each: every one must be on the page of the results document.
+UNIT_VALUES = ('LOADED INDEX=2 BASE=0XC3E65000 BYTES=150994944', 'FILE INDEX=2 BASE=0XC3E65000 BYTES=150994944 MIB=144',
+               'ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1', 'HASH BYTES=150994944 TICKS=14204400 MS=739 MIBS=194',
+               'MAP DESC=234 STRIDE=48 CONV_EXTENTS=17 CONV_MIB=31961', 'KEY RESULT=WB.OS.NS1 PROBES=16014',
+               'BANK CONV_MIB=30720 PROBES=15361 ALL=MAPPED RESULT=WB.OS.NS1', 'ISAR2=0X10000012 MMFR1=0X111111312120 PAN=3 VH=1 HAFDBS=0',
+               'MDCR_EL2=0X6', 'OSLSR_EL1 RAW=0X8 OSLK=0', 'ICC_SRE_EL2 RAW=0XF SRE=1 ENABLE=1', 'LOADS_OK=4 OF=4 HAZARD_READS=3')
 # Each register of the usbsmmu document's table that boot 5 read and S0 had not, with the key it has on the page. `GBUSERRADDR1` is the high
 # half of the one 64-bit `BERR` and `MAIR1` is printed only when it is not zero: they are checked on their own.
 PAGE_KEYS = {'RT_ERSTSZ': 'ERSTSZ', 'DWC3_GDBGLTSSM': 'LTSSM', 'SMMU_ID1': 'ID1', 'SMMU_ID2': 'ID2', 'GR1_CBAR(n)': 'CBAR',
@@ -176,12 +186,13 @@ class ResultsDocAgreement(unittest.TestCase):
                        'for the high half of `VBAR_EL2`, from boot to boot (OBSERVED;'):
             self.mentions(phrase)
         self.assertNotRegex(self.flat, r'(?i)hardware (qualified|passed)|did not reproduce|40 to 60|PLANNED, NOT RUN|\(and, INFERRED, from boot'
-                                       r'|no observation beyond `UPTIME 10 S`|alone is not excluded|read-only chains did|at most three boots')
+                                       r'|no observation beyond `UPTIME 10 S`|alone is not excluded|read-only chains did|at most three boots'
+                                       r'|(?<!whether )the bank is writable|(?<!whether a )cache clean reaches DRAM')
 
     def test_the_restart_control_ran_the_psci_payload_of_boot_5_and_printed_its_lines(self):
         lines = self.page()
         loaded, done = lines[0], next(line for line in lines if line.startswith('PAYLOAD DONE INDEX=0 '))
-        control = self.flat[self.flat.index('### The restart control'):self.flat.index('## Payload `timer` (boot 4)')]
+        control = self.flat[self.flat.index('### The restart control'):self.flat.index('## Payloads `hashbig` and `el2mem` (boots 8 and 9)')]
         for base in ('0XCEAB3000', '0XCDDD4000'):
             self.mentions(re.sub(r'BASE=0X[0-9A-F]+', f'BASE={base}', loaded), control)
         self.mentions(done[len('PAYLOAD '):], control)
@@ -196,6 +207,98 @@ class ResultsDocAgreement(unittest.TestCase):
         for quoted in ('0xCE60A000', '0xCEA8B000', '0xCE5E5000', '0xFFFFFF9CEA002800', '0xFFFFFFB460602800'):     # the three bases, the two VBAR_EL2
             self.mentions(f'`{quoted}`')
             self.assertIn(f'`{quoted}`', self.cpuon, 'the cpuon document lacks the base or the value')
+
+    def unit_page(self):
+        found = re.search(r'<!-- boot9-panel -->\n```\n(.*?)```\n<!-- /boot9-panel -->', self.results, re.S)
+        self.assertIsNotNone(found, 'the results document has no <!-- boot9-panel --> block')
+        return found.group(1).splitlines()
+
+    def test_the_page_of_boots_8_and_9_is_well_formed_pinned_and_agrees_with_its_arithmetic(self):
+        lines = self.unit_page()
+        text = '\n'.join(lines)
+        self.assertEqual(len(lines), 36)
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertTrue(line.startswith('PAYLOAD '))
+                self.assertLessEqual(len(line), 100)
+                self.assertRegex(line, PAGE_FONT)
+        calls = [i for i, line in enumerate(lines) if line.startswith('PAYLOAD CALL ')]
+        dones = [i for i, line in enumerate(lines) if line.startswith('PAYLOAD DONE ')]
+        self.assertEqual((len(calls), len(dones)), (2, 2))
+        self.assertEqual([line.split()[1] for line in lines[:calls[0] - 1]], ['LOADED', 'LOADED', 'LOADED', 'READY'])
+        for call, done in zip(calls, dones):
+            self.assertEqual(lines[call - 1], 'PAYLOAD VERIFY=OK')
+            self.assertEqual(int(re.search(r' LINES=(\d+) ', lines[done]).group(1)), done - call - 1, lines[done])
+        self.assertTrue(all(line.startswith('PAYLOAD HASHBIG ') for line in lines[calls[0] + 1:dones[0]]))
+        self.assertTrue(all(line.startswith('PAYLOAD EL2MEM ') for line in lines[calls[1] + 1:dones[1]]))
+        for piece in UNIT_VALUES:
+            self.assertIn(piece, text)
+        size, ticks, ms, mibs = (int(n) for n in re.search(r'HASH BYTES=(\d+) TICKS=(\d+) MS=(\d+) MIBS=(\d+)', text).groups())
+        freq = int(re.search(r'HASHBIG START CURRENTEL=0X8 FREQ=(\d+)', text).group(1))
+        self.assertEqual((ms, mibs), (ticks * 1000 // freq, size * freq // (ticks * (1 << 20))))
+        self.assertEqual((14204370 * 1000 // freq, size * freq // (14204370 * (1 << 20))), (ms, mibs), 'boot 8 gave the same MS and MIBS')
+        self.assertLess(ticks, 25 * freq, 'the 25 s box was never near')
+        loaded = re.search(r'LOADED INDEX=2 BASE=0X([0-9A-F]+) BYTES=(\d+) SHA=([0-9A-F]{16}) TYPE=2', text)
+        base = int(loaded.group(1), 16)
+        self.assertEqual((int(loaded.group(2)), size), (144 << 20, 144 << 20))
+        self.assertIn(f'FILE INDEX=2 BASE=0X{base:X} BYTES={size} MIB=144', text)
+        self.assertIn(f'DIGEST {loaded.group(3)} MATCH', text)
+        self.assertEqual(int(re.search(r'LOW_LAST\(0X([0-9A-F]+)\)', text).group(1), 16) + 4, base, 'the low extent ends where the file begins')
+        bank_mib = (0x1000000000 - 0x880000000) >> 20
+        self.assertEqual([int(n) for n in re.search(r'BANK CONV_MIB=(\d+) PROBES=(\d+)', text).groups()], [bank_mib, bank_mib // 2 + 1])
+        mmfr1, oslsr, sre = (int(re.search(pattern, text).group(1), 16) for pattern in (
+            r'MMFR1=0X([0-9A-F]+)', r'OSLSR_EL1 RAW=0X([0-9A-F]+)', r'ICC_SRE_EL2 RAW=0X([0-9A-F]+)'))
+        self.assertEqual([int(re.search(rf'\b{key}=(\d+)', text).group(1)) for key in ('PAN', 'VH', 'HAFDBS', 'OSLK', 'SRE', 'ENABLE')],
+                         [mmfr1 >> 20 & 15, mmfr1 >> 8 & 15, mmfr1 & 15, oslsr >> 1 & 1, sre & 1, sre >> 3 & 1])
+        self.assertEqual(int(re.search(r'CONV_MIB=(\d+)', text).group(1)), 32105 - (size >> 20), 'boot 6 held 32,105 MiB of Conventional memory')
+
+    def test_the_section_of_boots_8_and_9_agrees_with_its_page_and_labels_what_it_does_not_show(self):
+        section = self.flat[self.flat.index('## Payloads `hashbig` and `el2mem` (boots 8 and 9)'):self.flat.index('## Payload `timer` (boot 4)')]
+        text = '\n'.join(self.unit_page())
+        base, size = int(re.search(r'LOADED INDEX=2 BASE=0X([0-9A-F]+)', text).group(1), 16), 144 << 20
+        self.assertNotIn('VERIFIED', section, 'a hardware result is OBSERVED, and a decode of it INFERRED')
+        el2mem, hashbig = (re.search(rf'LOADED INDEX={index} BASE=0X([0-9A-F]+) BYTES=(\d+)', text) for index in (1, 0))
+        pages = -(-int(hashbig.group(2)) // 4096) * 4096     # the declared range of a file is whole pages
+        self.mentions(f'the payload at `0x{int(el2mem.group(1), 16):X}`, the first file at `0x{int(hashbig.group(1), 16):X}` (`0x{pages:X}`)', section)
+        self.mentions(f'the second at `0x{base:X}` (`0x{size:X}`)', section)
+        self.mentions('`MEMORY DESCRIPTORS` `0xEA` (234:', section)
+        self.assertEqual(0xEA, int(re.search(r'MAP DESC=(\d+)', text).group(1)))
+        low = 0xA8000000
+        self.mentions(f'{(base - low) >> 20} MiB. Together they make {(base + size - low) >> 20} MiB', section)
+        self.mentions(f'The file ends at `0x{base + size:X}` (`0x{base:X} + 0x{size:X}`)', section)
+        self.mentions(f'`LOW_FIRST`) to `0x{base:X}` (`LOW_LAST` is the word before it)', section)
+        self.mentions('`HASH ... TICKS=14204370` (boot 9: `14204400`; `MS=739 MIBS=194` in both) and the four words `el2mem` read from RAM: '
+                      '`BANK_FIRST(0X880000000)=0X59ADB1EB`, `BANK_LAST(0XFFFFFFFFC)=0XF30F158`, `LOW_FIRST(0XA8000000)=0X380001` and '
+                      '`LOW_LAST(0XC3E64FFC)=0XEC6A2481`', section)
+        for phrase in ('the plan\'s stop rule never triggered', 'no fault page) and neither video shows a restart',
+                       'It is not a restart: `UPTIME` keeps counting (101 S at 110 s, 42 S at 54 s)',
+                       'OBSERVED; only `AT S1E2R` and loads were made: whether the bank is writable at EL2 is UNKNOWN',
+                       'OBSERVED; the names are the payload\'s decode of `PAR_EL1`',
+                       'OBSERVED; that none was trapped to EL3 and emulated there is INFERRED (an EL3 handler that emulated a read would look the same)',
+                       '**The decode (INFERRED: the Arm ARM was not re-read;', '**Placement (INFERRED from the printed addresses).**',
+                       'One file size was seen by these boots, so that rule is INFERRED. The stick wrapper\'s dry run',
+                       '`0xCCE64B40`, the same top after page rounding (INFERRED: that run printed no extent); that it holds for every size is UNKNOWN',
+                       'The cause of the redraw is UNKNOWN', '**Not shown, UNKNOWN.**',
+                       'whether a cache clean reaches DRAM, and whether a page in the bank survives the bounce',
+                       'these boots issued no `CPU_ON` and neither video shows a restart', 'changes none of its labels',
+                       '(INFERRED by subtraction: no frame shows them)', 'Three of the four words differ between the boots'):
+            self.mentions(phrase, section)
+        for phrase in ('The high bank (from `0x880000000`) is mapped write-back and readable at EL2 (OBSERVED, boots 8 and 9:',
+                       'but whether it is writable at EL2 stage 1, whether a cache clean reaches DRAM there and whether a page there survives the bounce are UNKNOWN',
+                       'three hazard reads of `el2mem` was trapped to EL3 and emulated there (all three returned; the page cannot tell: INFERRED only)',
+                       'Boots 8 and 9 ([below](#payloads-hashbig-and-el2mem-boots-8-and-9)) add two read-only boots with no restart in their videos',
+                       'six of its nine payloads ran on the Surface Pro 11'):
+            self.mentions(phrase)
+        main = ' '.join(self.main.split())
+        for phrase in ('ran together in boots 8 and 9 with a 144 MiB data file (OBSERVED, one unit, two boots:', 'was hashed at 194 MiB/s;',
+                       'the bank\'s writability is UNKNOWN', 'measured what hashing one in place costs: 194 MiB/s for 144 MiB, OBSERVED in boots 8 and 9',
+                       '**Mostly answered (OBSERVED, boots 5, 8 and 9):**', 'Whether the bank is also writable, and whether a page there survives the bounce, are UNKNOWN',
+                       'a 144 MiB file passed it in boots 8 and 9, OBSERVED'):
+            self.assertIn(phrase, main)
+        for stale in ('as are the two read-only memory payloads', 'measures what hashing one in place costs, hardware NOT RUN',
+                      'the high bank is untried (UNKNOWN)', 'Partly answered (OBSERVED, boot 5)'):
+            self.assertNotIn(stale, main)
+            self.assertNotIn(stale, self.flat)
 
     def test_the_document_starts_with_its_licence_line_stays_within_the_size_limit_and_every_link_resolves(self):
         self.assertEqual(self.results.splitlines()[0], '<!-- SPDX-License-Identifier: MIT -->')
@@ -246,6 +349,35 @@ RESULTS_DOC_MUTANTS = [
     ('the-plain-pages-time-is-dropped', _replace('alive at `UPTIME 123 S`', 'alive for minutes', count=-1)),
     ('step-2s-weak-inference-is-called-observed', _replace('(INFERRED, weak: it assumes that pace)', '(OBSERVED)')),
     ('a-runner-line-differs-from-the-cpuon-page', _replace('BYTES=18056 SHA=3B4BFDA7D59F923C', 'BYTES=18057 SHA=3B4BFDA7D59F923C')),
+    # The page of boots 8 and 9 and the section around it.
+    ('the-unit-base-is-changed', _replace('PAYLOAD LOADED INDEX=2 BASE=0XC3E65000', 'PAYLOAD LOADED INDEX=2 BASE=0XC3E65001')),
+    ('the-unit-rate-is-changed', _replace('TICKS=14204400 MS=739 MIBS=194', 'TICKS=14204400 MS=739 MIBS=195')),
+    ('the-unit-milliseconds-are-changed', _replace('TICKS=14204400 MS=739', 'TICKS=14204400 MS=740')),
+    ('the-unit-ticks-are-changed', _replace('TICKS=14204400 MS=739', 'TICKS=14204401 MS=739')),
+    ('the-unit-attributes-are-the-models', _replace('PAYLOAD HASHBIG ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1',
+                                                    'PAYLOAD HASHBIG ATTR FIRST=WB.IS MID=WB.IS LAST=WB.IS')),
+    ('the-unit-extent-total-is-changed', _replace('CONV_EXTENTS=17 CONV_MIB=31961', 'CONV_EXTENTS=17 CONV_MIB=31962')),
+    ('the-unit-bank-probes-are-changed', _replace('CONV_MIB=30720 PROBES=15361', 'CONV_MIB=30720 PROBES=15360')),
+    ('the-unit-pan-is-changed', _replace('PAN=3 VH=1 HAFDBS=0', 'PAN=2 VH=1 HAFDBS=0')),
+    ('the-unit-mmfr1-is-changed', _replace('MMFR1=0X111111312120', 'MMFR1=0X111111312121')),
+    ('the-unit-isar2-is-changed', _replace('ISAR2=0X10000012', 'ISAR2=0X10000013')),
+    ('the-unit-mdcr-is-changed', _replace('MDCR_EL2=0X6', 'MDCR_EL2=0X7')),
+    ('the-unit-oslsr-is-changed', _replace('OSLSR_EL1 RAW=0X8 OSLK=0', 'OSLSR_EL1 RAW=0X8 OSLK=1')),
+    ('the-unit-icc-sre-is-changed', _replace('ICC_SRE_EL2 RAW=0XF SRE=1 ENABLE=1', 'ICC_SRE_EL2 RAW=0XE SRE=1 ENABLE=1')),
+    ('the-unit-low-word-address-is-changed', _replace('LOW_LAST(0XC3E64FFC)', 'LOW_LAST(0XC3E65FFC)')),
+    ('the-unit-descriptor-count-is-changed', _replace('MAP DESC=234', 'MAP DESC=235')),
+    ('the-declared-range-of-the-file-is-wrong', _replace('the second at `0xC3E65000` (`0x9000000`)', 'the second at `0xC3E65000` (`0x8000000`)')),
+    ('the-bank-is-called-writable', _replace('whether the bank is writable at EL2 is UNKNOWN', 'the bank is writable at EL2')),
+    ('the-high-bank-is-called-writable-in-the-unknown-list', _replace('but whether it is writable at EL2 stage 1, whether a cache clean reaches DRAM there',
+                                                                      'and it is writable at EL2 stage 1, a cache clean reaches DRAM there')),
+    ('the-el3-claim-is-called-verified', _replace('that none was trapped to EL3 and emulated there is INFERRED', 'that none was trapped to EL3 and emulated there is VERIFIED')),
+    ('the-placement-is-called-observed', _replace('**Placement (INFERRED from the printed addresses).**', '**Placement (OBSERVED).**')),
+    ('the-low-remainder-is-wrong', _replace('446 MiB.', '447 MiB.')),
+    ('the-boot-8-ticks-are-wrong', _replace('`HASH ... TICKS=14204370`', '`HASH ... TICKS=14204371`')),
+    ('the-boot-8-words-are-wrong', _replace('`LOW_LAST(0XC3E64FFC)=0XEC6A2481`', '`LOW_LAST(0XC3E64FFC)=0XEC6A2480`')),
+    ('a-restart-is-claimed-in-boots-8-and-9', _replace('page) and neither video shows a restart', 'page) and the board restarted in both')),
+    ('the-redraw-is-called-a-restart', _replace('It is not a restart:', 'It is a restart:')),
+    ('the-intro-counts-the-payloads-of-before', _replace('six of its nine payloads ran on the Surface Pro 11', 'four of its five payloads ran on the Surface Pro 11')),
 ]
 USBSMMU_DOC_MUTANTS = [
     ('a-boot-5-value-in-the-register-table-is-wrong', _replace('boot 5 OBSERVED `0x400` (bank 3;', 'boot 5 OBSERVED `0x401` (bank 3;')),

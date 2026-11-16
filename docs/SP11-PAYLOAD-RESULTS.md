@@ -1,15 +1,17 @@
 <!-- SPDX-License-Identifier: MIT -->
-# SP11 payload runner: what the unit showed (boots 4, 5 and 7, the restart probe and the restart control)
+# SP11 payload runner: what the unit showed (boots 4, 5, 7, 8 and 9, the restart probe and the restart control)
 
-The stick payload runner of [SP11-PAYLOAD.md](SP11-PAYLOAD.md) and four of its five payloads ran on the Surface Pro 11
+The stick payload runner of [SP11-PAYLOAD.md](SP11-PAYLOAD.md) and six of its nine payloads ran on the Surface Pro 11
 (Snapdragon X1E80100): `psci`, `usbsmmu` and `timer` in boot 4 and `psci` and `usbsmmu` in boot 5 (2026-11-14), and `cpuon`,
 alone, in boot 7 (2026-11-15), each from the boot stick plugged in directly (no hub). Later boots of the same stick ran `cpuon`
-twice more ([the restart probe](#the-restart-probe), 2026-11-15) and `psci` alone twice
-([the restart control](#the-restart-control), 2026-11-16). This document records what the photographs and a video of those boots
-showed, and what they did not. Boot 6 was not a payload boot (an EL2 test image) and is not recorded here.
+twice more ([the restart probe](#the-restart-probe), 2026-11-15), `psci` alone twice ([the restart control](#the-restart-control),
+2026-11-16) and, in boots 8 and 9 (2026-11-16), `hashbig` and `el2mem` with a 144 MiB data file
+([the `memhash` plan](#payloads-hashbig-and-el2mem-boots-8-and-9)). This document records what the photographs and videos of those
+boots showed, and what they did not. Boot 6 was not a payload boot (an EL2 test image) and is not recorded here.
 The line formats are in [the line catalogue](SP11-PAYLOAD.md#line-catalogue); what each payload reads, and what its answers would
 mean for the port, is in its own document: [`psci`](SP11-PAYLOAD-PSCI.md), [`timer`](SP11-PAYLOAD-TIMER.md),
-[`usbsmmu`](SP11-PAYLOAD-USBSMMU.md) and [`cpuon`](SP11-PAYLOAD-CPUON.md). The `state` payload has not run on the unit: NOT RUN.
+[`usbsmmu`](SP11-PAYLOAD-USBSMMU.md), [`cpuon`](SP11-PAYLOAD-CPUON.md), [`hashbig`](SP11-PAYLOAD-HASHBIG.md) and
+[`el2mem`](SP11-PAYLOAD-EL2MEM.md). The `state` payload has not run on the unit: NOT RUN. Neither have `cnthctl` and `el1trap`.
 
 Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
 **One unit, at most four boots of any payload: nothing here is a distribution**; another unit, or another boot of this one, may
@@ -32,33 +34,38 @@ Boot 3 was not a payload boot; it is here because two results below lean on it.
 
 OBSERVED in the boots named, unless a line says otherwise.
 
-* **The bounce was taken and q1n1's page was drawn at EL2** in all three boots: `ENTRY EL 1`, `CURRENT EL 2`.
-* **`EfiLoaderCode` memory executes at EL2.** Both payloads of boot 5 and `cpuon` of boot 7 and of the probe's step 3 were
-  allocated as `EfiLoaderCode` and ran there, with no fault page. That answers the first of the [open questions](SP11-PAYLOAD.md#open-questions-for-the-operator).
-  No `EfiLoaderData` payload was tried, so whether the unit maps that no-execute stays UNKNOWN.
-* **The ABI v1 ops the payloads used work.** `puts`: every line reached the panel. `load32`: `usbsmmu` made 213 guarded loads,
-  `FAULTS=0 REFUSED=0`. Each payload of boots 5 and 7 returned to the runner (`RETURN=0X0 STACK=OK`, guard words intact,
-  `DROPPED=0`).
+* **The bounce was taken and q1n1's page was drawn at EL2** in all three boots: `ENTRY EL 1`, `CURRENT EL 2`. In boots 8 and 9
+  both payloads read `CURRENTEL=0X8` (EL2) on their `START` lines.
+* **`EfiLoaderCode` memory executes at EL2.** Both payloads of boot 5, `cpuon` of boot 7 and of the probe's step 3, and `hashbig`
+  and `el2mem` of boots 8 and 9 were allocated as `EfiLoaderCode` and ran there, with no fault page. That answers the first of the
+  [open questions](SP11-PAYLOAD.md#open-questions-for-the-operator). No `EfiLoaderData` payload was tried (`BIG.DAT` was read, never
+  executed), so whether the unit maps that no-execute stays UNKNOWN.
+* **The ABI v1 ops the payloads used work.** `puts`: every line reached the panel. `load32`: `usbsmmu` made 213 guarded loads and
+  `el2mem` four, `FAULTS=0 REFUSED=0`. Each payload of boots 5, 7, 8 and 9 returned to the runner (`RETURN=0X0 STACK=OK`, guard
+  words intact, `DROPPED=0`).
 * **The second hash at EL2 passes.** Right before each call the runner re-hashed the preload table and the payload where the
   bounce left it (`PAYLOAD VERIFY=OK`): the files at `0xCEC90000` (`psci`) and `0xCEA89000` (`usbsmmu`) were intact (boot 5),
   and so was `cpuon` at `0xCEA8B000` (boot 7), `0xCE5E5000` (step 2: it was called, which the runner does only after a passed second
-  hash) and `0xCE60A000` (step 3). The memory map at EL2 had 235 entries (boot 5).
+  hash) and `0xCE60A000` (step 3), and `hashbig` at `0xCEA8D000` and `el2mem` at `0xCEA88000` (boots 8 and 9). The memory map at
+  EL2 had 235 entries (boot 5) and 234 (boot 8). A 144 MiB data file, which the runner hashes only before the bounce, arrived
+  intact: `hashbig`'s digest at EL2 equals the runner's ([below](#payloads-hashbig-and-el2mem-boots-8-and-9)).
 * **The panel.** The layout function (a copy of the survey's `stk_layout`, pinned by a host test) places the region right of
   q1n1's page: for the unit's 2880 x 1920 panel, as the host tests model it, its first row is row 16, the first below the
   emblem, and it has 89 rows. That is computed from the function (VERIFIED as a computation), not measured. What the unit
   showed: 58 lines in the right-hand panel in boot 4 (counted from the geometry of a photograph that cut the column off; the
-  text was not captured), all 41 lines of boot 5 (read in full) and all 45 of boot 7 (read with some blur) and of step 3 (read
-  crisp from a video). So that payload lines reach the right-hand column is OBSERVED, and 58 is the most it was seen to hold; the
-  89 rows are not.
+  text was not captured), all 41 lines of boot 5 (read in full), all 45 of boot 7 (read with some blur) and of step 3 (read
+  crisp from a video) and all 36 of boots 8 and 9 (read from videos). So that payload lines reach the right-hand column is
+  OBSERVED, and 58 is the most it was seen to hold; the 89 rows are not.
 * **The heartbeat** (`UPTIME`) counts from before the chain, not from its end: `start` is read before the runner is called
   (`platform/uefi/main.c`, line 1626 against 1641), and the loop at lines 1645 to 1655 first draws `(counter - start) / frequency`
   once the chain has returned; until then the page shows the 0 S drawn before the chain. It read 0 S in both photographs of
   boot 4 (the chain did not return: INFERRED, below) and in the photographs taken during the chains of boot 7 and of step 2 of
   [the restart probe](#the-restart-probe); after chains that returned, 3 S and 10 S in boot 5, 16 S in boot 7 (the first heartbeat
   after the chain's two eight-second waits) and 224 S and 268 S in [the restart control](#the-restart-control). Step 3's video
-  shows it advancing to about 36 S.
+  shows it advancing to about 36 S, and the videos of boots 8 and 9 show `UPTIME 101 S` (110 s into the video) and `42 S` (54 s in).
 * **q1n1's own page, left column** (boots 4 and 5; boot 7's page showed the same `HCR_EL2`, `SCTLR_EL2`, `TTBR0_EL2`, `MAIR_EL2`,
-  `CNTFRQ_EL0` and `MPIDR_EL1`; its lines, not a payload's): `ENTRY EL 1`, `CURRENT EL 2`, `MIDR` `0x512F0011`,
+  `CNTFRQ_EL0` and `MPIDR_EL1` and boot 8's the same `MIDR`, `HCR_EL2`, `SCTLR_EL2`, `TCR_EL2`, `TTBR0_EL2` and `MAIR_EL2`; its
+  lines, not a payload's): `ENTRY EL 1`, `CURRENT EL 2`, `MIDR` `0x512F0011`,
   SPCR UART `0x894000` (type `0x13`, GSI `0x182`, baud code 7) with `UART TX disabled or unavailable`, `HCR_EL2` `0x88000010`
   (E2H 0, TGE 1, VM 0, RW 1), `SCTLR_EL2` `0x0000100030C5183D` (M 1, C 1, I 1, WXN 0, EE 0), `TCR_EL2` `0x80843514`,
   `TTBR0_EL2` `0xA7F2E000`, `MAIR_EL2` `0xFFBB4400`, `CPTR_EL2` `0x22FF`, `CNTHCTL_EL2` `0x3`, `CNTFRQ_EL0` `0x124F800`,
@@ -280,7 +287,9 @@ once and powered the unit off; two videos cover only the first seconds (22.6 s a
   `SMCCC_VERSION=0X10001:V1.1`, `DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=15 DROPPED=0`). What happened
   after each photograph is UNKNOWN. The two boots differ in their payload base and in the number of descriptors (231 and 227).
 * **So the runner flow alone is not what restarts the board (INFERRED strongly: two boots, evidence and not proof).** If the runner
-  flow itself restarted the board in 2 of 3 boots, two boots in a row surviving 224 s would have a chance of about 11 %.
+  flow itself restarted the board in 2 of 3 boots, two boots in a row surviving 224 s would have a chance of about 11 %. Boots 8 and 9
+  ([below](#payloads-hashbig-and-el2mem-boots-8-and-9)) add two read-only boots with no restart in their videos, the longer to
+  `UPTIME` about 110 S.
 * **The restart is associated with `cpuon`, that is with `CPU_ON` and `CPU_OFF` of the secondary cores (INFERRED: a correlation over
   five boots, three of `cpuon` and two of `psci`; the cause is UNKNOWN, and so is the time of a restart).** A delayed reaction of a
   watchdog or of the firmware to the core power cycles is one hypothesis. What would narrow it down is in
@@ -290,6 +299,114 @@ once and powered the unit off; two videos cover only the first seconds (22.6 s a
 By the timing method above (markers 00:16:02 and 00:20:42): step 1's page started about 4 s after its marker, at about 00:16:06, so
 `UPTIME 224 S` was at about 00:19:50, 52 s before the next marker (power cycle, boot and countdown: consistent with the 45 s seen
 before); step 2's page started at about 00:20:46, so `UPTIME 268 S` was at about 00:25:14.
+
+## Payloads `hashbig` and `el2mem` (boots 8 and 9)
+
+The plan `memhash` (2026-11-16, after the restart control) ran two boots from the same stick, boot 8 (step 1) and boot 9 (step 2),
+each started by the operator under slbounce's `SLBOUNCE-DEVHE-MARK.EFI` (sha256 prefix `4107c28c`) with the runner image of boot 4
+(`Q1N1-PAYLOAD.EFI --el2`, prefix `c2057909`). Its manifest lists, in call order, `HASHBIG.BIN` (9,412 bytes, `674D27954AFCC3EE`),
+`EL2MEM.BIN` (12,834 bytes, `9F8156C1C1134AA0`) and `BIG.DAT` (150,994,944 bytes = 144 MiB, `F93155C96304AAD8`), a data file that the
+runner loads and hashes and no payload is called on. Both payloads are read only ([`hashbig`](SP11-PAYLOAD-HASHBIG.md),
+[`el2mem`](SP11-PAYLOAD-EL2MEM.md)); the sizes and digest prefixes on the `LOADED` lines are those of the binaries this tree builds.
+Each boot was filmed; the values were read by hand from enlarged crops of the last frame of each video (119.9 s
+and 62.8 s long) and are not CRC-checked. Both boots ended on the finished page, `PAYLOAD DONE INDEX=1 RETURN=0X0 STACK=OK LOADS=4
+FAULTS=0 REFUSED=0 LINES=18 DROPPED=0`: the plan's stop rule never triggered (no page ended at a `NEXT ... AFTER 8 S` line, no fault
+page) and neither video shows a restart.
+
+Boot 9's page, 36 lines (boot 8's differs only where the next paragraph says; the page font has capitals only):
+
+<!-- boot9-panel -->
+```
+PAYLOAD LOADED INDEX=0 BASE=0XCEA8D000 BYTES=9412 SHA=674D27954AFCC3EE TYPE=1
+PAYLOAD LOADED INDEX=1 BASE=0XCEA88000 BYTES=12834 SHA=9F8156C1C1134AA0 TYPE=1
+PAYLOAD LOADED INDEX=2 BASE=0XC3E65000 BYTES=150994944 SHA=F93155C96304AAD8 TYPE=2
+PAYLOAD READY FILES=3 RANGES=6 CODE=2
+PAYLOAD VERIFY=OK
+PAYLOAD CALL 0 674D27954AFCC3EE
+PAYLOAD HASHBIG START CURRENTEL=0X8 FREQ=19200000
+PAYLOAD HASHBIG FILE INDEX=2 BASE=0XC3E65000 BYTES=150994944 MIB=144
+PAYLOAD HASHBIG EXTENT ALLOCATED DESCRIPTORS=1
+PAYLOAD HASHBIG ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1
+PAYLOAD HASHBIG NEXT SHA256 BOX=25 S
+PAYLOAD HASHBIG HASH BYTES=150994944 TICKS=14204400 MS=739 MIBS=194
+PAYLOAD HASHBIG DIGEST F93155C96304AAD8 MATCH
+PAYLOAD HASHBIG DONE MATCH
+PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0
+PAYLOAD VERIFY=OK
+PAYLOAD CALL 1 9F8156C1C1134AA0
+PAYLOAD EL2MEM START CURRENTEL=0X8 FREQ=19200000
+PAYLOAD EL2MEM MAP DESC=234 STRIDE=48 CONV_EXTENTS=17 CONV_MIB=31961
+PAYLOAD EL2MEM KEY RESULT=WB.OS.NS1 PROBES=16014 FIRST=0X815A0000 LAST=0XFFFFFF000
+PAYLOAD EL2MEM SCAN EXTENTS=17 PROBES=16014 ALL=MAPPED ATTR=WB SH=OS NS=1
+PAYLOAD EL2MEM BANK CONV_MIB=30720 PROBES=15361 ALL=MAPPED RESULT=WB.OS.NS1
+PAYLOAD EL2MEM CONTROL T1=WB.OS.NS1 T2=WB.OS.NS1 T3=WB.OS.NS1 T4=WB.OS.NS1 T5=WB.OS.NS1 T6=WB.OS.NS1
+PAYLOAD EL2MEM CONTROL CODE=WB.OS.NS1 STACK=WB.OS.NS1
+PAYLOAD EL2MEM LOAD BANK_FIRST(0X880000000)=0X1F8A08BE BANK_LAST(0XFFFFFFFFC)=0X9F6636DA
+PAYLOAD EL2MEM LOAD LOW_FIRST(0XA8000000)=0X380001 LOW_LAST(0XC3E64FFC)=0X1D11B2F9
+PAYLOAD EL2MEM ID DFR1=0X0 ISAR2=0X10000012 MMFR1=0X111111312120 PAN=3 VH=1 HAFDBS=0 PFR2=0X0
+PAYLOAD EL2MEM ID AIDR=0X0 REVIDR=0X0 MDCR_EL2=0X6
+PAYLOAD EL2MEM NEXT MDSCR_EL1 AFTER 8 S
+PAYLOAD EL2MEM MDSCR_EL1 RAW=0X0
+PAYLOAD EL2MEM NEXT OSLSR_EL1 AFTER 8 S
+PAYLOAD EL2MEM OSLSR_EL1 RAW=0X8 OSLK=0
+PAYLOAD EL2MEM NEXT ICC_SRE_EL2 AFTER 8 S
+PAYLOAD EL2MEM ICC_SRE_EL2 RAW=0XF SRE=1 ENABLE=1
+PAYLOAD EL2MEM DONE SCAN_ALL_MAPPED LOADS_OK=4 OF=4 HAZARD_READS=3
+PAYLOAD DONE INDEX=1 RETURN=0X0 STACK=OK LOADS=4 FAULTS=0 REFUSED=0 LINES=18 DROPPED=0
+```
+<!-- /boot9-panel -->
+
+**Boot 8's differences.** `HASH ... TICKS=14204370` (boot 9: `14204400`; `MS=739 MIBS=194` in both) and the four words `el2mem` read
+from RAM: `BANK_FIRST(0X880000000)=0X59ADB1EB`, `BANK_LAST(0XFFFFFFFFC)=0XF30F158`, `LOW_FIRST(0XA8000000)=0X380001` and
+`LOW_LAST(0XC3E64FFC)=0XEC6A2481` (boot 9: `0X1F8A08BE`, `0X9F6636DA`, `0X380001`, `0X1D11B2F9`). Three of the four words differ between
+the boots; every address, size, count and attribute is the same.
+
+**q1n1's own page** (boot 8, `UPTIME 101 S`) shows the registers of the left column above (`HCR_EL2` `0x88000010`, `SCTLR_EL2`
+`0x100030C5183D`, `TCR_EL2` `0x80843514`, `TTBR0_EL2` `0xA7F2E000`, `MAIR_EL2` `0xFFBB4400`), `MEMORY DESCRIPTORS` `0xEA` (234: the
+`MAP DESC=234` that `el2mem` read in place) and the six ranges the runner declared, each in one descriptor (`DESC=1`): the image at
+`0xCE86F000` (size `0x163000`), the map at `0xCEA36000` (`0x40000`), the preload table at `0xCEA86000` (`0x13A0`), the payload at
+`0xCEA88000`, the first file at `0xCEA8D000` (`0x3000`) and the second at `0xC3E65000` (`0x9000000`): the bases of the `LOADED` lines,
+and the base and size `hashbig` found for `BIG.DAT`.
+
+**What the unit answered** (OBSERVED in both boots unless a cell says otherwise):
+
+| Asked | What the page says | Label |
+| --- | --- | --- |
+| Does EL2's own stage-1 map reach the 30 GiB bank, `0x880000000` to `0x1000000000`? (U1) | Yes, for reads: `SCAN EXTENTS=17 PROBES=16014 ALL=MAPPED` over 31,961 MiB of Conventional memory, `BANK CONV_MIB=30720 PROBES=15361 ALL=MAPPED` for the bank alone, and the guarded loads of the bank's first and last word answered (`LOADS_OK=4 OF=4`) | OBSERVED; only `AT S1E2R` and loads were made: whether the bank is writable at EL2 is UNKNOWN |
+| With what attributes? | `WB.OS.NS1` for every probe and for the `CONTROL` pages (the firmware's types 1 to 6, the payload's code, its stack): Normal write-back, outer-shareable, `PAR_EL1.NS` set (what that means for a non-secure EL2 translation is UNKNOWN) | OBSERVED; the names are the payload's decode of `PAR_EL1` |
+| Where did the runner put a 144 MiB file? (U6) | `FILE INDEX=2 BASE=0XC3E65000 ... MIB=144`: below 4 GiB, in one allocated descriptor (`EXTENT ALLOCATED DESCRIPTORS=1`; the runner allocates a data file as `EfiLoaderData`), `WB.OS.NS1` at its first, middle and last page; the same address in both boots | OBSERVED |
+| How fast does plain C hash it at EL2, caches on? | `HASH BYTES=150994944 TICKS=14204400 MS=739 MIBS=194` (boot 8: `TICKS=14204370`): 739 ms, 194 MiB/s; `DIGEST F93155C96304AAD8 MATCH`: equal to the digest the runner computed before the bounce; the 25 s box was never near | OBSERVED; `MS` and `MIBS` are the arithmetic of the ticks at 19.2 MHz |
+| What do the ID registers read? | `ISAR2=0X10000012 MMFR1=0X111111312120 PAN=3 VH=1 HAFDBS=0`, `DFR1=0X0 PFR2=0X0 AIDR=0X0 REVIDR=0X0`, `MDCR_EL2=0X6` | OBSERVED; the decode below is INFERRED |
+| Do the three reads that may go to EL3 return? | Yes, each after its `NEXT` line and eight seconds: `MDSCR_EL1 RAW=0X0`, `OSLSR_EL1 RAW=0X8 OSLK=0`, `ICC_SRE_EL2 RAW=0XF SRE=1 ENABLE=1`, `HAZARD_READS=3`; no hang, no reset, no fault page | OBSERVED; that none was trapped to EL3 and emulated there is INFERRED (an EL3 handler that emulated a read would look the same) |
+
+**The decode (INFERRED: the Arm ARM was not re-read; the payload itself prints only `PAN`, `VH`, `HAFDBS`, `OSLK`, `SRE` and `ENABLE`, and
+they agree with the raw values beside them).** `MMFR1` `0x111111312120`: HAFDBS 0 (no hardware access/dirty update), VMIDBits 2, VH 1,
+HPDS 2, LO 1, PAN 3, SpecSEI 1, XNX 1, TWED 1, ETS 1, HCX 1, AFP 1. `ISAR2` `0x10000012`: WFxT 2, RPRES 1, CLRBHB 1, GPA3 and APA3 0.
+`MDCR_EL2` `0x6`: HPMN 6, no trap bit set. `OSLSR_EL1` `0x8`: OSLM `0b10`, OSLK 0 (the OS lock is not set). `ICC_SRE_EL2` `0xF`: SRE,
+DFB, DIB and Enable all 1.
+
+**Placement (INFERRED from the printed addresses).** The file ends at `0xCCE65000` (`0xC3E65000 + 0x9000000`), and the largest
+Conventional extent below 4 GiB, from which `el2mem` loaded its two low words, runs from `0xA8000000` (`LOW_FIRST`) to `0xC3E65000`
+(`LOW_LAST` is the word before it): 446 MiB.
+Together they make 590 MiB, the size of the largest low extent in boot 6's map ([`el2mem`](SP11-PAYLOAD-EL2MEM.md)), so the runner
+took the file from the top of that extent. One file size was seen by these boots, so that rule is INFERRED. The stick wrapper's dry run
+(a Snapintosh wrapper, not a q1n1 payload) was given a second size, 144,665,408 bytes, and the runner put it at `0xC446E000`, which ends at
+`0xCCE64B40`, the same top after page rounding (INFERRED: that run printed no extent); that it holds for every size is UNKNOWN.
+
+**Timing** (frames of the videos, plus or minus 3 s; the markers are 09:21:12 and 09:28:54, as in
+[the timing method](#the-restart-probe) above). Boot 9's video starts at the Shell's countdown: the autorun text and slbounce loading at
+about 6 s, q1n1's page at about 12 s (EL2 reached after `ExitBootServices`), the first payload lines at about 18 s and the finished page
+by about 42 s, so about 45 s from the Shell step to the end. The runner's read of the 144 MiB from the stick and its hash before the
+bounce therefore fit into the six seconds or so between the autorun text and q1n1's page (INFERRED by subtraction: no frame shows
+them). In both videos q1n1's status text shows again over the payload text now and then (at about 50 and 110 s of boot 8's video, 54 s
+of boot 9's) and the payload text is back in the next frame, 10 s later. It is not a restart: `UPTIME` keeps counting (101 S at 110 s,
+42 S at 54 s). The cause of the redraw is UNKNOWN; a photograph of the status text does not show a restart, `UPTIME` does.
+
+**Not shown, UNKNOWN.** Whether the bank is writable at EL2 stage 1 (`el2mem` stores nothing and asks `AT S1E2R` only), whether a cache
+clean reaches DRAM, and whether a page in the bank survives the bounce (nothing was placed there or compared across the bounce). And
+the cause of the restart after `cpuon`: these boots issued no `CPU_ON` and neither video shows a restart (boot 8 to `UPTIME` about
+110 S, boot 9 to 42 S and a few seconds more), which adds a longer read-only chain to [the restart control](#the-restart-control) and
+changes none of its labels.
 
 ## Payload `timer` (boot 4)
 
@@ -342,5 +459,9 @@ page stayed readable.
   cluster (no cause is claimed); the entry state of `0X20200` and `0X20300`, which no register line showed.
 * The NVMe and PCIe state at EL2: boot 3's T06 never returned from its read of the ECAM of segment 3 (`0x740000000`) and the
   board rebooted by itself (operator report); a hang followed by a watchdog reset is INFERRED.
-* Whether the region really holds 89 rows on the unit (the most seen on the panel is 58), and whether pages in the high bank
-  (from `0x880000000`) survive the bounce: both payloads of boot 5 sat below 4 GiB.
+* Whether the region really holds 89 rows on the unit (the most seen on the panel is 58).
+* The high bank (from `0x880000000`) is mapped write-back and readable at EL2 (OBSERVED, boots 8 and 9: `el2mem`'s probes and four
+  loads), but whether it is writable at EL2 stage 1, whether a cache clean reaches DRAM there and whether a page there survives the
+  bounce are UNKNOWN: every file the runner placed sat below 4 GiB, the 144 MiB one at `0xC3E65000`.
+* Whether the runner places another file size at the top of the same low extent (INFERRED from one size), and that none of the
+  three hazard reads of `el2mem` was trapped to EL3 and emulated there (all three returned; the page cannot tell: INFERRED only).

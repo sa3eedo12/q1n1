@@ -12,7 +12,7 @@ the next measurements (secondary CPUs through PSCI, an EL2 monitor, guest images
 
 Evidence labels follow the Snapintosh `AGENTS.md`: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED,
 UNKNOWN. Everything below is **EXPERIMENTAL**: built and tested on a host and on QEMU's EDK2 (which gives the
-runner a real EL2). **The runner ran on the unit** (2026-11-14 and 2026-11-15, boots 4, 5 and 7, build `A9F00F9CCBB5`; one unit, one boot
+runner a real EL2). **The runner ran on the unit** (2026-11-14 to 2026-11-16, boots 4, 5, 7, 8 and 9, build `A9F00F9CCBB5`; one unit, one boot
 each of those, not a distribution): it loaded, re-hashed and called payloads at EL2 and their lines reached the panel. What the
 photographs showed is in [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md). Per payload: `psci` ran in four boots and was OBSERVED on
 a page in three (boot 5 and the two boots of [the restart control](SP11-PAYLOAD-RESULTS.md#the-restart-control); boot 4's page was
@@ -20,10 +20,12 @@ lost: its right-hand column was not photographed), `usbsmmu` ran once (boot 5), 
 (INFERRED: it stopped at its CNTPOFF_EL2 read; it is not run in a chain again), `cpuon` ran three times, alone (boot 7 and steps 2
 and 3 of [the restart probe](SP11-PAYLOAD-RESULTS.md#the-restart-probe)): it started the eleven secondaries (every report that
 reached the page says EL2) and each was seen OFF again, and the board restarted by itself after two of the three runs, for a reason
-and at a time that are UNKNOWN ([SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md#the-restart)), and `state` is **hardware NOT RUN**,
-as are the two read-only memory payloads `el2mem` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md): what EL2's stage-1 map reaches
-and the registers a monitor reads at launch) and `hashbig` ([SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md): how fast EL2 hashes
-the biggest loaded file, and where the firmware put it), and the two timer payloads that WRITE EL2 state and need the operator's named
+and at a time that are UNKNOWN ([SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md#the-restart)), `el2mem` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md): what EL2's
+stage-1 map reaches and the registers a monitor reads at launch) and `hashbig` ([SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md): how fast EL2 hashes
+the biggest loaded file, and where the firmware put it) ran together in boots 8 and 9 with a 144 MiB data file (OBSERVED, one unit,
+two boots: both returned, the 30 GiB bank is mapped write-back and readable at EL2, the file sat at `0xC3E65000` and was hashed at
+194 MiB/s; the bank's writability is UNKNOWN: [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9)),
+and `state` is **hardware NOT RUN**, as are the two timer payloads that WRITE EL2 state and need the operator's named
 authorisation before any run, `cnthctl` ([SP11-PAYLOAD-CNTHCTL.md](SP11-PAYLOAD-CNTHCTL.md): can `CNTHCTL_EL2` be written with the
 monitor's value and put back) and `el1trap` ([SP11-PAYLOAD-EL1TRAP.md](SP11-PAYLOAD-EL1TRAP.md): do the EL1 counter traps work, in a bounded
 EL1 excursion).
@@ -404,10 +406,10 @@ the run under the pinned UEFI Shell).
 | `python3 tools/test-q1n1-sp11-payload-qemu-timer.py` | QEMU/EDK2 at EL2: `state`, `psci`, `timer` in one boot (72 lines); `timer` copies that hang or fault on a hazardous read: the NEXT line last on the page, or q1n1's fault page |
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu.py` | `usbsmmu` ([SP11-PAYLOAD-USBSMMU.md](SP11-PAYLOAD-USBSMMU.md)): the ten suites of its host test (scripted MMIO windows, RAM and memory map, the walk against independently built page tables, an abort at every load, hostile registers, the line and load budgets), 83 seeded-bug mutants and an unmutated control, the source audit of what it may touch, the allow-list on `usbsmmu.bin` (23 seeded bad binaries) and on the other policies, the manifest tool and the runner's validator on `psci usbsmmu timer` |
 | `python3 tools/test-q1n1-sp11-payload-usbsmmu-doc.py` | the payload documents against the source and each other (registers and their evidence labels, the printed blocks against the host test's own dump, numbers, reason names, decision tables, the QEMU block, links and anchors, licence lines and sizes of these documents and of the results document, the pointers in this document, the moved `state` and `psci` stubs), with 89 seeded mistakes in the documents |
-| `python3 tools/test-q1n1-sp11-payload-results-doc.py` | [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md): the page of boot 5 (its line counts, its decoded numbers), the register table's boot 5 values against it, the timer inference against the line counts and the timer document's printed lines, the claims (one unit, at most four boots of any payload; the inferences labelled; the restart's cause and times UNKNOWN, no window; the read-only control), the runner lines quoted for `cpuon` against the cpuon document's page, licence line, size and links, with 24 seeded mistakes in the two documents |
+| `python3 tools/test-q1n1-sp11-payload-results-doc.py` | [SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md): the page of boot 5 (its line counts, its decoded numbers), the register table's boot 5 values against it, the timer inference against the line counts and the timer document's printed lines, the claims (one unit, at most four boots of any payload; the inferences labelled; the restart's cause and times UNKNOWN, no window; the read-only control), the page of boots 8 and 9 against the arithmetic of its own values, the declared ranges and the placement of the file, the runner lines quoted for `cpuon` against the cpuon document's page, licence line, size and links, with 50 seeded mistakes in the two documents |
 | `python3 tools/test-q1n1-sp11-payload-cnthctl.py`, `-cnthctl-doc.py`, `-qemu-cnthctl.py` | `cnthctl` ([SP11-PAYLOAD-CNTHCTL.md](SP11-PAYLOAD-CNTHCTL.md#tests)): the host program over a modelled register under ASan and UBSan, its seeded-bug mutants and bad binaries, the document against the source, and the QEMU/EDK2 boot |
 | `python3 tools/test-q1n1-sp11-payload-el1trap.py`, `-el1trap-doc.py`, `-qemu-el1trap.py` | `el1trap` ([SP11-PAYLOAD-EL1TRAP.md](SP11-PAYLOAD-EL1TRAP.md#tests)): the host program over a modelled EL1 excursion under ASan and UBSan, its seeded-bug mutants and bad binaries, the document against the source, and the QEMU/EDK2 boots |
-| `python3 tools/test-q1n1-sp11-payload-el2mem.py`, `-hashbig.py`, `-memcheck.py`, `-mmu-doc.py`, `-qemu-el2mem.py` | `el2mem` and `hashbig` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md#tests), [SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md#tests)): the host programs over a modelled machine under ASan and UBSan, their seeded-bug mutants, the memory-discipline check of `tools/sp11_payload_memcheck.py` on the binaries, the two documents against the sources, and the QEMU/EDK2 boots |
+| `python3 tools/test-q1n1-sp11-payload-el2mem.py`, `-hashbig.py`, `-memcheck.py`, `-mmu-doc.py`, `-qemu-el2mem.py` | `el2mem` and `hashbig` ([SP11-PAYLOAD-EL2MEM.md](SP11-PAYLOAD-EL2MEM.md#tests), [SP11-PAYLOAD-HASHBIG.md](SP11-PAYLOAD-HASHBIG.md#tests)): the host programs over a modelled machine under ASan and UBSan, their seeded-bug mutants, the memory-discipline check of `tools/sp11_payload_memcheck.py` on the binaries, the two documents against the sources and the unit's pages, and the QEMU/EDK2 boots |
 | `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 
 The default-off proof (`PayloadDefaultOff`): with the gate at 0 every runner file compiles to an object with no
@@ -453,8 +455,8 @@ second hash passes), and payload lines reach the right-hand column, 58 of them a
   [SP11-PAYLOAD-CPUON.md](SP11-PAYLOAD-CPUON.md)) and each core it starts powers itself off with `CPU_OFF`. Whether the firmware
   leaves the secondaries off or parked is what the `AFFINITY` group of `psci` asked: OFF for all eleven, OBSERVED in boot 5 and
   again in boot 7.
-* At most 5 files of at most 256 MiB each (slbounce's capacity and chunk budget); no change to slbounce was made or
-  is needed.
+* At most 5 files of at most 256 MiB each (slbounce's capacity and chunk budget; a 144 MiB file passed it in boots 8 and 9, OBSERVED);
+  no change to slbounce was made or is needed.
 * No persistent log: the page and the UART (when there is one) are the only outputs. 40 lines per payload, 100
   characters each; the panel region holds about 89 lines on the unit's panel size (the layout asks for at least 60),
   and the runner's own three lines per payload count against it.
@@ -511,7 +513,7 @@ is UNIMPLEMENTED and, on the unit, UNKNOWN beyond what `psci` answered.
    already loaded, hash-checked before the bounce, declared to the sweep and found through `preload_table`. It
    needs: a post-bounce `verify(index)` op for a data file (`q1n1_preload_verify` exists; only the payloads, the
    files named `.BIN`, are hashed at EL2 today, because a data file can be hundreds of megabytes; [`hashbig`](SP11-PAYLOAD-HASHBIG.md)
-   measures what hashing one in place costs, hardware NOT RUN); to take over
+   measured what hashing one in place costs: 194 MiB/s for 144 MiB, OBSERVED in boots 8 and 9); to take over
    `VBAR_EL2` and never return (a payload that does not return is already named by the `PAYLOAD CALL` line, and
    ends the chain); the memory map (already in `a`) to decide what is free, including q1n1's own image, table and
    stack; and, for guests over 256 MiB, either several files or a larger chunk budget in slbounce, which needs a
@@ -530,8 +532,10 @@ is UNIMPLEMENTED and, on the unit, UNKNOWN beyond what `psci` answered.
   signature of a no-execute page. **Answered (OBSERVED, boot 5): yes**, both payloads ran and no fault page appeared
   ([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md)).
 * Is every page the firmware hands out mapped after the bounce, the high bank (from 0x880000000) included? The
-  second hash reads each payload where it is. **Partly answered (OBSERVED, boot 5):** both payloads, at `0xCEC90000` and
-  `0xCEA89000`, hashed correctly at EL2; the high bank is untried (UNKNOWN).
+  second hash reads each payload where it is. **Mostly answered (OBSERVED, boots 5, 8 and 9):** both payloads of boot 5, at
+  `0xCEC90000` and `0xCEA89000`, hashed correctly at EL2; in boots 8 and 9 `el2mem` found the whole high bank mapped write-back and
+  readable at EL2 and `hashbig` hashed a 144 MiB file at `0xC3E65000` ([SP11-PAYLOAD-RESULTS.md](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9)).
+  Whether the bank is also writable, and whether a page there survives the bounce, are UNKNOWN.
 * Does the firmware answer `smc #0` from EL2 after the bounce? With the stick above, the page after `PAYLOAD CALL 1`
   ends at `PAYLOAD PSCI NEXT VERSION` if it hangs there, or in a fault page (ELR inside `psci.bin`) if the `smc`
   raised an exception. Either is a result: say which group name was the last line. **Answered (OBSERVED, boot 5):

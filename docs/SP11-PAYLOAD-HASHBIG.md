@@ -7,17 +7,18 @@ and the stick files, [the chain](SP11-PAYLOAD.md#the-chain-several-payloads-in-o
 [`el2mem`](SP11-PAYLOAD-EL2MEM.md), with which it shares the code that asks the MMU and reads the memory map
 (`payloads/payload-mmu.h`) and which explains `AT S1E2R`, the decoding of `PAR_EL1` and the memory discipline of the binary check
 once for both. Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
-**EXPERIMENTAL; hardware NOT RUN.**
+**EXPERIMENTAL; it ran on the unit twice (boots 8 and 9, 2026-11-16): OBSERVED, one unit, two boots.**
 
 `hashbig` is **read only** and answers one question of the monitor port (the monitor-port document of the Snapintosh repository,
 unknown U6): **the monitor's wrapper must verify its 115 to 144 MiB bundle itself, so how fast can a payload at EL2 hash a file
 the runner loaded, is that file's memory mapped cacheable, and where did the firmware put it?** The runner hashes data files
 before the bounce and only the payloads, the files named `.BIN`, again at EL2, because a data file can be hundreds of megabytes
-([SP11-PAYLOAD.md](SP11-PAYLOAD.md), "What the next payloads need from this ABI"); nothing has measured what a plain-C
-SHA-256 at EL2 costs there. **No value of this payload has been OBSERVED on the unit.** What the design rests on, OBSERVED on
-earlier runs ([the results](SP11-PAYLOAD-RESULTS.md)): both payloads of boot 5, loaded at `0xCEC90000` and `0xCEA89000`, hashed
-correctly at EL2 where the firmware put them, so memory the runner allocated below 4 GiB is readable after the bounce; whether
-the same holds for a 144 MiB file, or above 4 GiB, is UNKNOWN.
+([SP11-PAYLOAD.md](SP11-PAYLOAD.md), "What the next payloads need from this ABI"); nothing had measured what a plain-C
+SHA-256 at EL2 costs there before boots 8 and 9. **No value of this payload had been OBSERVED on the unit before boots 8 and 9**
+([below](#what-the-unit-showed-boots-8-and-9)). What the design rested on, OBSERVED on earlier runs
+([the results](SP11-PAYLOAD-RESULTS.md)): both payloads of boot 5, loaded at `0xCEC90000` and `0xCEA89000`, hashed
+correctly at EL2 where the firmware put them, so memory the runner allocated below 4 GiB is readable after the bounce. The same held
+for a 144 MiB file at `0xC3E65000` in boots 8 and 9; a file above 4 GiB is untried (UNKNOWN: the runner put none there).
 
 ## What it does, in order
 
@@ -144,21 +145,59 @@ PAYLOAD HASHBIG DONE MATCH
 The most lines the host tests measure over every world they script is 8; the budget is 12 so that a wrapped `ATTR` line or a `DIFFER`
 cannot push the last line out.
 
+## What the unit showed (boots 8 and 9)
+
+OBSERVED on the unit, 2026-11-16, in two boots of the `memhash` plan (`hashbig` first, then `el2mem`, with `BIG.DAT` of 144 MiB:
+[the staging plan](#the-staging-plan-as-run-boots-8-and-9); [the results](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9)
+have the whole page, the timing and what was not shown). One unit, two boots; the values were read by hand from the last frame of a
+video each and are not CRC-checked. The page below is boot 9's; boot 8's differs only in `TICKS=14204370`. The host-model page above
+and the QEMU page below are **models**; this one is the unit's.
+
+<!-- hashbig-unit-page -->
+```
+PAYLOAD HASHBIG START CURRENTEL=0X8 FREQ=19200000
+PAYLOAD HASHBIG FILE INDEX=2 BASE=0XC3E65000 BYTES=150994944 MIB=144
+PAYLOAD HASHBIG EXTENT ALLOCATED DESCRIPTORS=1
+PAYLOAD HASHBIG ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1
+PAYLOAD HASHBIG NEXT SHA256 BOX=25 S
+PAYLOAD HASHBIG HASH BYTES=150994944 TICKS=14204400 MS=739 MIBS=194
+PAYLOAD HASHBIG DIGEST F93155C96304AAD8 MATCH
+PAYLOAD HASHBIG DONE MATCH
+```
+<!-- /hashbig-unit-page -->
+
+The runner's own `DONE INDEX=0` line closed it: `RETURN=0X0 STACK=OK LOADS=0 FAULTS=0 REFUSED=0 LINES=8 DROPPED=0`. All 8 lines were
+printed (of the 12 allowed), none dropped.
+
+* **Where the firmware put the file (U6): `0xC3E65000`**, below 4 GiB, the same address in both boots, inside one allocated
+  descriptor (the runner allocates a data file as `EfiLoaderData`), with `WB.OS.NS1` at its first, middle and last page: Normal
+  write-back, outer-shareable, `PAR_EL1.NS` set. It ends at `0xCCE65000`; the bank is not where it went. `hashbig` itself sits at
+  `0xCEA8D000` and `el2mem` at `0xCEA88000`.
+* **The hash: 14,204,400 ticks of the 19.2 MHz counter (boot 8: 14,204,370), 739 ms, 194 MiB/s**, over 144 MiB with the caches on,
+  in plain C with no crypto instruction. `MS` and `MIBS` are the arithmetic of the ticks (739.8 ms and 194.6 MiB/s, truncated). A
+  144 MiB bundle is hashed in 0.74 s here, and the 25-second box was never near.
+* **`DIGEST F93155C96304AAD8 MATCH`.** All 32 bytes of the digest equal the SHA-256 the runner computed before the bounce: the file
+  crossed the bounce and the sweep intact (the bounce was taken with six declared ranges, `BIG.DAT`'s among them).
+* **Not shown, UNKNOWN or INFERRED.** One file size and one placement: that the runner puts another size at the top of the same low
+  extent is INFERRED. A file in the bank was not hashed, so the rate there is UNKNOWN, and so is what another unit or boot would do.
+
 ## What each outcome means for the monitor
 
-INFERRED throughout: nothing below has been observed on the unit. The "next step" is a proposal for a separate, authorized change,
-never something this payload does.
+INFERRED throughout, except that a row whose outcome the unit printed says OBSERVED at the start of its second column (boots 8 and 9,
+[above](#what-the-unit-showed-boots-8-and-9)): the outcome is OBSERVED and its meaning stays INFERRED. The "next step" is a proposal
+for a separate, authorized change, never something this payload does.
 
 <!-- hashbig-decisions -->
 | Outcome on the page | What it means | Next step |
 | --- | --- | --- |
-| `HASH BYTES=150994944 ... MIBS=<n>` and `DIGEST ... MATCH` | a plain-C SHA-256 at EL2 hashes the 144 MiB at `MIBS` MiB/s: 144 / `MIBS` seconds; at 6 or more that is within the 25-second box and a boot-time check of the bundle is affordable | the wrapper may verify its bundle itself with this code; the number sizes the boot delay |
+| `HASH BYTES=150994944 ... MIBS=<n>` and `DIGEST ... MATCH` | OBSERVED (boots 8 and 9, `MIBS=194`, `MS=739`, `MATCH`): a plain-C SHA-256 at EL2 hashes the 144 MiB at `MIBS` MiB/s: 144 / `MIBS` seconds; at 6 or more that is within the 25-second box and a boot-time check of the bundle is affordable | the wrapper may verify its bundle itself with this code; the number sizes the boot delay |
 | `TIMEBOX HASHED=<n> OF <n>` with a `HASH` line | the box ended before the file did; the `HASH` line gives the rate over the part hashed (still the answer): the whole file would take about 144 / `MIBS` seconds | decide whether that delay is acceptable; if not, the hardware SHA-256 instructions or a smaller bundle are the options (separate decisions); no result is lost |
 | `ATTR FIRST=WB.IS MID=WB.IS LAST=WB.IS` | the loaded file is Normal write-back inner-shareable: cacheable, the fast case | none |
+| `ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1` | OBSERVED (boots 8 and 9): the loaded file is Normal write-back, outer-shareable, NS set: cacheable, the fast case; the 194 MiB/s above is the rate on it | none |
 | `ATTR ... NC ...` or `DEVICE` | the file's memory is non-cacheable or Device at EL2: reads are uncached (INFERRED: several times slower) | the wrapper must copy the bundle to cacheable memory before it works on it, or accept the rate shown |
 | `ATTR` entries that differ (`FIRST` against `LAST`) | the file spans mappings with different attributes | the monitor must not assume one attribute for a bundle |
-| `ATTR ... NONIDENT` or `.NS1` | the output page is not the input page (the map is not an identity map there), or the NS bit is set (its meaning is UNKNOWN; QEMU shows it set) | the wrapper's address arithmetic must not assume identity |
-| `FILE ... BASE=0X..` below `0X100000000` / in `0X880000000` and above | where the firmware put a 144 MiB file: in the low extents or in the bank (U6) | decides where the loader may expect a big block, and how much of the bank the runner already uses |
+| `ATTR ... NONIDENT` or `.NS1` | OBSERVED (boots 8 and 9, for `.NS1` only: `WB.OS.NS1`; `NONIDENT` was not seen): the output page is not the input page (the map is not an identity map there), or the NS bit is set (its meaning is UNKNOWN; QEMU shows it set) | the wrapper's address arithmetic must not assume identity |
+| `FILE ... BASE=0X..` below `0X100000000` / in `0X880000000` and above | OBSERVED (boots 8 and 9, `BASE=0XC3E65000`, below 4 GiB): where the firmware put a 144 MiB file: in the low extents or in the bank (U6) | decides where the loader may expect a big block, and how much of the bank the runner already uses |
 | `EXTENT REFUSED=NOT_IN_ALLOCATED_DESCRIPTORS AT=0X..` | part of the file is in memory the map does not call allocated (a hole, or another type): the runner's placement or the map does not agree | the wrapper cannot trust the runner's placement; compare the descriptor at `AT` with the earlier boots' maps |
 | `EXTENT REFUSED=BASE_NOT_PAGE_ALIGNED`, `SIZE_ZERO_OR_OVER_256_MIB` or `BEYOND_THE_48_BIT_SPACE` | the table's entry is not one the runner could have built: it allocates whole pages, at most 256 MiB, inside the address space | a runner bug or a changed ABI: stop; nothing of the file was read |
 | `REFUSED A_PAGE_OF_THE_FILE_IS_NOT_MAPPED` | EL2's stage-1 lacks a page of the loaded file after the bounce | the monitor cannot read its bundle in place at EL2 without a map of its own: the central finding of U6 |
@@ -180,7 +219,8 @@ OBSERVED, QEMU 11.1.3 (`virt,virtualization=on`, `-cpu max`, `-smp 1`, TCG, EDK2
 in the chain, finds the data file the runner loaded (1 MiB and 4,093 bytes of fixed pseudo-random bytes, not 144 MiB: QEMU reads a FAT
 directory slowly, and what 144 MiB takes on the unit is the question the unit has to answer), checks its extent against the final map,
 asks the MMU about its pages and says `MATCH` with **the digest Python's `hashlib` computes for the same bytes** and the runner computed
-before the bounce. The address and the rate vary from run to run: the test asserts the shape and the cross-checks.
+before the bounce. The address and the rate vary from run to run: the test asserts the shape and the cross-checks. QEMU is a model:
+the unit's page is [above](#what-the-unit-showed-boots-8-and-9).
 
 <!-- hashbig-qemu -->
 ```
@@ -201,19 +241,22 @@ the file's base and size are the ones the runner reported on its `LOADED` line; 
 `MIBS` are the arithmetic of `TICKS` and the counter frequency the runner printed; the three pages of the file are mapped; the runner
 counted the lines and dropped none; no file on the stick changed.
 
-**What QEMU cannot show**, UNKNOWN on the unit: how fast the unit hashes (TCG speed says nothing: 57 MiB/s here), the attributes of a
-144 MiB file, where the firmware puts it, whether a page in the middle of it is mapped, and what `NS` means.
+**What QEMU cannot show**, and what the unit showed instead ([above](#what-the-unit-showed-boots-8-and-9)): how fast the unit hashes
+(TCG speed says nothing: 57 MiB/s here; the unit: 194 MiB/s), the attributes of a 144 MiB file (`WB.OS.NS1`), where the firmware puts it
+(`0xC3E65000`), and whether a page in the middle of it is mapped (it is). Still UNKNOWN on the unit: what `NS` means.
 
-## The proposed staging plan (not run)
+## The staging plan, as run (boots 8 and 9)
 
-The plan is the coordinator's and is the same as in [`el2mem`](SP11-PAYLOAD-EL2MEM.md#the-proposed-staging-plan-not-run): one boot, three
-files, the manifest listing `EL2MEM.BIN`, `HASHBIG.BIN` and `BIG.DAT` of 144 MiB (150,994,944 bytes), run through `Q1N1-PAYLOAD.EFI --el2`
-under `SLBOUNCE-DEVHE-MARK.EFI`. `hashbig` hashes `BIG.DAT` because it is the largest file that is not a payload.
+The plan is the coordinator's, the same as in [`el2mem`](SP11-PAYLOAD-EL2MEM.md#the-staging-plan-as-run-boots-8-and-9), and it ran twice
+on 2026-11-16 ([the results](SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9)): one boot per step, three files, the
+manifest listing `HASHBIG.BIN`, `EL2MEM.BIN` and `BIG.DAT` of 144 MiB (150,994,944 bytes), run through `Q1N1-PAYLOAD.EFI --el2` under
+`SLBOUNCE-DEVHE-MARK.EFI`. `hashbig` hashes `BIG.DAT` because it is the largest file that is not a payload. The commands are the recipe,
+not a record of how the stick was written.
 
 <!-- hashbig-staging -->
 ```sh
 dd if=/dev/urandom of=BIG.DAT bs=1048576 count=144
-python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/el2mem.bin build/uefi/payloads/hashbig.bin BIG.DAT
+python3 tools/sp11_payload_manifest.py --out-dir build/stick build/uefi/payloads/hashbig.bin build/uefi/payloads/el2mem.bin BIG.DAT
 load SP11\SLBOUNCE-DEVHE-MARK.EFI
 SP11\Q1N1-PAYLOAD.EFI --el2
 ```
@@ -221,20 +264,24 @@ SP11\Q1N1-PAYLOAD.EFI --el2
 
 The runner's own limits allow it (at most 5 files, each at most 256 MiB); slbounce splits a declared range into chunks of the 1 MiB
 cap q1n1 declares, at most 256 of them for a range, so a 144 MiB file takes 144. Whether the whole sweep, the image, the map, the table and
-the three payload ranges fit slbounce's budget with that file is INFERRED from the runner's document and was not tried; a refusal before
-the bounce leaves the stick as it was.
+the payload ranges fit slbounce's budget with that file was INFERRED from the runner's document; it is OBSERVED now: the bounce was taken with
+six declared ranges, `BIG.DAT`'s among them (`PAYLOAD READY FILES=3 RANGES=6 CODE=2`, then EL2), in both boots. A refusal before the
+bounce would have left the stick as it was.
 
-**Proposed stop rule.** One boot. `hashbig` is read only and bounded (25 seconds of counter time, 256 MiB at the most), so a page that
-ends after `NEXT SHA256 BOX=25 S`, or a board that resets during it, is a finding to photograph and not to retry as it is. `TIMEBOX`,
-`DIFFER`, every `REFUSED` and every `TABLE_REFUSED` are results, not stops.
+**Stop rule (never triggered).** One boot per step. `hashbig` is read only and bounded (25 seconds of counter time, 256 MiB at the
+most), so a page that ended after `NEXT SHA256 BOX=25 S`, or a board that reset during it, was a finding to photograph and not to retry
+as it is. `TIMEBOX`, `DIFFER`, every `REFUSED` and every `TABLE_REFUSED` are results, not stops. In both boots the hash ended in `MATCH`
+after 739 ms.
 
-OBSERVED (a restart control of 2026-11-16, reported to this work; no page of it is in this tree): the runner flow with a read-only PSCI
-payload alive at `UPTIME` 224 S and 268 S in two boots. A long-running read-only payload, which this one may be for up to its 25 second
-box, is not expected to restart the board by itself.
+OBSERVED (a restart control of 2026-11-16, [recorded in the results](SP11-PAYLOAD-RESULTS.md#the-restart-control)): the runner flow
+with a read-only PSCI payload alive at `UPTIME` 224 S and 268 S in two boots, and boots 8 and 9 ran this payload (a hash of 739 ms) and
+`el2mem` with no restart in their videos (boot 8 to `UPTIME` about 110 S). A long-running read-only payload did not restart the board
+by itself in those four boots; the restart after `cpuon` stays unexplained (cause UNKNOWN).
 
 ## Tests
 
-Hardware: NOT RUN. Every command writes only under `build/`.
+The commands below are host and QEMU tests: none runs on hardware (the unit's two runs are
+[above](#what-the-unit-showed-boots-8-and-9)). Every command writes only under `build/`.
 
 | Command | What it runs |
 | --- | --- |
@@ -255,24 +302,30 @@ host tests measure 8).
 | Chain | Lines | Fits the unit's 89 rows | Fits the 60 the layout asks for |
 | --- | --- | --- | --- |
 | `hashbig` and a data file | (2 + 1) + 3 + 12 = 18 | yes | yes |
-| `el2mem`, `hashbig` and `BIG.DAT`: the staging plan | (3 + 1) + 3 x 2 + 26 + 12 = 48 | yes | yes |
+| `hashbig`, `el2mem` and `BIG.DAT`: the `memhash` plan | (3 + 1) + 3 x 2 + 26 + 12 = 48 | yes | yes |
 | `psci`, `hashbig` and `BIG.DAT` | (3 + 1) + 3 x 2 + 30 + 12 = 52 | yes | yes |
 <!-- /hashbig-chain-budget -->
+
+The unit's page of the `memhash` plan had 36 lines, `(3 + 1) + 3 x 2 + 8 + 18 = 36`: the formula above uses the budgets (26 and 12), the
+unit the lines printed.
 
 ## Residual risks
 
 * **Three pages of a 144 MiB file are asked about, not all of them.** A hole between them would abort the load into q1n1's fault
-  page (INFERRED), not hang; the extent check against the allocated descriptors is what bounds the rest.
+  page (INFERRED), not hang; the extent check against the allocated descriptors is what bounds the rest. On the unit the hash read all
+  of the file and matched.
 * **The rate depends on the attributes**: the `ATTR` line is printed before the hash so that a slow run can be read against it.
 * **A 25-second box is a choice**, not a finding: a file of 144 MiB at less than 5.76 MiB/s ends in `TIMEBOX` with the rate of the
-  part hashed, which is the answer the monitor needs.
+  part hashed, which is the answer the monitor needs. The unit hashed it at 194 MiB/s.
 * **`MIBS` is an integer**, so it truncates: the `TICKS` and `BYTES` on the same line are the exact figures.
 * **Only the first eight bytes of each digest are printed**; the verdict is over all thirty-two (tested with a difference in the last
   byte).
-* **QEMU shows the shape only** (TCG speed, a small file): the unit's first run is the first observation of any value.
+* **QEMU shows the shape only** (TCG speed, a small file); the unit's values are those of boots 8 and 9: one unit, two boots, one
+  file size, read by hand from videos.
 
 ## Status
 
-EXPERIMENTAL. Hardware NOT RUN. OBSERVED on the unit by other payloads: payloads of boot 5 hashed correctly at EL2 where the firmware put
-them. OBSERVED under QEMU only: the page above and the behaviours listed under it. UNKNOWN: everything else this payload would print on
-the unit.
+EXPERIMENTAL. Hardware: ran in two boots (2026-11-16), one unit; OBSERVED, the lines of [what the unit showed](#what-the-unit-showed-boots-8-and-9)
+(the file's placement, its attributes, the rate and the matching digest). OBSERVED under QEMU only: the QEMU page and the behaviours
+listed under it. UNKNOWN: whether the runner places another file size at the top of the same low extent (INFERRED from one size), the
+rate in the bank, what `NS` means, and what another unit or boot would print.

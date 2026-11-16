@@ -5,17 +5,18 @@ the manifest tool.
 
     python3 tools/test-q1n1-sp11-payload-mmu-doc.py
 
-  * MmuDocAgreement: the house rules (licence line, size limit, no machine identifier, evidence labels, hardware NOT RUN) and the links;
-    every keyword a payload can print against its document and every keyword of the line catalogue against the source; the page of a
-    normal run against what the host program prints; the instruction tables against the built binaries (and, for `hashbig`, the two
-    functions that load through any base); the `PAR_EL1` table against the decode; every number a document states (limits, seconds,
-    sizes, return values) against the source; the QEMU blocks against the shapes tools/test-q1n1-sp11-payload-qemu-el2mem.py asserts, and
-    against the arithmetic of their own values; the chain arithmetic against the runner's planning table and the budgets; the staging
-    plan against the manifest tool at the staged size; the counts of the Tests tables against the drivers.
+  * MmuDocAgreement: the house rules (licence line, size limit, no machine identifier, evidence labels, the status: the payloads ran on the
+    unit twice and no phrase of the days they had not survives) and the links; every keyword a payload can print against its document and
+    against the source; the page of a normal run against what the host program prints; the instruction tables against the built binaries;
+    the `PAR_EL1` table against the decode; every number a document states against the source; the QEMU blocks against the shapes the QEMU
+    test asserts and their own arithmetic; the unit's blocks (boots 8 and 9) against the results document's transcript and the manifest
+    tool's entries for the built binaries, with the decision-table rows the unit matched marked OBSERVED and no other; the chain
+    arithmetic; the staging plan against the manifest tool; the counts of the Tests tables against the drivers.
   * MmuDocMutants: seeded mistakes in either document, each of which an agreement test must refuse.
     (The planning table of "The chain" is checked in tools/test-q1n1-sp11-payload-chain.py.)
 
-Writes only under build/. Hardware: NOT RUN. Evidence: EXPERIMENTAL (host model only)."""
+Writes only under build/. Hardware: NOT RUN (this checks documents; the unit's runs are in docs/SP11-PAYLOAD-RESULTS.md).
+Evidence: EXPERIMENTAL (host model only)."""
 import functools
 import hashlib
 from pathlib import Path
@@ -38,8 +39,24 @@ native = kit.native_module('mmu-doc')
 BUILD = native.BUILD
 DOCS = {'el2mem': ROOT / 'docs' / 'SP11-PAYLOAD-EL2MEM.md', 'hashbig': ROOT / 'docs' / 'SP11-PAYLOAD-HASHBIG.md'}
 RUNNER_DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
+RESULTS_DOC = ROOT / 'docs' / 'SP11-PAYLOAD-RESULTS.md'
 LINKED = ('SP11-PAYLOAD.md', 'SP11-PAYLOAD-STATE.md', 'SP11-PAYLOAD-CPUON.md', 'SP11-PAYLOAD-RESULTS.md')
 PAYLOADS = ('el2mem', 'hashbig')
+# The status both documents state, and the phrases of the days before the unit ran the payloads, none of which may survive.
+STATUS = '**EXPERIMENTAL; it ran on the unit twice (boots 8 and 9, 2026-11-16): OBSERVED, one unit, two boots.**'
+STALE = ('hardware not run', 'hardware: not run', '(not run)', 'proposed staging plan', 'proposed stop rule', 'nothing below has been observed on the unit',
+         'reported to this work; no page of it is in this tree', 'is not expected to restart the board by itself',
+         'no value of this payload has been observed on the unit')
+# The rows of each decision table the unit's page matched, by a piece of the first column: those say OBSERVED and no other row does.
+OBSERVED_ROWS = {'el2mem': ('ALL=MAPPED', 'KEY RESULT', 'PAN=<n>', 'VH=<n> HAFDBS=<n>', 'ID DFR1', 'OSLK=0', 'MDSCR_EL1 RAW', 'SRE=1 ENABLE=1'),
+                 'hashbig': ('MIBS=<n>', 'ATTR FIRST=WB.OS.NS1', 'NONIDENT', 'BASE=0X')}
+# What the prose around each unit page says in numbers, as it writes them.
+UNIT_PROSE = {
+    'el2mem': ('31,961 MiB', '16,014 times', '30,720 MiB, 15,361 probes', '`0x111111312120`', '`0x10000012`', '`OSLSR_EL1` `0x8` (`OSLK=0`',
+               '`ICC_SRE_EL2` `0xF`', '`MDCR_EL2` `0x6`', '446 MiB remain below it', "boot 6's 32,105 less 144",
+               '(`0X59ADB1EB`, `0XF30F158`, `0X380001`, `0XEC6A2481`)', '`(3 + 1) + 3 x 2 + 8 + 18 = 36`'),
+    'hashbig': ('`0xC3E65000`', '14,204,400 ticks of the 19.2 MHz counter (boot 8: 14,204,370), 739 ms, 194 MiB/s', '739.8 ms and 194.6 MiB/s',
+                'hashed in 0.74 s', 'ends at `0xCCE65000`', '`TICKS=14204370`', '`(3 + 1) + 3 x 2 + 8 + 18 = 36`')}
 SOURCE_FILES = {'el2mem': ('el2mem.c', 'payload-mmu.h'), 'hashbig': ('hashbig.c', 'payload-mmu.h', 'payload-sha256.h')}
 LINE_WORD = re.compile(r'\b[A-Z][A-Z0-9_]{2,}\b')
 NUMBER_WORDS = {3: 'three', 5: 'five', 8: 'eight', 10: 'ten', 12: 'twelve'}
@@ -106,9 +123,16 @@ def staged():
     with open(big, 'wb') as handle:
         handle.truncate(150994944)
     try:
-        return manifest_tool.build([built('el2mem')['flat'], built('hashbig')['flat'], big])[1]
+        return manifest_tool.build([built('hashbig')['flat'], built('el2mem')['flat'], big])[1]
     finally:
         big.unlink()
+
+
+def unit_panel():
+    """The 36 lines of boot 9's page, the transcript docs/SP11-PAYLOAD-RESULTS.md holds."""
+    found = re.search(r'<!-- boot9-panel -->\n```\n(.*?)```\n<!-- /boot9-panel -->', RESULTS_DOC.read_text(encoding='utf-8'), re.S)
+    assert found, 'the results document has no <!-- boot9-panel --> block'
+    return found.group(1).splitlines()
 
 
 class MmuDocAgreement(unittest.TestCase):
@@ -134,10 +158,11 @@ class MmuDocAgreement(unittest.TestCase):
                 self.assertLess(len(text.encode('utf-8')), 50 * 1024)
                 for label in ('VERIFIED', 'OBSERVED', 'INFERRED', 'EXPERIMENTAL', 'UNIMPLEMENTED', 'UNKNOWN'):
                     self.assertIn(label, text)
-                self.assertIn('**EXPERIMENTAL; hardware NOT RUN.**', text)
-                self.assertIn('Hardware NOT RUN.', text.split('## Status')[1])
-                self.assertIn('no value of this payload has been observed on the unit', flat(text).lower())
-                self.assertIn('(not run)', text)
+                self.assertIn(STATUS, flat(text))
+                self.assertIn('Hardware: ran in two boots (2026-11-16), one unit', flat(text.split('## Status')[1]))
+                self.assertIn('No value of this payload had been OBSERVED on the unit before boots 8 and 9', flat(text))
+                for stale in STALE:
+                    self.assertNotIn(stale, flat(text).lower(), 'a phrase of the days before the unit ran the payload')
                 for number, line in enumerate(text.splitlines(), 1):
                     self.assertIsNone(pattern.search(line), f'{number}: {line}')
 
@@ -246,7 +271,8 @@ class MmuDocAgreement(unittest.TestCase):
         self.assertIn(f'`{const("el2mem.c", "BANK_BASE"):#x}` to `{const("el2mem.c", "BANK_END"):#x}`', e)
         for text in (e, h):
             self.assertEqual(set(re.findall(r'`(0x88\w*)`', text)) - {'0x880000000'}, set(), 'the bank starts at 0x880000000')
-            self.assertEqual(set(re.findall(r'`(0x1000\w*)`', text)) - {'0x1000000000'}, set(), 'the bank ends at 0x1000000000')
+            self.assertEqual(set(re.findall(r'`(0x1000\w*)`', text)) - {'0x1000000000', '0x10000012'}, set(),
+                             "the bank ends at 0x1000000000 (0x10000012 is the unit's ISAR2, which the unit's pages print)")
         self.assertIn(f'`NEXT <REG> AFTER {const("el2mem.c", "WAIT_BEFORE_READ_S")} S`', e)
         self.assertEqual(set(re.findall(r'AFTER (\d+) S', e)), {str(const('el2mem.c', 'WAIT_BEFORE_READ_S'))}, 'every NEXT line waits the same')
         self.assertEqual(set(re.findall(r'\(at most (\w+)\)', e)),
@@ -322,7 +348,12 @@ class MmuDocAgreement(unittest.TestCase):
                 first = ' '.join(row[0] for row in decisions)
                 for word in outcomes[payload]:
                     self.assertIn(word, first, f'no row of the decision table has {word} as its outcome')
-                self.assertIn('INFERRED throughout: nothing below has been observed on the unit.', self.text[payload])
+                self.assertIn('INFERRED throughout, except that a row whose outcome the unit printed says OBSERVED at the start of its second '
+                              'column (boots 8 and 9,', flat(self.text[payload]))
+                marked = [row[0] for row in decisions if row[1].startswith('OBSERVED')]
+                self.assertEqual(len(marked), len(OBSERVED_ROWS[payload]), 'a row says OBSERVED that the unit did not print, or the reverse')
+                for piece in OBSERVED_ROWS[payload]:
+                    self.assertEqual(sum(piece in first for first in marked), 1, f'no single row marked OBSERVED has {piece}')
 
     # -- QEMU ---------------------------------------------------------------------------------------------------------------------
     def test_the_qemu_blocks_have_the_shape_the_qemu_test_asserts_and_agree_with_their_own_arithmetic(self):
@@ -351,6 +382,25 @@ class MmuDocAgreement(unittest.TestCase):
         self.assertIn(f'{PREFIX["hashbig"]}DIGEST {hashlib.sha256(qemu.DATA).hexdigest()[:16].upper()} MATCH', lines)
         self.assertIn(f'1 MiB and {len(qemu.DATA) - (1 << 20):,} bytes', flat(self.text['hashbig']))
 
+    # -- the unit's pages (boots 8 and 9): the arithmetic of their values is checked on the results document's transcript ---------
+    def test_the_units_blocks_are_the_results_transcript_and_the_binaries_this_tree_builds(self):
+        panel, entries = unit_panel(), staged()
+        loaded = [re.fullmatch(r'PAYLOAD LOADED INDEX=(\d) BASE=0X[0-9A-F]+ BYTES=(\d+) SHA=([0-9A-F]{16}) TYPE=(\d)', line) for line in panel[:3]]
+        self.assertTrue(all(loaded), panel[:3])
+        # The unit ran the binaries this tree builds: the sizes and digest prefixes on its LOADED lines are the manifest tool's entries.
+        self.assertEqual([(int(f[2]), f[4]) for f in loaded], [(e[1], kind) for e, kind in zip(entries, '112')])
+        self.assertEqual([f[3] for f in loaded[:2]], [e[2][:16].upper() for e in entries[:2]])
+        for payload, done in zip(('hashbig', 'el2mem'), [line for line in panel if line.startswith('PAYLOAD DONE ')]):
+            with self.subTest(payload=payload):
+                documented = fenced(self.text[payload], f'{payload}-unit-page')
+                self.assertEqual(documented, [line for line in panel if line.startswith(PREFIX[payload])])
+                self.assertIn(f' LINES={len(documented)} DROPPED=0', done)
+                self.assertLessEqual(len(documented), const(f'{payload}.c', 'PL_PAGE_LINES'))
+                for piece in UNIT_PROSE[payload]:
+                    self.assertIn(piece, flat(self.text[payload]))
+                unit = self.text[payload].split('## What the unit showed')[1].split('\n## ')[0]
+                self.assertNotIn('VERIFIED', unit, 'a hardware result is OBSERVED, a decode of it INFERRED')
+
     # -- the chain, the staging plan, the tests ----------------------------------------------------------------------------------
     def test_the_chain_arithmetic_uses_the_runners_numbers_and_the_budgets(self):
         runner = block(RUNNER_DOC.read_text(encoding='utf-8'), 'chain-budget')
@@ -364,9 +414,9 @@ class MmuDocAgreement(unittest.TestCase):
         self.assertEqual(program('el2mem')['most'], e, 'the worst world reaches the budget and never passes it')
         self.assertLessEqual(program('hashbig')['most'], h)
         expected = {
-            'el2mem': {'`el2mem` alone': (2, 3, e), '`el2mem`, `hashbig` and `BIG.DAT`: the staging plan': (4, 6, e, h),
+            'el2mem': {'`el2mem` alone': (2, 3, e), '`hashbig`, `el2mem` and `BIG.DAT`: the `memhash` plan': (4, 6, e, h),
                        '`psci`, `el2mem`, `hashbig` and `BIG.DAT`': (5, 9, n['psci'], e, h)},
-            'hashbig': {'`hashbig` and a data file': (3, 3, h), '`el2mem`, `hashbig` and `BIG.DAT`: the staging plan': (4, 6, e, h),
+            'hashbig': {'`hashbig` and a data file': (3, 3, h), '`hashbig`, `el2mem` and `BIG.DAT`: the `memhash` plan': (4, 6, e, h),
                         '`psci`, `hashbig` and `BIG.DAT`': (4, 6, n['psci'], h)}}
         for payload in PAYLOADS:
             by = {row[0]: row for row in rows(block(self.text[payload], f'{payload}-chain-budget'))}
@@ -389,7 +439,7 @@ class MmuDocAgreement(unittest.TestCase):
                 self.assertEqual(150994944, 144 << 20)
                 tool = commands[1].split()
                 self.assertEqual(tool[:3], ['python3', 'tools/sp11_payload_manifest.py', '--out-dir'])
-                self.assertEqual(tool[3:], ['build/stick', 'build/uefi/payloads/el2mem.bin', 'build/uefi/payloads/hashbig.bin', 'BIG.DAT'])
+                self.assertEqual(tool[3:], ['build/stick', 'build/uefi/payloads/hashbig.bin', 'build/uefi/payloads/el2mem.bin', 'BIG.DAT'])
                 self.assertTrue((ROOT / tool[1]).is_file())
                 self.assertEqual(commands[2:], ['load SP11\\SLBOUNCE-DEVHE-MARK.EFI', 'SP11\\Q1N1-PAYLOAD.EFI --el2'])
                 runner = RUNNER_DOC.read_text(encoding='utf-8')
@@ -399,7 +449,7 @@ class MmuDocAgreement(unittest.TestCase):
                 self.assertIn('150,994,944 bytes', text)
                 self.assertIn('144 MiB', text)
         entries = staged()
-        self.assertEqual([(e[0], e[4]) for e in entries], [('\\SP11\\EL2MEM.BIN', 'payload'), ('\\SP11\\HASHBIG.BIN', 'payload'), ('\\SP11\\BIG.DAT', 'data')])
+        self.assertEqual([(e[0], e[4]) for e in entries], [('\\SP11\\HASHBIG.BIN', 'payload'), ('\\SP11\\EL2MEM.BIN', 'payload'), ('\\SP11\\BIG.DAT', 'data')])
         self.assertEqual(entries[2][1], 150994944)
         self.assertEqual((manifest_tool.MAX_FILES, manifest_tool.MAX_FILE_BYTES >> 20), (5, 256))
         self.assertIn('at most 5 files, each at most 256 MiB', flat(self.text['el2mem']))
@@ -424,15 +474,21 @@ class MmuDocAgreement(unittest.TestCase):
                 self.assertIn(command, tests)
                 self.assertTrue((ROOT / 'tools' / command).is_file(), command)
 
-    def test_the_documents_say_what_the_status_is_and_that_the_restart_control_is_reported_not_recorded(self):
-        for payload in PAYLOADS:
-            text = flat(self.text[payload])
-            self.assertIn('UPTIME` 224 S and 268 S in two boots', text)
-            self.assertIn('reported to this work; no page of it is in this tree', text)
-            self.assertIn('is not expected to restart the board by itself', text)
-            self.assertIn('UNKNOWN: everything else this payload would print on the unit.', text)
-        self.assertIn('(`ID_AA64ISAR0_EL1` `0x1221111110212120`, OBSERVED on the unit, has `SHA2` 2 in bits 15:12: INFERRED field position)',
-                      flat(self.text['hashbig']))
+    def test_the_documents_say_what_the_restart_control_and_the_two_boots_showed_and_what_is_still_unknown(self):
+        common = ('alive at `UPTIME` 224 S and 268 S in two boots', '[recorded in the results](SP11-PAYLOAD-RESULTS.md#the-restart-control)',
+                  'with no restart in their videos (boot 8 to `UPTIME` about 110 S)', 'The commands below are host and QEMU tests: none runs on hardware',
+                  'A long-running read-only payload did not restart the board by itself in those four boots; the restart after `cpuon` stays unexplained (cause UNKNOWN).')
+        pins = {'el2mem': ("the stick's manifest listed `HASHBIG.BIN`, `EL2MEM.BIN` and `BIG.DAT`", 'U1 is answered yes for reads of the bank',
+                           'Whether the bank is writable at EL2 stage 1 (`AT S1E2W`) is UNKNOWN, and so is whether a cache clean reaches DRAM there',
+                           'That none was trapped to EL3 and emulated there is INFERRED', 'The decode of their other fields is INFERRED (the Arm ARM was not re-read)',
+                           'that the difference is the file is INFERRED', 'inner-shareable is not what the unit printed', 'which no payload has asked (UNKNOWN)'),
+                'hashbig': ('the manifest listing `HASHBIG.BIN`, `EL2MEM.BIN` and `BIG.DAT` of 144 MiB', 'so the rate there is UNKNOWN',
+                            'that the runner puts another size at the top of the same low extent is INFERRED',
+                            'it is OBSERVED now: the bounce was taken with six declared ranges', 'a file above 4 GiB is untried (UNKNOWN: the runner put none there)',
+                            '(`ID_AA64ISAR0_EL1` `0x1221111110212120`, OBSERVED on the unit, has `SHA2` 2 in bits 15:12: INFERRED field position)')}
+        for payload, own in pins.items():
+            for piece in common + own:
+                self.assertIn(piece, flat(self.text[payload]))
 
 
 def _replace(old, new):
@@ -442,12 +498,48 @@ def _replace(old, new):
     return mutate
 
 
+def _replace_last(old, new):
+    """The last occurrence: a line the host model's page shares with the unit's is the unit's when it comes after it."""
+    def mutate(doc):
+        assert doc.count(old) >= 2, old
+        head, _, tail = doc.rpartition(old)
+        return head + new + tail
+    return mutate
+
+
 def _drop(prefix):
     def mutate(doc):
         lines = doc.split('\n')
         at = next(i for i, line in enumerate(lines) if line.startswith(prefix))
         return '\n'.join(lines[:at] + lines[at + 1:])
     return mutate
+
+
+def _unit_mistakes(edits):
+    """One seeded mistake for each value the unit printed, changed where the document gives it (a third item: at its last place)."""
+    return [(re.sub(r'[^a-z0-9]+', '-', f'the-unit-{old}-is-changed'.lower()).strip('-'), (_replace_last if rest else _replace)(old, new))
+            for old, new, *rest in edits]
+
+
+# Mistakes either document can make: its status, the restart control, the line-count formula and the anchors of the unit's section.
+SHARED_MISTAKES = [
+    ('hardware-is-called-not-run', _replace('**EXPERIMENTAL; it ran on the unit twice (boots 8 and 9,', '**EXPERIMENTAL; hardware NOT RUN (boots 8 and 9,')),
+    ('a-value-is-called-observed-on-the-unit', _replace('**No value of this payload had been OBSERVED on the unit before boots 8 and 9', '**Every value of this payload has been OBSERVED')),
+    ('the-restart-control-is-called-unrecorded', _replace('[recorded in the results](SP11-PAYLOAD-RESULTS.md#the-restart-control)', 'reported to this work; no page of it is in this tree')),
+    ('the-unit-line-count-formula-is-wrong', _replace('`(3 + 1) + 3 x 2 + 8 + 18 = 36`', '`(3 + 1) + 3 x 2 + 8 + 18 = 37`')),
+    ('the-results-anchor-is-broken', _replace('SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-9', 'SP11-PAYLOAD-RESULTS.md#payloads-hashbig-and-el2mem-boots-8-and-10')),
+    ('the-unit-section-anchor-is-broken', _replace('(#what-the-unit-showed-boots-8-and-9)', '(#what-the-unit-showed-boots-8-and-10)')),
+]
+# The values the unit printed, each as the old text and the new: its page, and the prose that repeats a number of it.
+EL2MEM_UNIT_EDITS = [
+    ('CONV_EXTENTS=17 CONV_MIB=31961', 'CONV_EXTENTS=17 CONV_MIB=31962'), ('PROBES=15361 ALL=MAPPED RESULT=WB.OS.NS1', 'PROBES=15360 ALL=MAPPED RESULT=WB.OS.NS1'),
+    ('ALL=MAPPED RESULT=WB.OS.NS1', 'ALL=MAPPED RESULT=WB.IS'), ('PAN=3 VH=1 HAFDBS=0 PFR2', 'PAN=2 VH=1 HAFDBS=0 PFR2'),
+    ('MMFR1=0X111111312120', 'MMFR1=0X111111312121'), ('OSLSR_EL1 RAW=0X8 OSLK=0', 'OSLSR_EL1 RAW=0X8 OSLK=1', 'last'),
+    ('ICC_SRE_EL2 RAW=0XF', 'ICC_SRE_EL2 RAW=0XE'), ('446 MiB remain below it', '447 MiB remain below it'), ('(`0X59ADB1EB`', '(`0X59ADB1EC`')]
+HASHBIG_UNIT_EDITS = [
+    ('BASE=0XC3E65000 BYTES', 'BASE=0XC3E65001 BYTES'), ('MS=739 MIBS=194', 'MS=739 MIBS=195'), ('TICKS=14204400 MS=739', 'TICKS=14204401 MS=739'),
+    ('ATTR FIRST=WB.OS.NS1 MID=WB.OS.NS1 LAST=WB.OS.NS1', 'ATTR FIRST=WB.IS MID=WB.IS LAST=WB.IS'), ('DIGEST F93155C96304AAD8', 'DIGEST F93155C96304AAD9'),
+    ('739 ms, 194 MiB/s**', '739 ms, 195 MiB/s**'), ('(boot 8: 14,204,370)', '(boot 8: 14,204,371)'), ('ends at `0xCCE65000`', 'ends at `0xCCE64000`')]
 
 
 EL2MEM_MISTAKES = [
@@ -473,17 +565,19 @@ EL2MEM_MISTAKES = [
     ('the-chain-formula-is-wrong', _replace('(3 + 1) + 3 x 2 + 26 + 12 = 48 | yes', '(3 + 1) + 3 x 2 + 26 + 12 = 49 | yes')),
     ('the-chain-fit-is-wrong', _replace('= 82 | yes | no |', '= 82 | yes | yes |')),
     ('the-staging-size-is-wrong', _replace('bs=1048576 count=144', 'bs=1048576 count=145')),
-    ('the-staging-order-is-wrong', _replace('el2mem.bin build/uefi/payloads/hashbig.bin BIG.DAT\n# copy', 'hashbig.bin build/uefi/payloads/el2mem.bin BIG.DAT\n# copy')),
+    ('the-staging-order-is-wrong', _replace('hashbig.bin build/uefi/payloads/el2mem.bin BIG.DAT\n# copy', 'el2mem.bin build/uefi/payloads/hashbig.bin BIG.DAT\n# copy')),
     ('the-mutant-count-is-wrong', _replace(f'{len(el2mem.MUTANTS)} seeded-bug mutants', f'{len(el2mem.MUTANTS) - 1} seeded-bug mutants')),
     ('the-bad-binary-count-is-wrong', _replace(f'{len(el2mem.BAD_BINARIES)} seeded bad binaries', f'{len(el2mem.BAD_BINARIES) - 1} seeded bad binaries')),
     ('the-case-count-is-wrong', _replace(f'on {len(engine.CASES)} synthetic', f'on {len(engine.CASES) - 1} synthetic')),
     ('the-licence-line-is-gone', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
     ('the-link-is-broken', _replace('(SP11-PAYLOAD-HASHBIG.md)', '(SP11-PAYLOAD-HASHBIG2.md)')),
     ('the-anchor-is-broken', _replace('(SP11-PAYLOAD.md#the-manifest)', '(SP11-PAYLOAD.md#the-manifests)')),
-    ('hardware-is-called-run', _replace('**EXPERIMENTAL; hardware NOT RUN.**', '**EXPERIMENTAL; hardware RUN.**')),
-    ('a-value-is-called-observed-on-the-unit', _replace('**No value of this payload has been OBSERVED on the unit.**', '**Every value of this payload has been OBSERVED.**')),
-    ('the-restart-control-is-called-recorded', _replace('reported to this work; no page of it is in this tree', 'recorded in this tree')),
-]
+    # What the unit's pages (boots 8 and 9) say in words: the labels of what stays unknown, and the rows of the decision table the unit matched.
+    ('the-bank-writability-is-called-known', _replace('Whether the bank is writable at EL2 stage 1 (`AT S1E2W`) is UNKNOWN', 'The bank is writable at EL2 stage 1 (`AT S1E2W`)')),
+    ('the-el3-claim-is-called-verified', _replace('That none was trapped to EL3 and emulated there is INFERRED', 'That none was trapped to EL3 and emulated there is VERIFIED')),
+    ('a-row-the-unit-did-not-print-is-called-observed', _replace('| `NONIDENT` on a result | the output page', '| `NONIDENT` on a result | OBSERVED (boots 8 and 9): the output page')),
+    ('the-bank-row-loses-its-observed-mark', _replace('OBSERVED (boots 8 and 9, `RESULT=WB.OS.NS1`): EL2', '(boots 8 and 9, `RESULT=WB.OS.NS1`): EL2')),
+] + SHARED_MISTAKES + _unit_mistakes(EL2MEM_UNIT_EDITS)
 HASHBIG_MISTAKES = [
     ('the-line-budget-is-wrong', _replace('At most **12 lines**', 'At most **13 lines**')),
     ('the-time-box-is-wrong', _replace('**25 seconds** of counter time', '**26 seconds** of counter time')),
@@ -506,17 +600,22 @@ HASHBIG_MISTAKES = [
     ('the-qemu-rate-is-wrong', _replace('MS=17 MIBS=57', 'MS=18 MIBS=57')),
     ('the-qemu-size-is-wrong', _replace('BYTES=1052669 MIB=1', 'BYTES=1052670 MIB=1')),
     ('the-chain-formula-is-wrong', _replace('(2 + 1) + 3 + 12 = 18', '(2 + 1) + 3 + 12 = 19')),
-    ('the-staging-lost-the-data-file', _replace('hashbig.bin BIG.DAT\nload', 'hashbig.bin\nload')),
+    ('the-staging-lost-the-data-file', _replace('el2mem.bin BIG.DAT\nload', 'el2mem.bin\nload')),
+    ('the-staging-order-is-wrong', _replace('hashbig.bin build/uefi/payloads/el2mem.bin BIG.DAT\nload', 'el2mem.bin build/uefi/payloads/hashbig.bin BIG.DAT\nload')),
     ('the-staging-size-is-wrong', _replace('bs=1048576 count=144', 'bs=1048576 count=143')),
     ('the-mutant-count-is-wrong', _replace(f'{len(hashbig.MUTANTS)} seeded-bug mutants', f'{len(hashbig.MUTANTS) - 1} seeded-bug mutants')),
     ('the-bad-binary-count-is-wrong', _replace(f'{len(hashbig.BAD_BINARIES)} seeded bad binaries', f'{len(hashbig.BAD_BINARIES) - 1} seeded bad binaries')),
     ('the-suite-count-is-wrong', _replace('(twelve suites', '(eleven suites')),
     ('the-licence-line-is-gone', _replace('<!-- SPDX-License-Identifier: MIT -->\n', '')),
     ('the-link-is-broken', _replace('(SP11-PAYLOAD-EL2MEM.md#memory-rules)', '(SP11-PAYLOAD-EL2MEM.md#memory-rule)')),
-    ('hardware-is-called-run', _replace('**EXPERIMENTAL; hardware NOT RUN.**', '**EXPERIMENTAL; hardware RUN.**')),
-    ('a-value-is-called-observed-on-the-unit', _replace('**No value of this payload has been OBSERVED on the unit.**', '**Every value of this payload has been OBSERVED.**')),
     ('the-isar0-claim-loses-its-label', _replace('bits 15:12: INFERRED field position)', 'bits 15:12: VERIFIED)')),
-]
+    # What the unit's pages (boots 8 and 9) say in words: the labels of what stays unknown, and the rows of the decision table the unit matched.
+    ('the-placement-rule-is-called-general', _replace('that the runner puts another size at the top of the same low', 'that the runner always puts a file at the top of the same low')),
+    ('the-rate-in-the-bank-is-called-known', _replace('so the rate there is UNKNOWN', 'so the rate there is 194 MiB/s')),
+    ('a-row-the-unit-did-not-print-is-called-observed', _replace('| `DIGEST ... DIFFER WANT=...` | the file changed', '| `DIGEST ... DIFFER WANT=...` | OBSERVED (boots 8 and 9): the file changed')),
+    ('the-attribute-row-loses-its-observed-mark', _replace('| OBSERVED (boots 8 and 9): the loaded file is Normal write-back, outer-shareable', '| (boots 8 and 9): the loaded file is Normal write-back, outer-shareable')),
+    ('the-el2mem-staging-anchor-is-broken', _replace('SP11-PAYLOAD-EL2MEM.md#the-staging-plan-as-run-boots-8-and-9', 'SP11-PAYLOAD-EL2MEM.md#the-staging-plan-as-run')),
+] + SHARED_MISTAKES + _unit_mistakes(HASHBIG_UNIT_EDITS)
 MISTAKES = [(name, 'el2mem', mutate) for name, mutate in EL2MEM_MISTAKES] + [(name, 'hashbig', mutate) for name, mutate in HASHBIG_MISTAKES]
 
 
