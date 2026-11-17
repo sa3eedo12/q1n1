@@ -451,7 +451,16 @@ endif
 # bare-metal ELF files linked at 0 and flattened; they do not need SP11 and are built by `payloads` whatever
 # PAYLOAD is. `make PAYLOAD=1 all` builds the normal artefacts beside both.
 PAYLOAD_SRCS := $(sort $(wildcard payloads/*.c))
-PAYLOAD_BINS := $(patsubst payloads/%.c,$(OUT)/payloads/%.bin,$(PAYLOAD_SRCS))
+# The xHCI S1 payload (docs/SP11-PAYLOAD-XHCI.md) is several sources, the parts payloads/xhci*.c, linked once per controller so that the
+# manifest names the controller by file name: xhci0.bin for usb_1_ss0 and xhci1.bin for usb_1_ss1. There is no xhci.bin and no xhci-io.bin.
+# Like every other payload it is found by wildcard: the two binaries are planned only where payloads/xhci.c is, so that a tree without the
+# sources plans and builds the other payloads exactly as it did before.
+XHCI_S1_PARTS := xhci xhci-io xhci-text xhci-map xhci-ctl xhci-smmu xhci-watch
+XHCI_S1_HEADERS := payloads/xhci-priv.h payloads/xhci-regs.h platform/uefi/sp11-payload-abi.h payloads/payload-util.h
+XHCI_S1_OBJS0 := $(addprefix $(OUT)/payloads/xhci0/,$(addsuffix .o,$(XHCI_S1_PARTS)))
+XHCI_S1_OBJS1 := $(addprefix $(OUT)/payloads/xhci1/,$(addsuffix .o,$(XHCI_S1_PARTS)))
+XHCI_S1_BINS := $(if $(wildcard payloads/xhci.c),$(OUT)/payloads/xhci0.bin $(OUT)/payloads/xhci1.bin)
+PAYLOAD_BINS := $(patsubst payloads/%.c,$(OUT)/payloads/%.bin,$(filter-out payloads/xhci%.c,$(PAYLOAD_SRCS))) $(XHCI_S1_BINS)
 READELF := $(if $(wildcard $(LLVM)/llvm-readelf),$(LLVM)/llvm-readelf,llvm-readelf)
 PYTHON ?= python3
 # -fno-pic with the small code model addresses data with ADRP and ADD, which are PC-relative; the link keeps
@@ -468,6 +477,22 @@ payloads: $(PAYLOAD_BINS)
 $(OUT)/payloads/%.o: payloads/%.c platform/uefi/sp11-payload-abi.h payloads/payload-util.h
 	@mkdir -p $(OUT)/payloads
 	$(CC) $(PAYLOAD_CFLAGS) -c $< -o $@
+
+$(OUT)/payloads/xhci0/%.o: payloads/%.c $(XHCI_S1_HEADERS)
+	@mkdir -p $(@D)
+	$(CC) $(PAYLOAD_CFLAGS) -DXHCI_S1_CONTROLLER=0 -c $< -o $@
+
+$(OUT)/payloads/xhci1/%.o: payloads/%.c $(XHCI_S1_HEADERS)
+	@mkdir -p $(@D)
+	$(CC) $(PAYLOAD_CFLAGS) -DXHCI_S1_CONTROLLER=1 -c $< -o $@
+
+$(OUT)/payloads/xhci0.elf: $(OUT)/payloads/start.o $(XHCI_S1_OBJS0) payloads/payload.ld
+	$(LLD) $(PAYLOAD_LDFLAGS) -T payloads/payload.ld -o $@ $(OUT)/payloads/start.o $(XHCI_S1_OBJS0)
+	$(PYTHON) -B tools/sp11_payload_elfcheck.py --readelf $(READELF) $@
+
+$(OUT)/payloads/xhci1.elf: $(OUT)/payloads/start.o $(XHCI_S1_OBJS1) payloads/payload.ld
+	$(LLD) $(PAYLOAD_LDFLAGS) -T payloads/payload.ld -o $@ $(OUT)/payloads/start.o $(XHCI_S1_OBJS1)
+	$(PYTHON) -B tools/sp11_payload_elfcheck.py --readelf $(READELF) $@
 
 $(OUT)/payloads/start.o: payloads/start.S
 	@mkdir -p $(OUT)/payloads
@@ -549,6 +574,7 @@ clean:
 	    $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin \
 	    $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
 	rm -f $(OUT)/payloads/*.d $(OUT)/payloads/*.o $(OUT)/payloads/*.elf $(OUT)/payloads/*.bin
+	rm -rf $(OUT)/payloads/xhci0 $(OUT)/payloads/xhci1
 	rm -f $(OUT)/*.obj $(OUT)/q1n1.efi $(OUT)/q1n1-stk.efi $(OUT)/q1n1-payload.efi $(OUT)/q1n1-usb-probe.efi \
 	    $(OUT)/q1n1-usb-role-probe.efi $(OUT)/usb-role-fixture.efi \
 	    $(OUT)/q1n1-usb-role-change.efi $(OUT)/q1n1-usb-serial.efi $(OUT)/q1n1-usb-typec-probe.efi \

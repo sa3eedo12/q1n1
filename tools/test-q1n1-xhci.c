@@ -35,12 +35,34 @@ static void check(int condition, const char *label)
 
 /* ---- simulated controller ------------------------------------------- */
 
+/* The geometry and the DMA and command hooks below can be set before this file is included (tools/test-q1n1-sp11-payload-xhci.c does, to
+ * model the Surface Pro 11's xHC and to inject faults); without them this file is what it always was. */
+#ifndef SIM_MMIO
 #define SIM_MMIO 0x10000
+#endif
+#ifndef SIM_SLOTS
 #define SIM_SLOTS 8
+#endif
+#ifndef SIM_PORTS
 #define SIM_PORTS 2
+#endif
+#ifndef CAPLENGTH
 #define CAPLENGTH 0x30
+#endif
+#ifndef DBOFF
 #define DBOFF 0x2000
+#endif
+#ifndef RTSOFF
 #define RTSOFF 0x1000
+#endif
+/* The host pointer for `length` bytes of DMA at `address`, or NULL for a bus error (the controller then reports HSE and halts). */
+#ifndef SIM_DMA
+#define SIM_DMA(address, length) ((void *)(uintptr_t)(address))
+#endif
+/* What a command that the model has no use for (No Op and anything else) does: by default a Command Completion Event with Success. */
+#ifndef SIM_COMMAND_DONE
+#define SIM_COMMAND_DONE(type, address) sim_event((address), 1u << 24, (33u << 10))
+#endif
 
 struct sim_slot {
     int used, addressed;
@@ -101,11 +123,22 @@ static uint64_t mmio_r64(uint32_t offset)
     return value;
 }
 
+/* A DMA the bus refused: Host System Error, and the controller halts. */
+static void sim_bus_error(void)
+{
+    mmio_w32(op_offset() + 0x04, mmio_r32(op_offset() + 0x04) | (1u << 2) | 1u);
+    sim.running = 0;
+}
+
 static void sim_event(uint64_t parameter, uint32_t status, uint32_t control)
 {
-    uint8_t *slot = (uint8_t *)(uintptr_t)(sim.event_ring + sim.event_index * XHCI_TRB_SIZE);
+    uint8_t *slot = SIM_DMA(sim.event_ring + sim.event_index * XHCI_TRB_SIZE, XHCI_TRB_SIZE);
     uint32_t words[4] = {(uint32_t)parameter, (uint32_t)(parameter >> 32), status,
                          (control & ~1u) | sim.event_cycle};
+    if (!slot) {
+        sim_bus_error();
+        return;
+    }
     memcpy(slot, words, sizeof(words));
     sim.event_index++;
     if (sim.event_index == sim.event_size) {
@@ -213,13 +246,19 @@ static int device_control(uint32_t request_type, uint32_t request, uint32_t valu
 
 /* ---- ring walking ---------------------------------------------------- */
 
-static void read_trb(uint64_t address, uint64_t *parameter, uint32_t *status, uint32_t *control)
+static int read_trb(uint64_t address, uint64_t *parameter, uint32_t *status, uint32_t *control)
 {
     uint32_t words[4];
-    memcpy(words, (void *)(uintptr_t)address, sizeof(words));
+    const void *source = SIM_DMA(address, sizeof(words));
+    if (!source) {
+        sim_bus_error();
+        return -1;
+    }
+    memcpy(words, source, sizeof(words));
     *parameter = (uint64_t)words[0] | ((uint64_t)words[1] << 32);
     *status = words[2];
     *control = words[3];
+    return 0;
 }
 
 static void process_command_ring(void)
@@ -227,7 +266,7 @@ static void process_command_ring(void)
     for (;;) {
         uint64_t parameter;
         uint32_t status, control;
-        read_trb(sim.cmd_ring, &parameter, &status, &control);
+        if (read_trb(sim.cmd_ring, &parameter, &status, &control)) return;
         if ((control & 1u) != sim.cmd_cycle) return;
         uint32_t type = (control >> 10) & 0x3f;
         uint64_t address = sim.cmd_ring;
@@ -282,7 +321,7 @@ static void process_command_ring(void)
             }
             sim_event(address, 1u << 24, (33u << 10) | (s << 24));
         } else {                                          /* No Op and anything else */
-            sim_event(address, 1u << 24, (33u << 10));
+            SIM_COMMAND_DONE(type, address);
         }
     }
 }
@@ -299,7 +338,7 @@ static void process_transfer_ring(uint32_t slot_index, uint32_t dci)
     for (;;) {
         uint64_t parameter;
         uint32_t status, control;
-        read_trb(slot->ep_ring[dci], &parameter, &status, &control);
+        if (read_trb(slot->ep_ring[dci], &parameter, &status, &control)) return;
         if ((control & 1u) != slot->ep_cycle[dci]) return;
         uint32_t type = (control >> 10) & 0x3f;
         uint64_t address = slot->ep_ring[dci];
@@ -376,6 +415,22 @@ static void process_transfer_ring(uint32_t slot_index, uint32_t dci)
 
 /* ---- platform hooks -------------------------------------------------- */
 
+/* The controller reads the one-entry segment table the moment ERSTBA is whole (as QEMU's xHC does), and starts its event ring there. */
+static void sim_load_erst(void)
+{
+    uint64_t erst = mmio_r64(RTSOFF + 0x20 + 0x10);
+    const uint8_t *entry = erst ? SIM_DMA(erst, 16) : NULL;
+    if (!erst) return;
+    if (!entry) {
+        sim_bus_error();
+        return;
+    }
+    memcpy(&sim.event_ring, entry, 8);
+    memcpy(&sim.event_size, entry + 8, 4);
+    sim.event_index = 0;
+    sim.event_cycle = 1;
+}
+
 uint32_t xhci_rd32(uintptr_t address)
 {
     return mmio_r32((uint32_t)(address - sim.base));
@@ -439,14 +494,8 @@ void xhci_wr32(uintptr_t address, uint32_t value)
             sim.running = 0;
             mmio_w32(op_offset() + 0x04, 1);
         }
-    } else if (offset == RTSOFF + 0x20 + 0x10) {          /* ERSTBA low word */
-        uint64_t erst = mmio_r64(RTSOFF + 0x20 + 0x10);
-        if (erst) {
-            memcpy(&sim.event_ring, (void *)(uintptr_t)erst, 8);
-            memcpy(&sim.event_size, (void *)(uintptr_t)(erst + 8), 4);
-            sim.event_index = 0;
-            sim.event_cycle = 1;
-        }
+    } else if (offset == RTSOFF + 0x20 + 0x14) {          /* ERSTBA high word: the table is loaded when the address is whole */
+        sim_load_erst();
     } else if (offset >= DBOFF && offset < DBOFF + 0x100) {
         uint32_t slot_index = (offset - DBOFF) / 4;
         if (!sim.running) return;
@@ -459,7 +508,7 @@ void xhci_wr64(uintptr_t address, uint64_t value)
 {
     uint32_t offset = (uint32_t)(address - sim.base);
     memcpy(sim.mmio + offset, &value, 8);
-    if (offset == RTSOFF + 0x20 + 0x10) xhci_wr32(address, (uint32_t)value);
+    if (offset == RTSOFF + 0x20 + 0x10) sim_load_erst();
 }
 
 void xhci_delay_us(uint64_t microseconds) { sim.now_us += microseconds ? microseconds : 1; }
@@ -550,6 +599,7 @@ static int cached(const struct xhci *x, const struct xhci_ring *ring, uint32_t i
     return 0;
 }
 
+#ifndef XHCI_SIM_NO_MAIN
 int main(void)
 {
     static uint8_t arena[512 * 1024] __attribute__((aligned(4096)));
@@ -870,3 +920,4 @@ int main(void)
     printf("PASS: %d q1n1 xHCI and NCM checks (native harness, sanitizers on)\n", checks);
     return 0;
 }
+#endif /* XHCI_SIM_NO_MAIN */
