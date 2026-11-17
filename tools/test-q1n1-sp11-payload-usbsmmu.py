@@ -358,7 +358,7 @@ class UsbsmmuBinary(unittest.TestCase):
 
     def test_only_the_timer_payload_may_name_the_timer_offsets_and_only_psci_and_cpuon_may_have_an_smc(self):
         self.assertEqual([name for name, policy in lib.POLICIES.items() if policy.get('timer_offsets')], ['timer'])
-        self.assertEqual({name: policy['smc'] for name, policy in lib.POLICIES.items() if policy['smc']}, {'psci': 1, 'cpuon': 3})
+        self.assertEqual({name: policy['smc'] for name, policy in lib.POLICIES.items() if policy['smc']}, {'psci': 1, 'cpuon': 3, 'retprobe': 3})
         self.assertEqual({lib.CNTVOFF_EL2, lib.CNTPOFF_EL2} & lib.POLICIES['usbsmmu']['registers'], set())
         self.assertEqual(lib.POLICIES['state']['bytes'], 4096)
         self.assertEqual(lib.POLICIES['psci']['registers'], {'currentel', 'mpidr_el1'})

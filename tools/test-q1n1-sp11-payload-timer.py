@@ -259,7 +259,7 @@ class TimerBinary(unittest.TestCase):
             with self.subTest(payload=name):
                 has = {lib.CNTVOFF_EL2, lib.CNTPOFF_EL2} & policy['registers']
                 self.assertEqual(bool(has), name == 'timer')
-                self.assertEqual(policy['smc'], {'psci': 1, 'cpuon': 3}.get(name, 0))
+                self.assertEqual(policy['smc'], {'psci': 1, 'cpuon': 3, 'retprobe': 3}.get(name, 0))
         # The one other place a timer offset is allowed: cpuon's secondary reads CNTVOFF_EL2 once; CNTPOFF_EL2 is never allowed.
         self.assertEqual({name for name, policy in lib.POLICIES.items() if lib.CNTVOFF_EL2 in policy.get('single_reads', ())}, {'cpuon'})
         self.assertFalse([name for name, policy in lib.POLICIES.items() if lib.CNTPOFF_EL2 in policy.get('single_reads', ())])

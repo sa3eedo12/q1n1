@@ -350,7 +350,7 @@ SPELLED = {'mrs-dfr1', 'mrs-isar2', 'mrs-pfr2'}
 # The ALLOW_WORDS rows the later payloads (cnthctl, el1trap) add: exact forms of the instructions they alone may hold.
 TIMER_ALLOW_WORDS = {('eret', ''), ('hvc', '#0'), ('hvc', '#0x1'), ('hvc', '#0x2'), ('ic', 'ivau'), ('msr', 'cnthctl_el2'),
                      ('msr', 'elr_el2'), ('msr', 'hcr_el2'), ('msr', 'sctlr_el1'), ('msr', 'spsr_el2'), ('msr', 'vbar_el1')}
-NEW_TABLE_ENTRIES = {'ALLOW_WORDS': {('at', 's1e2r')} | TIMER_ALLOW_WORDS,
+NEW_TABLE_ENTRIES = {'ALLOW_WORDS': {('at', 's1e2r'), ('at', 's1e2w'), ('dc', 'cvac')} | TIMER_ALLOW_WORDS,      # the two retprobe adds: a write translation and a clean
                      'SYSTEM_REGISTER_ALIASES': {'id_aa64dfr1_el1', 'id_aa64isar2_el1', 'id_aa64pfr2_el1'}}
 
 

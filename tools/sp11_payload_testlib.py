@@ -143,6 +143,15 @@ POLICIES['el2mem'] = {'registers': EL2MEM_REGISTERS, 'smc': 0, 'bytes': 16384, '
                       'allow': {'at': {'s1e2r'}}, 'read_only': True}
 POLICIES['hashbig'] = {'registers': {'currentel', 'cntfrq_el0', 'par_el1'}, 'smc': 0, 'bytes': 12288,
                        'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'}, 'allow': {'at': {'s1e2r'}}, 'read_only': True, 'bulk_reads': True}
+# retprobe (docs/SP11-PAYLOAD-RETPROBE.md) stores to RAM outside its own stack (the three canary pages) and may call SYSTEM_RESET. MRS of
+# CurrentEL, CTR_EL0 (the cache line size), CNTFRQ_EL0 and PAR_EL1 (the answer of its two translation requests, AT S1E2R and AT S1E2W, each
+# followed by an ISB); DC CVAC and DC CIVAC by line, DSB SY; and three `smc #0` with the ids PSCI_FEATURES, SYSTEM_RESET and SYSTEM_RESET2.
+# No other system instruction: no MSR, no HVC, no ERET, no TLBI, no IC, no CPU_ON or CPU_OFF. It is not `read_only`: its stores are what
+# its host test and its seeded bugs pin, and the allow-list says which instructions can make them visible.
+RETPROBE_SMC_IDS = (0x8400000A, 0x84000009, 0xC4000012)         # PSCI_FEATURES, SYSTEM_RESET, SYSTEM_RESET2 (Arm DEN0022)
+POLICIES['retprobe'] = {'registers': {'currentel', 'ctr_el0', 'cntfrq_el0', 'par_el1'}, 'smc': 3, 'smc_ids': RETPROBE_SMC_IDS,
+                        'bytes': 16384, 'forbid': {'dmb', 'sb', 'sev', 'sevl'},
+                        'allow': {'at': {'s1e2r', 's1e2w'}, 'dc': {'cvac', 'civac'}}}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}
@@ -184,8 +193,11 @@ ALLOW_WORDS = {
 }
 SYSTEM_REGISTER_ALIASES = {'id_aa64mmfr3_el1': 's3_0_c0_c7_3', 'id_aa64mmfr4_el1': 's3_0_c0_c7_4', 'ttbr1_el2': 's3_4_c2_c0_1',
                            'cntvoff_el2': CNTVOFF_EL2, 'cntpoff_el2': CNTPOFF_EL2}
-# AT S1E2R for the el2mem and hashbig policies: SYS #4, C7, C8, #0 (every Xt), the only AT the `allow` key can name.
+# AT S1E2R for the el2mem and hashbig policies: SYS #4, C7, C8, #0 (every Xt).
 ALLOW_WORDS[('at', 's1e2r')] = ('sys', 0xffffffe0, 0xd50c7800)
+# retprobe adds the write translation request, AT S1E2W (SYS #4, C7, C8, #1), and the clean to the point of coherency, DC CVAC (SYS #3, C7, C10, #1).
+ALLOW_WORDS[('at', 's1e2w')] = ('sys', 0xffffffe0, 0xd50c7820)
+ALLOW_WORDS[('dc', 'cvac')] = ('sys', 0xffffffe0, 0xd50b7a20)
 # The ID registers el2mem reads by encoding, which a disassembler may print by name.
 SYSTEM_REGISTER_ALIASES.update({'id_aa64dfr1_el1': 's3_0_c0_c5_1', 'id_aa64isar2_el1': 's3_0_c0_c6_2', 'id_aa64pfr2_el1': 's3_0_c0_c4_2'})
 # Every spelling of a timer offset: a policy that reads one of them once names it too.
