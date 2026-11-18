@@ -265,7 +265,8 @@ external abort or a permission fault. If the entry is bypass or abort, nothing m
 ## Staging (not authorised)
 
 `make -f platform/uefi/Makefile payloads` builds `smmuprobe.elf` and `smmuprobe.bin` with every other payload, and the manifest tool
-(`tools/sp11_payload_manifest.py`) lists it like any other. It goes **last** in its chain: a read that hangs takes every earlier line of the
+(`tools/sp11_payload_manifest.py`) takes 8.3 names only and refuses `SMMUPROBE.BIN` (nine letters): stage a copy of the same bytes as
+`SMMUPRB.BIN`. It goes **last** in its chain: a read that hangs takes every earlier line of the
 chain with it ([SP11-PAYLOAD.md](SP11-PAYLOAD.md#the-chain-several-payloads-in-one-boot), "Order"). Running it needs the operator's explicit
 authorisation; this document, its tests and its build are not that authorisation.
 

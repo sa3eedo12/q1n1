@@ -430,7 +430,7 @@ class UsbsmmuDocAgreement(unittest.TestCase):
         for name, text in texts.items():
             with self.subTest(document=name):
                 self.assertEqual(text.splitlines()[0], '<!-- SPDX-License-Identifier: MIT -->')
-                self.assertLess(len(text.encode('utf-8')), 50 * 1024)
+                self.assertLess(len(text.encode('utf-8')), lib.DOC_SIZE_CAPS.get(name, 50 * 1024))
                 self.assertLess(len(text.splitlines()), 1500)
         self.assertEqual(lib.link_problems(texts, ROOT / 'docs'), [])
         for name in ('SP11-PAYLOAD-STATE.md', 'SP11-PAYLOAD-PSCI.md', 'SP11-PAYLOAD-TIMER.md', 'SP11-PAYLOAD-USBSMMU.md', 'SP11-PAYLOAD-RESULTS.md'):

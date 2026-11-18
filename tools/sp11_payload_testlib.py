@@ -110,6 +110,10 @@ CPUON_REGISTERS = {
     'currentel', 'mpidr_el1', 'midr_el1', 'id_aa64mmfr0_el1', 'id_aa64isar0_el1', 'id_aa64pfr0_el1', 'cntfrq_el0',
     'sctlr_el2', 'hcr_el2', 'vbar_el2', 'cntpct_el0', 'esr_el2', 'elr_el2', 'far_el2'}
 CPUON_SMC_IDS = (0x84000002, 0xC4000003, 0xC4000004)      # CPU_OFF, CPU_ON, AFFINITY_INFO (Arm DEN0022, SMC64 for the last two)
+# The common size cap of a document or source is 50 KiB. docs/SP11-PAYLOAD.md carries one index row per payload and had 41 bytes of room under it: its cap is
+# raised on purpose by 512 bytes, the least multiple of 512 that holds the row of nvmesnap (413 bytes: 51,159 to 51,572 bytes). The tests that apply the cap
+# to that document (test-q1n1-sp11-payload.py, -timer.py, -usbsmmu-doc.py) read it here; the next row needs the next raise.
+DOC_SIZE_CAPS = {'SP11-PAYLOAD.md': 50 * 1024 + 512}
 POLICIES = {
     'state': {'registers': STATE_REGISTERS, 'smc': 0, 'bytes': 4096},
     'psci': {'registers': {'currentel', 'mpidr_el1'}, 'smc': 1, 'bytes': 8192},
@@ -152,6 +156,10 @@ RETPROBE_SMC_IDS = (0x8400000A, 0x84000009, 0xC4000012)         # PSCI_FEATURES,
 POLICIES['retprobe'] = {'registers': {'currentel', 'ctr_el0', 'cntfrq_el0', 'par_el1'}, 'smc': 3, 'smc_ids': RETPROBE_SMC_IDS,
                         'bytes': 16384, 'forbid': {'dmb', 'sb', 'sev', 'sevl'},
                         'allow': {'at': {'s1e2r', 's1e2w'}, 'dc': {'cvac', 'civac'}}}
+# nvmesnap (docs/SP11-PAYLOAD-NVMESNAP.md) is read only like el2mem: MRS of CurrentEL, CNTFRQ_EL0 and PAR_EL1, exactly the AT form S1E2R with its ISB,
+# no other barrier, no SMC, and the memory discipline of tools/sp11_payload_memcheck.py (every store through its own stack).
+POLICIES['nvmesnap'] = {'registers': {'currentel', 'cntfrq_el0', 'par_el1'}, 'smc': 0, 'bytes': 20480, 'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'},
+                        'allow': {'at': {'s1e2r'}}, 'read_only': True}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}

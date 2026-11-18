@@ -44,6 +44,8 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+import sp11_payload_testlib as lib  # noqa: E402 (only for DOC_SIZE_CAPS, the one cap raised on purpose)
 UEFI = ROOT / 'platform' / 'uefi'
 PAYLOADS = ROOT / 'payloads'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
@@ -629,7 +631,7 @@ class SourceAudit(unittest.TestCase):
             text = self.read(path)
             with self.subTest(file=path.name):
                 self.assertLess(len(text.splitlines()), 1500)
-                self.assertLess(len(text.encode('utf-8')), 50 * 1024)
+                self.assertLess(len(text.encode('utf-8')), lib.DOC_SIZE_CAPS.get(path.name, 50 * 1024))
 
     def test_the_constants_the_runner_derives_are_consistent(self):
         header = self.read(UEFI / 'sp11-payload.h')

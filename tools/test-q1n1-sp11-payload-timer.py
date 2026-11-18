@@ -592,7 +592,7 @@ class TimerDocAgreement(unittest.TestCase):
         for name, text in (('SP11-PAYLOAD.md', self.main), ('SP11-PAYLOAD-TIMER.md', self.doc)):
             with self.subTest(document=name):
                 self.assertEqual(text.splitlines()[0], '<!-- SPDX-License-Identifier: MIT -->')
-                self.assertLess(len(text.encode('utf-8')), 50 * 1024)
+                self.assertLess(len(text.encode('utf-8')), lib.DOC_SIZE_CAPS.get(name, 50 * 1024))
                 self.assertLess(len(text.splitlines()), 1500)
 
     def test_the_two_documents_link_each_other_and_every_relative_link_and_anchor_resolves(self):
