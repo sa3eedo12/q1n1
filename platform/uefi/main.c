@@ -58,6 +58,9 @@
 #endif
 #if Q1N1_SP11_PAYLOAD
 #include "sp11-payload.h"
+#if Q1N1_SP11_SMMUMAP
+#include "sp11-smmumap.h"
+#endif
 #endif
 
 static struct {
@@ -1516,17 +1519,59 @@ static int payload_guarded(int kind, uint64_t dst, uint64_t src, uint64_t size)
     return kind == Q1N1_PAYLOAD_G_COPY32 ? live_guarded(0, dst, src, size) : 1;
 }
 
+#if Q1N1_SP11_SMMUMAP
+/* The mapping step's loads and its one store (sp11-smmumap.h), both through the recoverable-fault copy: an address the
+ * tables do not map comes back as a refusal and not as a reset. A size of 8 is one ldr and one str, so a descriptor is
+ * never written in halves. The store is a main.c service of this step only; the payloads still have no store kind. */
+static int smmumap_read64(uint64_t pa, uint64_t *value)
+{
+    return live_guarded(1, (uintptr_t)value, pa, 8);
+}
+static int smmumap_store64(uint64_t pa, uint64_t value)
+{
+    return live_guarded(1, pa, (uintptr_t)&value, 8);
+}
+/* What the step was given and what it found, kept for the one line after the chain (q1n1_smmumap_after_chain). The poll is the
+ * proxy's, above: made once, after the chain, so that an SError a read of the SMMU's page left pending is on the page. */
+static struct q1n1_smmumap_env smmumap_env;
+static struct q1n1_smmumap_result smmumap_result;
+static int payload_smmumap(void)
+{
+    smmumap_env.emit = payload_emit;
+    smmumap_env.counter = counter;
+    smmumap_env.freq = frequency();
+    smmumap_env.read64 = smmumap_read64;
+    smmumap_env.store64 = smmumap_store64;
+    smmumap_env.map = (const uint8_t *)(uintptr_t)info.memory_map;
+    smmumap_env.map_size = info.memory_map_size;
+    smmumap_env.map_stride = info.memory_map_stride;
+    smmumap_env.serror_poll = q1n1_platform_serror_poll;
+    q1n1_smmumap_el2_ops(&smmumap_env);
+    return q1n1_smmumap_run(&smmumap_env, &smmumap_result);
+}
+#endif
+
 /* After the page is drawn, at EL2: runs the chain, which verifies each payload where it now is and calls
  * it, in manifest order. */
 static void sp11_payload_el2_run(void)
 {
+#if Q1N1_SP11_SMMUMAP
+    struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter, payload_smmumap};
+#else
     struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter};
+#endif
     struct q1n1_payload_platform platform = {(uintptr_t)fb.pixels, fb.bytes, info.memory_map, info.memory_map_size,
                                              info.memory_map_stride, fb.width, fb.height, fb.stride, fb.format};
     struct q1n1_payload_result result;
     q1n1_payload_region_place(fb.width, fb.height, fb.scale, fb.row, &payload_page);
     payload_next_row = payload_page.row0;
+#if Q1N1_SP11_SMMUMAP
+    smmumap_result.status = Q1N1_SMMUMAP_REFUSED;      /* zero is MAPPED: a step that never ran must not read as one */
+#endif
     q1n1_payload_run(&env, &payload_loaded, &platform, &result);
+#if Q1N1_SP11_SMMUMAP
+    q1n1_smmumap_after_chain(&smmumap_env, &smmumap_result);
+#endif
 }
 
 static void payload_console(struct efi_system_table *st, const char *line)

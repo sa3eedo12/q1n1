@@ -102,7 +102,7 @@ class ChainNative(unittest.TestCase):
                 self.assertRegex(output, rf'PASS: 1 payload {name} suites, \d+ checks')
 
 
-# ---- seeded bugs in the sources ---------------------------------------------------------------------------------------
+# ---- seeded bugs in the sources --------------------------------------------------------
 
 LOAD, RUNC, PSCI = 'uefi/sp11-payload-load.c', 'uefi/sp11-payload-run.c', 'payloads/psci.c'
 CHECK_ONE = "pl_keyed_hex(a, PREFIX, \"MPIDR_EL1\", SYSREG(mpidr_el1));\n"
@@ -276,7 +276,7 @@ class ChainMutants(unittest.TestCase):
                 self.assertEqual(status, 'caught', f'{status}: {detail}')
 
 
-# ---- psci built with a forbidden thing added -------------------------------------------------------------------------
+# ---- psci built with a forbidden thing added -------------------------------------------
 
 ANCHOR = '    say(a, "NEXT SMCCC");\n'
 BAD_BINARIES = [
@@ -348,7 +348,7 @@ class SeededBadBinaries(unittest.TestCase):
             self.assertFalse(lib.EXCLUSIVE.match(no) or lib.ATOMIC.match(no), no)
 
 
-# ---- the manifest tool -------------------------------------------------------------------------------------------------
+# ---- the manifest tool -----------------------------------------------------------------
 
 # What tools/sp11_payload_manifest.py wrote for a lone state.bin (the bytes below) and for state.bin with a data file,
 # recorded from the tool at the commit before the chain: the chain must not change either.
@@ -553,7 +553,8 @@ class DocAgreement(unittest.TestCase):
         cls.doc = DOC.read_text(encoding='utf-8') if cls.TEXT is None else cls.TEXT
         cls.psci_doc = DOC_PSCI.read_text(encoding='utf-8') if cls.PSCI_TEXT is None else cls.PSCI_TEXT
         cls.psci = (ROOT / 'payloads' / 'psci.c').read_text(encoding='utf-8')
-        cls.run_c = (UEFI / 'sp11-payload-run.c').read_text(encoding='utf-8')
+        # pinned runner text (SMMUMAP gate at 0)
+        cls.run_c = native.with_gate_at_zero((UEFI / 'sp11-payload-run.c').read_text(encoding='utf-8'))
         cls.load_c = (UEFI / 'sp11-payload-load.c').read_text(encoding='utf-8')
         cls.main_c = (UEFI / 'main.c').read_text(encoding='utf-8')
 

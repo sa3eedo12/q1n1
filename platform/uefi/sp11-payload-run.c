@@ -13,6 +13,9 @@
  * scribbled on it, or by memory the bounce did not preserve), not one that was written to lie. */
 #include "sp11-payload.h"
 #include "sha256.h"
+#if Q1N1_SP11_SMMUMAP
+#include "sp11-smmumap.h"
+#endif
 
 #if Q1N1_SP11_PAYLOAD
 
@@ -135,6 +138,27 @@ static void emit_chain_stopped(const struct q1n1_payload_env *env, uint32_t inde
     emit_line(env, &line);
 }
 
+#if Q1N1_SP11_SMMUMAP
+/* A payload that does not verify where it now is: the lines and the status of the loop's own refusal, for one checked before the
+ * step that writes a page table rather than before its call. */
+static void refuse_hash(const struct q1n1_payload_env *env, const struct q1n1_payload_loaded *loaded, uint32_t index,
+                        struct q1n1_payload_result *result)
+{
+    const struct q1n1_payload_file *file = &loaded->file[index];
+    struct q1n1_payload_line line;
+    uint8_t now[32];
+    q1n1_sha256((const void *)(uintptr_t)file->base, (size_t)file->bytes, now);
+    q1n1_payload_line_begin(&line, "PAYLOAD REFUSED=HASH_AT_EL2");
+    q1n1_payload_line_dec(&line, "INDEX", index);
+    q1n1_payload_line_digest(&line, "WANT", file->sha256);
+    q1n1_payload_line_digest(&line, "HAVE", now);
+    emit_line(env, &line);
+    result->status = Q1N1_PAYLOAD_RUN_HASH;
+    result->stopped = index;
+    emit_chain_stopped(env, index, "HASH_AT_EL2");
+}
+#endif
+
 int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_payload_loaded *loaded,
                      const struct q1n1_payload_platform *platform, struct q1n1_payload_result *result)
 {
@@ -156,6 +180,9 @@ int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_paylo
     }
 
     volatile uint64_t *guard = (volatile uint64_t *)(uintptr_t)loaded->stack_base;
+#if Q1N1_SP11_SMMUMAP
+    int smmumap_done = 0;
+#endif
     for (uint32_t index = 0; index < loaded->count && index < Q1N1_PAYLOAD_MAX_FILES; index++) {
         const struct q1n1_payload_file *file = &loaded->file[index];
         struct q1n1_payload_call_result *done = &result->call[result->called];
@@ -180,6 +207,28 @@ int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_paylo
         }
         q1n1_payload_line_begin(&line, "PAYLOAD VERIFY=OK");
         emit_line(env, &line);
+#if Q1N1_SP11_SMMUMAP
+        /* Once, after the first payload's own hash check and before its call: the one descriptor that maps the PCIe SMMU's register
+         * page (sp11-smmumap.h). Nothing is written unless every payload of the chain verifies where it now is, so a payload that
+         * does not verify can no longer follow a descriptor: the others are checked first, without a line, and one that fails gives
+         * the refusal the loop would give it later. A refusal of the step wrote nothing and the chain goes on; only a descriptor
+         * that could be neither checked nor removed ends it. */
+        if (!smmumap_done && env->smmumap) {
+            smmumap_done = 1;
+            for (uint32_t other = index + 1; other < loaded->count && other < Q1N1_PAYLOAD_MAX_FILES; other++) {
+                if (q1n1_payload_file_is_code(&loaded->file[other]) && !q1n1_payload_verify_in_place(loaded, other)) {
+                    refuse_hash(env, loaded, other, result);
+                    return result->status;
+                }
+            }
+            if (env->smmumap() == Q1N1_SMMUMAP_UNSAFE) {
+                result->status = Q1N1_PAYLOAD_RUN_SMMUMAP;
+                result->stopped = index;
+                emit_chain_stopped(env, index, "SMMUMAP");
+                return result->status;
+            }
+        }
+#endif
 
         /* Rebuilt for every payload from nothing: what an earlier payload did to its copy is not seen. */
         struct q1n1_payload_args args;

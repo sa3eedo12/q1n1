@@ -111,9 +111,10 @@ CPUON_REGISTERS = {
     'sctlr_el2', 'hcr_el2', 'vbar_el2', 'cntpct_el0', 'esr_el2', 'elr_el2', 'far_el2'}
 CPUON_SMC_IDS = (0x84000002, 0xC4000003, 0xC4000004)      # CPU_OFF, CPU_ON, AFFINITY_INFO (Arm DEN0022, SMC64 for the last two)
 # The common size cap of a document or source is 50 KiB. docs/SP11-PAYLOAD.md carries one index row per payload and had 41 bytes of room under it: its cap is
-# raised on purpose by 512 bytes, the least multiple of 512 that holds the row of nvmesnap (413 bytes: 51,159 to 51,572 bytes). The tests that apply the cap
+# raised on purpose, each time by the least multiple of 512 that holds the next row. The row of nvmesnap (413 bytes: 51,159 to 51,572 bytes) needed 50 KiB + 512;
+# the row of the runner's mapping step (448 bytes: 51,572 to 52,020 bytes) needs 51 KiB (52,224 bytes, 204 bytes of room). The tests that apply the cap
 # to that document (test-q1n1-sp11-payload.py, -timer.py, -usbsmmu-doc.py) read it here; the next row needs the next raise.
-DOC_SIZE_CAPS = {'SP11-PAYLOAD.md': 50 * 1024 + 512}
+DOC_SIZE_CAPS = {'SP11-PAYLOAD.md': 51 * 1024}
 POLICIES = {
     'state': {'registers': STATE_REGISTERS, 'smc': 0, 'bytes': 4096},
     'psci': {'registers': {'currentel', 'mpidr_el1'}, 'smc': 1, 'bytes': 8192},

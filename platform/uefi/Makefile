@@ -119,6 +119,18 @@ $(error PAYLOAD=1 cannot be combined with STK_SURVEY=1: the payload runner and t
 endif
 endif
 
+# The runner's one page-table write (default off), docs/SP11-PAYLOAD-SMMUMAP.md: before the chain, one level-3 descriptor
+# that maps the PCIe SMMU's register page so that the unchanged smmuprobe can read it. A step of the runner: it needs
+# PAYLOAD=1, and with SMMUMAP at 0 no recipe, prerequisite or object below changes, so the runner is the pinned one byte
+# for byte. Build it with
+#   make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 SMMUMAP=1 SP11_USB_TABLE_C=... SP11_STAGE_TABLE_C=... payload-runner
+SMMUMAP ?= 0
+ifeq ($(SMMUMAP),1)
+ifneq ($(PAYLOAD),1)
+$(error SMMUMAP=1 needs PAYLOAD=1: the mapping is a step of the payload runner)
+endif
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -513,22 +525,40 @@ PAYLOAD_OBJS := $(addprefix $(OUT)/,sp11-payload-text.obj sp11-payload-plan.obj 
 PAYLOAD_HEADERS := platform/uefi/sp11-payload.h platform/uefi/sp11-payload-abi.h platform/uefi/sp11-ebs-ranges.h \
     platform/uefi/sp11-fbgop.h platform/uefi/preload.h platform/uefi/efi.h
 
-$(OUT)/sp11-payload-%.obj: platform/uefi/sp11-payload-%.c $(PAYLOAD_HEADERS)
+# Empty with SMMUMAP at 0: the recipes below are then what they were.
+SMMUMAP_DEFINE :=
+SMMUMAP_OBJS :=
+SMMUMAP_HEADERS :=
+ifeq ($(SMMUMAP),1)
+SMMUMAP_DEFINE := -DQ1N1_SP11_SMMUMAP=1
+SMMUMAP_OBJS := $(addprefix $(OUT)/,sp11-smmumap.obj sp11-smmumap-el2.obj)
+SMMUMAP_HEADERS := platform/uefi/sp11-smmumap.h
+
+$(OUT)/sp11-smmumap.obj: platform/uefi/sp11-smmumap.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+
+$(OUT)/sp11-smmumap-el2.obj: platform/uefi/sp11-smmumap-el2.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+endif
+
+$(OUT)/sp11-payload-%.obj: platform/uefi/sp11-payload-%.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
 
 $(OUT)/sp11-payload-call.obj: platform/uefi/sp11-payload-call.S
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
 
-$(OUT)/main-payload.obj: platform/uefi/main.c $(PAYLOAD_HEADERS) platform/uefi/fbcon.h platform/uefi/boot-window.h \
+$(OUT)/main-payload.obj: platform/uefi/main.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS) platform/uefi/fbcon.h platform/uefi/boot-window.h \
     platform/uefi/usb-ebs.h platform/uefi/qcom-dwc3.h platform/uefi/q1n1-proxy.h platform/uefi/gicv3.h \
     platform/uefi/q1n1-bootinfo.h platform/uefi/live-battery.h platform/uefi/gpu-el2.h platform/uefi/call-service.h \
     platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h platform/uefi/sp11-stage-table.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
 
-$(OUT)/q1n1-payload.efi: $(OUT)/main-payload.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS) $(PAYLOAD_OBJS)
+$(OUT)/q1n1-payload.efi: $(OUT)/main-payload.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS) $(PAYLOAD_OBJS) $(SMMUMAP_OBJS)
 	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \
 	    /dynamicbase /out:$@ $^
 

@@ -35,6 +35,13 @@
 #ifndef Q1N1_SP11_STK_SURVEY
 #define Q1N1_SP11_STK_SURVEY 0
 #endif
+/* The one page-table write of the chain (sp11-smmumap.h, docs/SP11-PAYLOAD-SMMUMAP.md): a second opt-in, default 0. */
+#ifndef Q1N1_SP11_SMMUMAP
+#define Q1N1_SP11_SMMUMAP 0
+#endif
+#if Q1N1_SP11_SMMUMAP && !Q1N1_SP11_PAYLOAD
+#error "Q1N1_SP11_SMMUMAP=1 needs Q1N1_SP11_PAYLOAD=1: the mapping is a step of the payload runner"
+#endif
 #if Q1N1_SP11_PAYLOAD && !SNAP_PLATFORM_SP11
 #error "Q1N1_SP11_PAYLOAD=1 needs SNAP_PLATFORM_SP11=1: the runner loads from the Surface Pro 11's boot stick and declares ranges to its slbounce"
 #endif
@@ -266,6 +273,12 @@ struct q1n1_payload_env {
     uint64_t (*call)(uint64_t entry, const struct q1n1_payload_args *args, uint64_t stack_top);
     int (*guarded)(int kind, uint64_t dst, uint64_t src, uint64_t size);
     uint64_t (*counter)(void);
+#if Q1N1_SP11_SMMUMAP
+    /* Once, after the first payload's own hash check and before its call, and only when every payload of the chain verified: the one
+     * page-table write. Returns Q1N1_SMMUMAP_MAPPED, _REFUSED (nothing is in place: the chain runs) or _UNSAFE (a descriptor may be in
+     * place unchecked: it does not). */
+    int (*smmumap)(void);
+#endif
 };
 /* What the runner tells the payload about the machine, from main.c's own state. */
 struct q1n1_payload_platform {
@@ -277,6 +290,9 @@ enum {
     Q1N1_PAYLOAD_RUN_NO_PAYLOAD,    /* nothing was loaded, or there is no payload among the files */
     Q1N1_PAYLOAD_RUN_HASH,          /* a payload no longer hashes to its manifest entry: not called, chain stopped */
     Q1N1_PAYLOAD_RUN_STACK,         /* a payload overwrote its stack guard: the chain stopped after it */
+#if Q1N1_SP11_SMMUMAP
+    Q1N1_PAYLOAD_RUN_SMMUMAP,       /* the mapping step left a descriptor it could not check or remove: no payload was called */
+#endif
 };
 /* What one payload did: the numbers of its PAYLOAD DONE line. */
 struct q1n1_payload_call_result {
