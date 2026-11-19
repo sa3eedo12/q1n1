@@ -202,6 +202,67 @@ class ManifestTool(unittest.TestCase):
         self.assertIn('between 1 byte', str(refused.exception))
         self.assertEqual(module.MAX_FILES, 5)
 
+    def test_a_bigger_chunk_cap_raises_the_limit_to_256_chunks_and_never_past_2_gib(self):
+        module = load_module('sp11_payload_manifest_big', self.tool)
+        self.assertEqual({k: module.file_limit(k) for k in (64, 1024, 8192)}, {64: 16 << 20, 1024: 256 << 20, 8192: 2 << 30})
+        for bad in (0, 1, 63, 96, 1000, 8193, 16384, -1024, '1024', 1024.0, True, None):
+            with self.subTest(cap=bad), self.assertRaises(ValueError) as refused:
+                module.file_limit(bad)
+            self.assertIn('power of two', str(refused.exception))
+        patched = load_module('sp11_payload_manifest_ceiling', self.tool)
+        patched.CHUNK_KIB_MAX = 16384
+        with self.assertRaises(ValueError) as refused:
+            patched.file_limit(16384)
+        self.assertIn('over 2 GiB', str(refused.exception))
+        base = SCRATCH / 'manifest' / 'big'
+        shutil.rmtree(base, ignore_errors=True)
+        base.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        sparse = {}
+        for name, size in (('MID.DAT', 300 << 20), ('EDGE.DAT', 2 << 30), ('OVER.DAT', (2 << 30) + 1), ('WRAP.DAT', (1 << 32) + 8192), ('SMALL.DAT', 17 << 20)):
+            with open(base / name, 'wb') as handle:
+                handle.truncate(size)
+            sparse[name] = base / name
+        first = base / 'STATE.BIN'
+        first.write_bytes(bytes(64))
+        with self.assertRaises(ValueError) as refused:                  # the default is the pinned runner's 256 MiB
+            module.build([first, sparse['MID.DAT']])
+        self.assertIn('between 1 byte and 268435456', str(refused.exception))
+        manifest, entries = module.build([first, sparse['MID.DAT']], 8192)
+        zeros = hashlib.sha256()
+        for _ in range(300):
+            zeros.update(bytes(1 << 20))
+        self.assertEqual((entries[1][1], entries[1][2]), (300 << 20, zeros.hexdigest()))
+        self.assertEqual(self.decode(manifest)[4][1][:2], (300 << 20, zeros.hexdigest()))
+        self.assertEqual(module.build([first, sparse['EDGE.DAT']], 8192)[1][1][1], 2 << 30)      # exactly 256 chunks of 8 MiB
+        for name in ('OVER.DAT', 'WRAP.DAT'):                                                    # one byte over, and a size whose low 32 bits are small
+            with self.subTest(file=name), self.assertRaises(ValueError) as refused:
+                module.build([first, sparse[name]], 8192)
+            self.assertIn('between 1 byte and 2147483648', str(refused.exception))
+        with self.assertRaises(ValueError) as refused:                  # a smaller cap lowers the limit
+            module.build([first, sparse['SMALL.DAT']], 64)
+        self.assertIn('between 1 byte and 16777216', str(refused.exception))
+        with self.assertRaises(ValueError) as refused:                  # three 2 GiB files are over the manifest's total of 4 GiB, refused before hashing
+            module.build([first, sparse['EDGE.DAT'], sparse['EDGE.DAT'], sparse['EDGE.DAT']], 8192)
+        self.assertIn('together are over 4 GiB', str(refused.exception))
+
+    def test_the_command_line_takes_the_chunk_cap_and_refuses_a_bad_one_writing_nothing(self):
+        base, paths = self.inputs('cap', {'state.bin': bytes(64), 'data.dat': bytes(17 << 20)})
+        done = self.tool_run(base / 'out', *paths)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('make PAYLOAD=1 payload-runner', done.stdout)
+        for cap, message in (('64', 'between 1 byte and 16777216'), ('96', 'power of two'), ('0', 'power of two'), ('16384', 'power of two')):
+            with self.subTest(cap=cap):
+                shutil.rmtree(base / 'out2', ignore_errors=True)
+                done = run(['python3', '-B', str(self.tool), '--out-dir', str(base / 'out2'), '--chunk-cap-kib', cap] + [str(p) for p in paths])
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertIn(message, done.stderr)
+                self.assertFalse((base / 'out2').exists())
+        done = run(['python3', '-B', str(self.tool), '--out-dir', str(base / 'out3'), '--chunk-cap-kib', '8192'] + [str(p) for p in paths])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('BIGFILE=1 BIGFILE_CHUNK_KIB=8192', done.stdout)
+        self.assertEqual(run(['python3', '-B', str(self.tool), '--out-dir', str(base / 'out4'), '--chunk-cap-kib', 'x'] + [str(p) for p in paths]).returncode, 2)
+
     def test_only_the_out_dir_is_written_and_the_inputs_are_untouched(self):
         base, paths = self.inputs('writes', {'state.bin': bytes(range(64))})
         before = {p: p.read_bytes() for p in paths}
@@ -498,11 +559,17 @@ def _tool_mutants():
         ('manifest-allows-bigger-files', manifest, 'MAX_FILE_BYTES = 256 << 20', 'MAX_FILE_BYTES = 512 << 20'),
         ('manifest-accepts-any-name', manifest, "NAME = re.compile(r'^[A-Z0-9_-]{1,8}\\.[A-Z0-9_-]{1,3}$')", "NAME = re.compile(r'^.+$')"),
         ('manifest-allows-the-reserved-name', manifest, '    if name == MANIFEST_NAME:', '    if False:'),
-        ('manifest-accepts-an-empty-file', manifest, 'if not 0 < size <= MAX_FILE_BYTES:', 'if not 0 <= size <= MAX_FILE_BYTES:'),
+        ('manifest-accepts-an-empty-file', manifest, 'if not 0 < size <= limit:', 'if not 0 <= size <= limit:'),
+        ('manifest-limit-ignores-the-chunk-cap', manifest, '    limit = file_limit(chunk_cap_kib)\n', '    limit = file_limit()\n'),
+        ('manifest-takes-a-chunk-cap-that-is-not-a-power-of-two', manifest, '\n            or chunk_cap_kib & (chunk_cap_kib - 1)):', '):'),
+        ('manifest-counts-512-ops-to-a-file', manifest, 'SWEEP_MAX_OPS = 256 ', 'SWEEP_MAX_OPS = 512 '),
+        ('manifest-hashes-only-the-first-block', manifest, "for block in iter(lambda: handle.read(READ_BLOCK), b''):", 'for block in [handle.read(READ_BLOCK)]:'),
+        ('manifest-does-not-add-up-the-sizes', manifest, '        if total > preload.LIMIT:', '        if False:'),
+        ('manifest-truncates-a-size-to-32-bits', manifest, '        size = local.stat().st_size\n', '        size = local.stat().st_size & 0xFFFFFFFF\n'),
         ('manifest-accepts-a-short-payload', manifest, "if kind == 'payload' and size < 4:", "if kind == 'payload' and size < 0:"),
         ('manifest-writes-below-the-wrong-directory', manifest, "STICK_DIR = 'SP11'", "STICK_DIR = 'SP12'"),
-        ('manifest-writes-before-validating', manifest, '    manifest, entries = build(paths)\n    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n',
-         '    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n    manifest, entries = build(paths)\n'),
+        ('manifest-writes-before-validating', manifest, '    manifest, entries = build(paths, chunk_cap_kib)\n    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n',
+         '    target = Path(out_dir) / STICK_DIR\n    target.mkdir(parents=True, exist_ok=True)\n    manifest, entries = build(paths, chunk_cap_kib)\n'),
         ('elfcheck-accepts-absolute-pointers', elfcheck, "'R_AARCH64_LDST128_ABS_LO12_NC', 'R_AARCH64_PREL16'",
          "'R_AARCH64_LDST128_ABS_LO12_NC', 'R_AARCH64_ABS64', 'R_AARCH64_PREL16'"),
         ('elfcheck-ignores-relocations', elfcheck, '        if kind not in PC_RELATIVE:', '        if False:'),
@@ -549,7 +616,7 @@ class ToolMutants(unittest.TestCase):
 
     def test_there_are_enough_distinct_tool_mutants(self):
         mutants = _tool_mutants()
-        self.assertGreaterEqual(len(mutants), 12)
+        self.assertGreaterEqual(len(mutants), 19)
         self.assertEqual(len({m[0] for m in mutants}), len(mutants))
 
     def test_every_seeded_tool_bug_is_caught(self):

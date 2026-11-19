@@ -82,8 +82,27 @@ helpers = load_module('sp11_qemu_helpers', ROOT / 'tools' / 'test-q1n1-sp11-qemu
 SWEPT_TYPES, EFI_MEMORY_WB, ANSI = helpers.SWEPT_TYPES, helpers.EFI_MEMORY_WB, helpers.ANSI
 
 
+class Generated:
+    """A data file made on disk in blocks, never held in memory (the big-file boots): pseudo-random, one block per index so that a block read twice or out of
+    place changes the digest; its size and SHA-256 are known without reading it back. A boot's stick takes a hard link to it, not a copy."""
+    BLOCK = 1 << 20
+
+    def __init__(self, path, size, seed=b'q1n1-bigfile'):
+        self.path, self.size = Path(path), size
+        digest = hashlib.sha256()
+        with open(self.path, 'wb') as handle:
+            for index in range((size + self.BLOCK - 1) // self.BLOCK):
+                block = hashlib.shake_128(seed + index.to_bytes(8, 'little')).digest(self.BLOCK)[:min(self.BLOCK, size - index * self.BLOCK)]
+                handle.write(block)
+                digest.update(block)
+        self.digest = digest.hexdigest()
+
+    def __len__(self):
+        return self.size
+
+
 def sha(data):
-    return hashlib.sha256(data).hexdigest()
+    return data.digest if isinstance(data, Generated) else hashlib.sha256(data).hexdigest()
 
 
 def manifest(entries):
@@ -107,20 +126,29 @@ def script(options='--el2 --uart', before='', after=''):
     return f'fs0:\n{before}SP11\\Q1N1-PAYLOAD.EFI {options}\necho Q1N1_STATUS=%lasterror%\n{after}echo Q1N1_SHELL_RETURN_OK\n'
 
 
+def file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def tree_hashes(directory):
-    return {str(p.relative_to(directory)): sha(p.read_bytes()) for p in sorted(Path(directory).rglob('*')) if p.is_file()}
+    return {str(p.relative_to(directory)): file_digest(p) for p in sorted(Path(directory).rglob('*')) if p.is_file()}
 
 
 class Boot:
     def __init__(self, name, files, startup, el2=True, marker='Q1N1_SHELL_RETURN_OK', second=None, image=None, pinned=False,
-                 shot_after=None, timeout=170):
+                 shot_after=None, timeout=170, memory='512M', base=None):
         self.name, self.files, self.startup, self.el2, self.marker = name, files, startup, el2, marker
         self.second, self.image, self.pinned, self.shot_after, self.timeout = second, image, pinned, shot_after, timeout
+        self.memory, self.base = memory, base or BUILD
         self.text, self.shot, self.changed = '', None, None
 
 
 def run_boot(boot, runner, firmware):
-    esp, esp2 = BUILD / boot.name, BUILD / f'{boot.name}-2'
+    esp, esp2 = boot.base / boot.name, boot.base / f'{boot.name}-2'
     for directory in (esp, esp2):
         shutil.rmtree(directory, ignore_errors=True)
     esp.mkdir(parents=True)
@@ -128,7 +156,10 @@ def run_boot(boot, runner, firmware):
     shutil.copy(boot.image or runner, esp / 'SP11' / 'Q1N1-PAYLOAD.EFI')
     for relative, data in boot.files.items():
         (esp / relative).parent.mkdir(parents=True, exist_ok=True)
-        (esp / relative).write_bytes(data)
+        if isinstance(data, Generated):
+            os.link(data.path, esp / relative)
+        else:
+            (esp / relative).write_bytes(data)
     (esp / 'startup.nsh').write_text(boot.startup)
     if boot.pinned:
         (esp / 'EFI' / 'BOOT').mkdir(parents=True)
@@ -138,12 +169,12 @@ def run_boot(boot, runner, firmware):
             (esp2 / relative).parent.mkdir(parents=True, exist_ok=True)
             (esp2 / relative).write_bytes(data)
     before = (tree_hashes(esp), tree_hashes(esp2) if boot.second else {})
-    serial, qmp = BUILD / f'{boot.name}.log', BUILD / f'{boot.name}.q'
+    serial, qmp = boot.base / f'{boot.name}.log', boot.base / f'{boot.name}.q'
     serial.unlink(missing_ok=True)
     qmp.unlink(missing_ok=True)
     drives = ['-drive', f'format=raw,file=fat:rw:{esp}'] + (['-drive', f'format=raw,file=fat:rw:{esp2}'] if boot.second else [])
     cmd = ['qemu-system-aarch64', '-machine', f'virt,virtualization={"on" if boot.el2 else "off"},gic-version=3',
-           '-accel', 'tcg', '-cpu', 'max', '-smp', '1', '-m', '512M', '-bios', firmware] + drives + [
+           '-accel', 'tcg', '-cpu', 'max', '-smp', '1', '-m', boot.memory, '-bios', firmware] + drives + [
            '-device', 'ramfb', '-display', 'none', '-monitor', 'none', '-nic', 'none', '-serial', f'file:{serial}',
            '-qmp', f'unix:{qmp},server=on,wait=off', '-no-reboot']
     proc = subprocess.Popen(cmd, env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -158,8 +189,8 @@ def run_boot(boot, runner, firmware):
                     break
         if boot.shot_after is not None and boot.marker in text:
             time.sleep(boot.shot_after)
-            helpers.screendump(qmp, BUILD / f'{boot.name}.ppm')
-            boot.shot = helpers.read_ppm(BUILD / f'{boot.name}.ppm')
+            helpers.screendump(qmp, boot.base / f'{boot.name}.ppm')
+            boot.shot = helpers.read_ppm(boot.base / f'{boot.name}.ppm')
             text = ANSI.sub('', serial.read_text(errors='replace').replace('\r', ''))
     finally:
         proc.terminate()
@@ -264,7 +295,7 @@ class PayloadQemu(unittest.TestCase):
         ]
         if PINNED_SHELL and Path(PINNED_SHELL).is_file():
             boots.append(Boot('pinned', good, script(), pinned=True, marker='PAYLOAD DONE'))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get('Q1N1_QEMU_JOBS', '3'))) as pool:
             done = list(pool.map(lambda b: run_boot(b, cls.runner, cls.firmware), boots))
         return {b.name: b for b in done}
 
@@ -454,6 +485,98 @@ class PayloadQemu(unittest.TestCase):
         self.assertNotEqual(top, other, 'the top rows are the same as for a payload that is still running')
         self.assertGreater(max(top), 200)
         self.assertLess(sorted(top)[1], 120, 'the fault page paints a red bar across the top')
+
+
+BIG_BUILD = ROOT / 'build' / 'sp11-payload-qemu-big'
+BIG_BYTES = 300 << 20
+
+
+class PayloadQemuBig(unittest.TestCase):
+    """The runner built with BIGFILE=1 (docs/SP11-PAYLOAD-BIGFILE.md) on a stick with a data file of 300 MiB, three boots one after the other (never two QEMUs at once):
+    a guest of 1 GiB loads it, hashes it and prints what the runner prints for any file; the same stick under the pinned form of the runner (the gate off) is refused by
+    name; and a guest of 256 MiB has no room for it, and the gate-on runner says so by name and does not fall back to a lower address. The file is made in blocks on disk
+    and deleted afterwards. QEMU's firmware and memory map are a model: nothing here says where the unit's firmware puts the allocation or how fast its stick reads."""
+
+    @classmethod
+    def setUpClass(cls):
+        for tool in ('clang', 'lld-link', 'ld.lld', 'make', 'qemu-system-aarch64'):
+            if not lib.have(tool):
+                raise unittest.SkipTest(f'{tool} not installed')
+        cls.firmware = helpers.find_firmware()
+        if not cls.firmware:
+            raise unittest.SkipTest('no EDK2 aarch64 firmware (set Q1N1_EDK2_CODE)')
+        shutil.rmtree(BIG_BUILD, ignore_errors=True)
+        BIG_BUILD.mkdir(parents=True)
+        images = {}
+        for label, extra in (('on', ['BIGFILE=1']), ('off', [])):
+            out = BIG_BUILD / f'out-{label}'
+            done = subprocess.run(['make', '-f', 'platform/uefi/Makefile', f'OUT={out.relative_to(ROOT)}', 'PAYLOAD=1'] + extra + SP11_VARS + ['payload-runner', 'payloads'],
+                                  cwd=ROOT, env=ENV, capture_output=True, text=True)
+            if done.returncode:
+                raise RuntimeError(f'PAYLOAD=1 {extra} build failed:\n' + done.stdout[-2000:] + done.stderr[-2000:])
+            images[label] = out / 'q1n1-payload.efi'
+        state = (BIG_BUILD / 'out-on' / 'payloads' / 'state.bin').read_bytes()
+        cls.state, cls.images = state, images
+        cls.data = Generated(BIG_BUILD / 'DATA.GEN', BIG_BYTES)
+        cls.addClassCleanup(lambda: (BIG_BUILD / 'DATA.GEN').unlink(missing_ok=True))
+        stick_files = stick(state, [('DATA.DAT', cls.data)])
+        boots = [('on', Boot('bigok', stick_files, script(), marker='PAYLOAD DONE', memory='1G', timeout=600, base=BIG_BUILD)),
+                 ('off', Boot('bigoff', stick_files, script(), memory='1G', base=BIG_BUILD)),
+                 ('on', Boot('bignomem', stick_files, script(), memory='256M', base=BIG_BUILD))]
+        cls.runs = {}
+        for label, boot in boots:
+            cls.runs[boot.name] = run_boot(boot, cls.images[label], cls.firmware)
+            shutil.rmtree(BIG_BUILD / boot.name, ignore_errors=True)       # the hard link goes; the data file goes with the class
+
+    def test_a_300_mib_file_is_loaded_hashed_and_printed_through_the_whole_flow(self):
+        run = self.runs['bigok']
+        text = run.text
+        self.assertIn('PAYLOAD DONE', text, f'inspect {BIG_BUILD / "bigok.log"}')
+        before, after = text.split('EL2 CONFIRMED AFTER EXITBOOTSERVICES', 1)
+        digest = self.data.digest[:16].upper()
+        loaded = re.search(rf'PAYLOAD LOADED INDEX=1 BASE=0X([0-9A-F]+) BYTES={BIG_BYTES} SHA={digest} TYPE=2', before)
+        self.assertIsNotNone(loaded, 'the 300 MiB file is not on the console with its size and the digest the host made')
+        base = int(loaded.group(1), 16)
+        self.assertEqual(base % 4096, 0)
+        self.assertTrue(0x40000000 <= base and base + BIG_BYTES <= 0x80000000, 'the file is not in the guest\'s 1 GiB of RAM')
+        for mib in (64, 128, 192, 256):
+            self.assertIn(f'PAYLOAD READ INDEX=1 MIB={mib} OF=300', before)
+            self.assertIn(f'PAYLOAD HASH INDEX=1 MIB={mib}', before)
+        self.assertEqual(len(re.findall(r'PAYLOAD READ ', before)), 4, 'one line per 64 MiB read, not one per request')
+        self.assertEqual(len(re.findall(r'PAYLOAD HASH ', before)), 4)
+        self.assertLess(before.index('PAYLOAD READ INDEX=1 MIB=256'), before.index('PAYLOAD HASH INDEX=1 MIB=64'))
+        self.assertLess(before.index('PAYLOAD HASH INDEX=1 MIB=256'), before.index('PAYLOAD LOADED INDEX=1'))
+        self.assertIn('PAYLOAD READY FILES=2 RANGES=5 CODE=1', before)
+        self.assertIn(f'PAYLOAD BIGFILE CHUNK=0X800000 MAXOPS={-(-BIG_BYTES // (8 << 20))} MAXFILE=0X80000000 TOP=0XFFFFFFFFF', before)
+        self.assertIn('SP11 EBS: set_variable=0x0 ranges=5 chunk=0x800000', before)
+        self.assertRegex(after, rf'SP11 EBS: r4 file1 base=0x{base:X} size=0x{BIG_BYTES:X} desc=1 type=\d+ attr=0x[0-9A-F]+ contained=yes')
+        self.assertLess(before.index('PAYLOAD READY'), before.index('Leaving firmware now'))
+        lines = [line for line in after.split('\n') if line.startswith('PAYLOAD ')]
+        self.assertIn(loaded.group(0), lines, 'the notes are replayed on the page unchanged')
+        for line in lines:
+            self.assertRegex(line, FONT_LINE, line)
+        self.assertEqual(sum(line.startswith('PAYLOAD CALL ') for line in lines), 1, 'the data file is not called')
+        self.assertTrue(lines[-1].startswith('PAYLOAD DONE INDEX=0 RETURN=0X0 STACK=OK'), lines[-1])
+        self.assertNotIn('SYNCHRONOUS EXCEPTION', text)
+        self.assertFalse(run.changed, 'a file on the stick changed')
+
+    def test_the_same_stick_is_refused_by_name_under_the_pinned_form_of_the_runner(self):
+        run = self.runs['bigoff']
+        self.assertIn('Q1N1_SHELL_RETURN_OK', run.text)
+        self.assertIn(f'PAYLOAD REFUSED=FILE_TOO_BIG INDEX=1 GOT={BIG_BYTES} WANT={256 << 20}', run.text)
+        for text in ('Leaving firmware now', 'PAYLOAD READ', 'PAYLOAD LOADED', 'PAYLOAD BIGFILE', 'EL2 CONFIRMED'):
+            self.assertNotIn(text, run.text)
+        self.assertEqual(re.findall(r'Q1N1_STATUS=(\S+)', run.text)[-1].lower(), '0x15')
+        self.assertFalse(run.changed)
+
+    def test_without_room_the_gate_on_runner_refuses_by_name_and_goes_no_further(self):
+        run = self.runs['bignomem']
+        self.assertIn('Q1N1_SHELL_RETURN_OK', run.text, f'inspect {BIG_BUILD / "bignomem.log"}')
+        self.assertRegex(run.text, rf'PAYLOAD REFUSED=FILE_NO_MEMORY INDEX=1 EFI=0X80000000000000(?:09|0E) GOT=0 WANT={BIG_BYTES}\b')
+        for text in ('Leaving firmware now', 'PAYLOAD READ', 'PAYLOAD LOADED', 'PAYLOAD READY', 'EL2 CONFIRMED', 'PAYLOAD CALL'):
+            self.assertNotIn(text, run.text)
+        self.assertEqual(re.findall(r'Q1N1_STATUS=(\S+)', run.text)[-1].lower(), '0x15')
+        self.assertFalse(run.changed)
 
 
 if __name__ == '__main__':

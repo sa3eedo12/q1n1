@@ -649,7 +649,11 @@ static int suite_abi(void)
     CHECK(Q1N1_PAYLOAD_LINE_MAX == 100 && Q1N1_PAYLOAD_LINES_MAX == 40 && Q1N1_PAYLOAD_LOADS_MAX == 4096);
     CHECK(Q1N1_PAYLOAD_STACK_BYTES == 65536 && Q1N1_PAYLOAD_REGION_LINES == 60);
     CHECK(Q1N1_PAYLOAD_LINES_MAX + Q1N1_PAYLOAD_NOTES + 6 <= Q1N1_PAYLOAD_REGION_LINES);   /* the runner's lines fit too */
+#if Q1N1_SP11_BIGFILE
+    CHECK(Q1N1_PAYLOAD_SWEEP_MAX_OPS == 256 && Q1N1_PAYLOAD_MAX_FILE_BYTES == 256 * (uint64_t)Q1N1_PAYLOAD_CHUNK_BYTES);
+#else
     CHECK(Q1N1_PAYLOAD_SWEEP_MAX_OPS == 256 && Q1N1_PAYLOAD_MAX_FILE_BYTES == (UINT64_C(256) << 20));
+#endif
     CHECK(Q1N1_PAYLOAD_MAX_FILES == 5 && Q1N1_PAYLOAD_NOTES >= Q1N1_PAYLOAD_MAX_FILES + 1);
     CHECK(Q1N1_PAYLOAD_LOAD_OK == 0 && Q1N1_PAYLOAD_LOAD_E_FAULT == 6 && Q1N1_PAYLOAD_RET_BAD_ARGS == 1);
     CHECK(!strcmp(Q1N1_PAYLOAD_MANIFEST_PATH, "\\SP11\\PAYLOAD.MAN") && !strcmp(Q1N1_PAYLOAD_DIR, "\\SP11\\"));
@@ -672,11 +676,18 @@ static void print_abi_table(void)
     printf("q1n1_payload_args %zu\nq1n1_payload_ops %zu\n", sizeof(struct q1n1_payload_args), sizeof(struct q1n1_payload_ops));
 }
 
+#if Q1N1_SP11_BIGFILE
+#include "test-q1n1-sp11-payload-plan-big.h"
+#endif
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"plan", suite_plan}, {"map", suite_map}, {"precheck", suite_precheck}, {"slbounce", suite_slbounce},
         {"text", suite_text}, {"abi", suite_abi},
+#if Q1N1_SP11_BIGFILE
+        {"big", suite_big},
+#endif
     };
     if (argc > 1 && !strcmp(argv[1], "abi-table")) { print_abi_table(); return 0; }
     unsigned ran = 0;

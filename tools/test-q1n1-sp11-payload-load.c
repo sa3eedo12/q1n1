@@ -65,6 +65,7 @@ struct fake_entry {
     int over_report;             /* Read reports one more byte than it was asked for */
     uint64_t max_per_read;       /* Read returns at most this many bytes per call (0: no limit) */
     int info_short;              /* GetInfo reports a reply shorter than the fixed part */
+    int generated;               /* no backing buffer: Read produces the bytes of gen_fill() (the big-file cases) */
 };
 struct fake_volume {
     struct efi_simple_fs fs;
@@ -78,11 +79,12 @@ struct fake_handle {
     struct fake_entry *entry;
     uint64_t pos;
 };
-struct fake_allocation { uint64_t base, pages; uint32_t type; int live; void *memory; };
+struct fake_allocation { uint64_t base, pages; uint32_t type; int live; void *memory; uint32_t kind; uint64_t asked; };
 
 #define IMAGE_DEVICE ((efi_handle)(uintptr_t)0x1001)
 static struct fake_volume volume[2];
 static struct fake_allocation alloc_log[64];
+static uint64_t max_read_request;           /* the largest Read the loader asked for, the manifest's included */
 static unsigned alloc_count, alloc_calls, fail_alloc_at, fail_alloc_returns_zero, bad_frees, strays, handle_calls;
 static int open_handles, non_read_opens, write_flags;
 static efi_status fail_alloc_status;
@@ -108,6 +110,20 @@ static int same_ci(const char *a, const char *b)
         if (x != y) return 0;
         if (!x) return 1;
     }
+}
+
+/* The bytes of a file that has no backing buffer (the big-file cases): byte `i` is a function of `i` alone, so any chunk can be regenerated, in any order, to
+ * compute the manifest's digest and to compare with what the loader put in memory. */
+static uint8_t gen_byte(uint64_t i)
+{
+    uint64_t word = (i >> 3) * UINT64_C(0x9E3779B97F4A7C15);
+    word ^= word >> 29;
+    return (uint8_t)(word >> (8 * (i & 7)));
+}
+static void gen_fill(void *dst, uint64_t offset, uint64_t n)
+{
+    uint8_t *p = dst;
+    for (uint64_t i = 0; i < n; i++) p[i] = gen_byte(offset + i);
 }
 
 static efi_status fake_close(struct efi_file *f)
@@ -151,12 +167,14 @@ static efi_status fake_read(struct efi_file *f, uint64_t *n, void *buffer)
 {
     struct fake_handle *h = (struct fake_handle *)f;
     struct fake_entry *e = h->entry;
+    if (*n > max_read_request) max_read_request = *n;
     if (!e || e->is_dir) return EFI_UNSUPPORTED;
     uint64_t avail = e->size - h->pos, take = *n < avail ? *n : avail;
     if (e->max_per_read && take > e->max_per_read) take = e->max_per_read;
     if (e->read_error_at && h->pos + take > e->read_error_at) return EFI_ERROR(7);
     if (e->zero_read && h->pos > 0) { *n = 0; return 0; }
-    memcpy(buffer, e->data + h->pos, take);
+    if (e->generated) gen_fill(buffer, h->pos, take);
+    else memcpy(buffer, e->data + h->pos, take);
     h->pos += take;
     *n = take + (e->over_report ? 1 : 0);
     return 0;
@@ -196,17 +214,56 @@ static efi_status fake_handle_protocol(efi_handle handle, efi_guid *guid, void *
     *out = &volume[0].fs;
     return 0;
 }
+#if Q1N1_SP11_BIGFILE
+/* What the gate-on loader asks of AllocatePages: AllocateMaxAddress calls (data files) and AnyPages calls (the payload, the table and the stack), the bound each
+ * MaxAddress call carried, an error to give every MaxAddress call, and a lie to tell on success (1: above the bound, 2: ends above it, 3: address 0, 4: not on a page). */
+static unsigned top_calls, any_calls, top_lie, fail_top_after;
+static efi_status top_fail_status;
+#define PROGRESS_LINES 512
+static char progress_text[PROGRESS_LINES][Q1N1_PAYLOAD_LINE_MAX + 1];
+static unsigned progress_count;
+static void progress_capture(const char *line)
+{
+    if (progress_count < PROGRESS_LINES) snprintf(progress_text[progress_count], sizeof progress_text[0], "%s", line);
+    progress_count++;
+}
+#endif
 static efi_status fake_allocate_pages(uint32_t kind, uint32_t type, uint64_t pages, uint64_t *address)
 {
     alloc_calls++;
+    uint64_t asked = *address;
+#if Q1N1_SP11_BIGFILE
+    if (kind == Q1N1_PAYLOAD_ALLOCATE_MAX_ADDRESS) {
+        top_calls++;
+        if (asked != Q1N1_PAYLOAD_TOP_ADDRESS) { strays++; return EFI_UNSUPPORTED; }
+        if (top_fail_status && top_calls > fail_top_after) return top_fail_status;
+    } else if (kind == 0) {
+        any_calls++;
+    } else { strays++; return EFI_UNSUPPORTED; }
+#else
     if (kind != 0) { strays++; return EFI_UNSUPPORTED; }
+#endif
+    /* The fake machine has 1 GiB: a request for more fails whatever the kind, so that a loader bug (or a seeded one) that asks for a 2 GiB file by the wrong call does not
+     * make the host allocate and touch 2 GiB. */
+    if (pages > (UINT64_C(1) << 30) / 4096) return EFI_ERROR(9);
     if (fail_alloc_at && alloc_calls == fail_alloc_at) {
         if (fail_alloc_returns_zero) { *address = 0; return 0; }
         return fail_alloc_status;
     }
     void *memory = aligned_alloc(4096, pages * 4096);
     memset(memory, 0xa5, pages * 4096);
-    alloc_log[alloc_count] = (struct fake_allocation){(uint64_t)(uintptr_t)memory, pages, type, 1, memory};
+    alloc_log[alloc_count] = (struct fake_allocation){(uint64_t)(uintptr_t)memory, pages, type, 1, memory, kind, asked};
+#if Q1N1_SP11_BIGFILE
+    /* The memory is real; the address the firmware reports is the lie. The loader frees what it was told, so the log is keyed by it. */
+    if (kind == Q1N1_PAYLOAD_ALLOCATE_MAX_ADDRESS && top_lie) {
+        uint64_t top_page = (Q1N1_PAYLOAD_TOP_ADDRESS + 1) / 4096 * 4096;
+        alloc_log[alloc_count].base = top_lie == 1 ? top_page : top_lie == 2 ? top_page - (pages - 1) * 4096 :
+                                      top_lie == 3 ? 0 : (uint64_t)(uintptr_t)memory + 16;
+        alloc_count++;
+        *address = alloc_log[alloc_count - 1].base;
+        return 0;
+    }
+#endif
     alloc_count++;
     *address = (uint64_t)(uintptr_t)memory;
     return 0;
@@ -252,6 +309,13 @@ static void world_reset(void)
     for (unsigned i = 0; i < alloc_count; i++) if (alloc_log[i].live) free(alloc_log[i].memory);
     memset(alloc_log, 0, sizeof alloc_log);
     alloc_count = alloc_calls = fail_alloc_at = fail_alloc_returns_zero = bad_frees = strays = handle_calls = 0;
+    max_read_request = 0;
+#if Q1N1_SP11_BIGFILE
+    top_calls = any_calls = top_lie = fail_top_after = 0;
+    top_fail_status = 0;
+    progress_count = 0;
+    q1n1_payload_set_progress(progress_capture);
+#endif
     open_handles = non_read_opens = write_flags = 0;
     fail_alloc_status = EFI_ERROR(9);
     image_device = IMAGE_DEVICE;
@@ -640,6 +704,12 @@ static const struct fake_allocation *allocation_at(uint64_t base)
     return NULL;
 }
 
+#if Q1N1_SP11_BIGFILE
+/* An allocation that fails is a data file's when it is the second or later file of a stick whose file 0 is the payload: that one is asked of the top of RAM. */
+#define E_DATA_ALLOC Q1N1_PAYLOAD_E_FILE_NO_MEMORY
+#else
+#define E_DATA_ALLOC Q1N1_PAYLOAD_E_NO_MEMORY
+#endif
 static int suite_memory(void)
 {
     world_reset();
@@ -693,7 +763,7 @@ static int suite_memory(void)
         world_reset();
         good_stick(&volume[0], 2);
         fail_alloc_at = at;
-        CHECK(prepare() == Q1N1_PAYLOAD_E_NO_MEMORY && diag.efi == EFI_ERROR(9));
+        CHECK(prepare() == (at == 2 ? E_DATA_ALLOC : Q1N1_PAYLOAD_E_NO_MEMORY) && diag.efi == EFI_ERROR(9));
         CHECK(live_allocations() == 0 && bad_frees == 0 && open_handles == 0);
         CHECK(diag.expected != 0);                                  /* the size that could not be had */
     }
@@ -873,11 +943,18 @@ static int suite_lines(void)
     return 0;
 }
 
+#if Q1N1_SP11_BIGFILE
+#include "test-q1n1-sp11-payload-load-big.h"
+#endif
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } suites[] = {
         {"volume", suite_volume}, {"manifest", suite_manifest}, {"files", suite_files}, {"memory", suite_memory},
         {"kinds", suite_kinds}, {"lines", suite_lines},
+#if Q1N1_SP11_BIGFILE
+        {"big", suite_big}, {"top", suite_top},
+#endif
     };
     unsigned ran = 0;
     for (unsigned i = 0; i < sizeof suites / sizeof suites[0]; i++) {

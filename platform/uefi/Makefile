@@ -131,6 +131,18 @@ $(error SMMUMAP=1 needs PAYLOAD=1: the mapping is a step of the payload runner)
 endif
 endif
 
+# Files of up to 2 GiB (default off), docs/SP11-PAYLOAD-BIGFILE.md: the runner declares its ranges with a chunk cap of BIGFILE_CHUNK_KIB KiB (a power of two, 64 to 8192;
+# 8192 = 8 MiB when not given) instead of 1 MiB, accepts a file of up to 256 such chunks, and allocates data files with AllocateMaxAddress, at or below the top of RAM. A property of the runner: it needs PAYLOAD=1, and with
+# BIGFILE at 0 no recipe, prerequisite or object below changes, so the runner is the pinned one byte for byte. Build it with
+#   make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 BIGFILE=1 SP11_USB_TABLE_C=... SP11_STAGE_TABLE_C=... payload-runner
+BIGFILE ?= 0
+BIGFILE_CHUNK_KIB ?= 8192
+ifeq ($(BIGFILE),1)
+ifneq ($(PAYLOAD),1)
+$(error BIGFILE=1 needs PAYLOAD=1: the larger files are a property of the payload runner's loader)
+endif
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -527,6 +539,10 @@ PAYLOAD_HEADERS := platform/uefi/sp11-payload.h platform/uefi/sp11-payload-abi.h
 
 # Empty with SMMUMAP at 0: the recipes below are then what they were.
 SMMUMAP_DEFINE :=
+BIGFILE_DEFINE :=
+ifeq ($(BIGFILE),1)
+BIGFILE_DEFINE := -DQ1N1_SP11_BIGFILE=1 -DQ1N1_SP11_BIGFILE_CHUNK_KIB=$(BIGFILE_CHUNK_KIB)u
+endif
 SMMUMAP_OBJS :=
 SMMUMAP_HEADERS :=
 ifeq ($(SMMUMAP),1)
@@ -536,27 +552,27 @@ SMMUMAP_HEADERS := platform/uefi/sp11-smmumap.h
 
 $(OUT)/sp11-smmumap.obj: platform/uefi/sp11-smmumap.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
 
 $(OUT)/sp11-smmumap-el2.obj: platform/uefi/sp11-smmumap-el2.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
 endif
 
 $(OUT)/sp11-payload-%.obj: platform/uefi/sp11-payload-%.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
 
 $(OUT)/sp11-payload-call.obj: platform/uefi/sp11-payload-call.S
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
 
 $(OUT)/main-payload.obj: platform/uefi/main.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS) platform/uefi/fbcon.h platform/uefi/boot-window.h \
     platform/uefi/usb-ebs.h platform/uefi/qcom-dwc3.h platform/uefi/q1n1-proxy.h platform/uefi/gicv3.h \
     platform/uefi/q1n1-bootinfo.h platform/uefi/live-battery.h platform/uefi/gpu-el2.h platform/uefi/call-service.h \
     platform/uefi/ncm-proxy.h platform/uefi/usb-ports.h platform/uefi/sp11-stage-table.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) -c $< -o $@
+	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
 
 $(OUT)/q1n1-payload.efi: $(OUT)/main-payload.obj $(Q1N1_IMAGE_OBJS) $(SP11_OBJS) $(PAYLOAD_OBJS) $(SMMUMAP_OBJS)
 	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 \

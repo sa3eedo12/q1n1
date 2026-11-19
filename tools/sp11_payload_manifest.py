@@ -16,7 +16,10 @@ sizes and the digests. A stick with state.bin alone gets the manifest it always 
 The limits are the runner's (platform/uefi/sp11-payload.h): at most five files in all, because slbounce takes
 eight declared ranges and the image, the memory map and the preload table use three; each file at most 256
 MiB, because slbounce splits a range into at most 256 chunks of 1 MiB; and names in 8.3 form, so that no FAT
-long-name alias can be in question."""
+long-name alias can be in question. A runner built with BIGFILE=1 (docs/SP11-PAYLOAD-BIGFILE.md) declares a larger
+chunk cap, BIGFILE_CHUNK_KIB KiB (8192 by default), and takes files of up to 256 chunks, at most 2 GiB: say so with
+--chunk-cap-kib N, the same N, and the limit is 256 x N KiB. The files together are at most 4 GiB (the manifest
+format's total, shared with the A16 loader). Files are read in blocks, never whole."""
 import argparse
 import hashlib
 from pathlib import Path
@@ -34,6 +37,11 @@ SLBOUNCE_COUNT_BASE = 8      # SP11_EBS_MAX_RANGES
 BASE_RANGES = 3              # the image, the memory-map buffer and the preload table
 MAX_FILES = SLBOUNCE_COUNT_BASE - BASE_RANGES
 MAX_FILE_BYTES = 256 << 20   # 256 chunks of the 1 MiB chunk cap
+SWEEP_MAX_OPS = 256          # SP11_SWEEP_MAX_OPS in slbounce
+CHUNK_KIB_DEFAULT = 1024     # the pinned runner's chunk cap, in KiB
+CHUNK_KIB_MIN, CHUNK_KIB_MAX = 64, 8192
+FILE_CEILING = 2 << 30       # no file is over 2 GiB, whatever the cap
+READ_BLOCK = 8 << 20         # files are hashed in blocks of this size
 NAME = re.compile(r'^[A-Z0-9_-]{1,8}\.[A-Z0-9_-]{1,3}$')
 CODE_SUFFIX = '.BIN'         # the runner's rule (q1n1_payload_path_is_code): <stem>.BIN is called, anything else is data
 
@@ -54,35 +62,64 @@ def is_payload(name):
     return name.upper().endswith(CODE_SUFFIX)
 
 
-def build(paths):
-    """(manifest bytes, [(stick path, size, sha256 hex, local path, 'payload' or 'data')]), in the order given."""
+def file_limit(chunk_cap_kib=CHUNK_KIB_DEFAULT):
+    """The most bytes one file may have for a runner whose chunk cap is chunk_cap_kib KiB: 256 chunks, at most 2 GiB. The cap is a power of two from 64 to 8192 KiB."""
+    if (type(chunk_cap_kib) is not int or not CHUNK_KIB_MIN <= chunk_cap_kib <= CHUNK_KIB_MAX
+            or chunk_cap_kib & (chunk_cap_kib - 1)):
+        raise ValueError(f'the chunk cap must be a power of two from {CHUNK_KIB_MIN} to {CHUNK_KIB_MAX} KiB, not {chunk_cap_kib!r}')
+    limit = MAX_FILE_BYTES if chunk_cap_kib == CHUNK_KIB_DEFAULT else SWEEP_MAX_OPS * (chunk_cap_kib << 10)
+    if limit > FILE_CEILING:
+        raise ValueError(f'a limit of {limit} bytes is over 2 GiB')
+    return limit
+
+
+def digest_of(local):
+    """(SHA-256 hex, bytes read) of a file, read in blocks."""
+    sha, count = hashlib.sha256(), 0
+    with open(local, 'rb') as handle:
+        for block in iter(lambda: handle.read(READ_BLOCK), b''):
+            sha.update(block)
+            count += len(block)
+    return sha.hexdigest(), count
+
+
+def build(paths, chunk_cap_kib=CHUNK_KIB_DEFAULT):
+    """(manifest bytes, [(stick path, size, sha256 hex, local path, 'payload' or 'data')]), in the order given. chunk_cap_kib is the chunk cap of
+    the runner the files are for: 1024 (the default) is the pinned runner, a gate-on runner's is its BIGFILE_CHUNK_KIB."""
+    limit = file_limit(chunk_cap_kib)
     paths = [Path(p) for p in paths]
     if not 1 <= len(paths) <= MAX_FILES:
         raise ValueError(f'the runner takes 1 to {MAX_FILES} files, not {len(paths)}')
-    entries = []
-    for index, local in enumerate(paths):
+    sizes, total = [], 0
+    for local in paths:                     # every size rule first: nothing is read until all of them hold
         if not local.is_file():
             raise ValueError(f'{local} is not a file')
         size = local.stat().st_size
-        if not 0 < size <= MAX_FILE_BYTES:
-            raise ValueError(f'{local} must be between 1 byte and {MAX_FILE_BYTES} bytes, not {size}')
+        if not 0 < size <= limit:
+            raise ValueError(f'{local} must be between 1 byte and {limit} bytes, not {size}')
+        total += size
+        if total > preload.LIMIT:
+            raise ValueError(f'the files together are over 4 GiB, the total the manifest format allows ({total} bytes by {local.name!r})')
+        sizes.append(size)
+    entries = []
+    for index, (local, size) in enumerate(zip(paths, sizes)):
         name = stick_name(local)
         kind = 'payload' if is_payload(name) else 'data'
         if index == 0 and kind != 'payload':
             raise ValueError(f'the first file {local.name!r} must be a payload: only files named *{CODE_SUFFIX} are called')
         if kind == 'payload' and size < 4:
             raise ValueError(f'the payload {local} is shorter than one instruction')
-        data = local.read_bytes()
-        if len(data) != size:
+        digest, count = digest_of(local)
+        if count != size:
             raise ValueError(f'{local} changed while it was being read')
-        entries.append((f'\\{STICK_DIR}\\{name}', len(data), hashlib.sha256(data).hexdigest(), local, kind))
-    # preload.manifest also refuses a duplicate name (without regard to case) and a total over 4 GiB.
+        entries.append((f'\\{STICK_DIR}\\{name}', count, digest, local, kind))
+    # preload.manifest also refuses a duplicate name (without regard to case) and, again, a total over 4 GiB.
     return preload.manifest([e[:3] for e in entries]), entries
 
 
-def write_tree(out_dir, paths):
+def write_tree(out_dir, paths, chunk_cap_kib=CHUNK_KIB_DEFAULT):
     """Writes the manifest and the copies below out_dir/SP11 and returns the entries."""
-    manifest, entries = build(paths)
+    manifest, entries = build(paths, chunk_cap_kib)
     target = Path(out_dir) / STICK_DIR
     target.mkdir(parents=True, exist_ok=True)
     (target / MANIFEST_NAME).write_bytes(manifest)
@@ -91,13 +128,18 @@ def write_tree(out_dir, paths):
     return entries
 
 
-def instructions(entries):
+def instructions(entries, chunk_cap_kib=CHUNK_KIB_DEFAULT):
     lines = ['Copy these to the stick, keeping the SP11 directory (the runner image only once):']
     lines += [f'  {STICK_DIR}\\{MANIFEST_NAME}']
     for index, (path, size, digest, _, kind) in enumerate(entries):
         role = 'payload, called in manifest order' if kind == 'payload' else 'data, never called'
         lines.append(f'  {path[1:]}    {size} bytes  SHA-256 {digest[:16].upper()}...  (INDEX={index}, {role})')
-    lines += [f'  {STICK_DIR}\\{RUNNER_NAME}    (build: make PAYLOAD=1 payload-runner; see docs/SP11-PAYLOAD.md)',
+    if chunk_cap_kib == CHUNK_KIB_DEFAULT:
+        runner = 'build: make PAYLOAD=1 payload-runner; see docs/SP11-PAYLOAD.md'
+    else:
+        runner = (f'build: make PAYLOAD=1 BIGFILE=1 BIGFILE_CHUNK_KIB={chunk_cap_kib} payload-runner; the runner of the pinned digest takes no '
+                  'file over 256 MiB; see docs/SP11-PAYLOAD-BIGFILE.md')
+    lines += [f'  {STICK_DIR}\\{RUNNER_NAME}    ({runner})',
               'Then, from the UEFI Shell, with slbounce already loaded as for q1n1:',
               f'  {STICK_DIR}\\{RUNNER_NAME} --el2']
     return '\n'.join(lines)
@@ -106,16 +148,19 @@ def instructions(entries):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--out-dir', type=Path, required=True)
+    parser.add_argument('--chunk-cap-kib', type=int, default=CHUNK_KIB_DEFAULT, metavar='N',
+                        help='the chunk cap, in KiB, of the runner the files are for (default 1024: the pinned runner, files up to 256 MiB); a runner built '
+                             f'with BIGFILE=1 BIGFILE_CHUNK_KIB=N takes files up to 256 x N KiB, a power of two from {CHUNK_KIB_MIN} to {CHUNK_KIB_MAX}')
     parser.add_argument('files', nargs='+', type=Path, metavar='FILE',
                         help=f'payloads (*{CODE_SUFFIX}, called in this order; the first must be one) and data '
                              '(any other name, never called)')
     args = parser.parse_args(argv)
     try:
-        entries = write_tree(args.out_dir, args.files)
+        entries = write_tree(args.out_dir, args.files, args.chunk_cap_kib)
     except ValueError as error:
         print(f'sp11_payload_manifest: {error}', file=sys.stderr)
         return 1
-    print(instructions(entries))
+    print(instructions(entries, args.chunk_cap_kib))
     return 0
 
 

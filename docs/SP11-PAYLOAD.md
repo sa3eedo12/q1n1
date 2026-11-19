@@ -107,7 +107,7 @@ output is deterministic.
 
 Why 5 and 256 MiB: slbounce takes at most 8 declared ranges (`SP11_EBS_MAX_RANGES`) and the image, the memory-map
 buffer and the preload table use 3; and it splits a range into at most 256 chunks (`SP11_SWEEP_MAX_OPS`) of the
-1 MiB chunk cap q1n1 declares.
+1 MiB chunk cap q1n1 declares. The opt-in `BIGFILE=1` raises the cap to 8 MiB and the limit to 2 GiB ([SP11-PAYLOAD-BIGFILE.md](SP11-PAYLOAD-BIGFILE.md)); the pinned runner is unchanged.
 
 ## What happens
 
@@ -375,8 +375,9 @@ Each prints one `PAYLOAD REFUSED=<NAME>` line on the firmware console, returns `
 | `BAD_PATH` | a file outside `\SP11\`, or the manifest itself | `INDEX=` |
 | `FILE0_NOT_BIN` | file 0 is not named `<stem>.BIN` (any case), so there is no first payload; checked after the per-file path and size rules | none |
 | `FILE_OPEN`, `FILE_SIZE`, `FILE_READ` | missing, not the manifest's size (or a directory), short or long read | `INDEX= EFI= GOT= WANT=` |
-| `FILE_TOO_BIG` | over 256 MiB | `INDEX= GOT= WANT=` |
+| `FILE_TOO_BIG` | over 256 MiB (2 GiB with `BIGFILE=1`) | `INDEX= GOT= WANT=` |
 | `NO_MEMORY` | AllocatePages failed (a file, the table or the stack) | `EFI= GOT=0 WANT=` bytes |
+| `FILE_NO_MEMORY` | `BIGFILE=1` only: no range at or below the top of RAM for a data file, no fallback ([SP11-PAYLOAD-BIGFILE.md](SP11-PAYLOAD-BIGFILE.md)) | `INDEX= EFI= GOT=0 WANT=` bytes |
 | `HASH` | SHA-256 differs | `INDEX= WANT=<hash16> HAVE=<hash16>` |
 | `RANGES` | the declared table is unusable: `REASON=` `NO_TABLE`, `TOO_MANY_RANGES`, `CHUNK_CAP`, `EMPTY_RANGE`, `RANGE_WRAPS`, `RANGE_IN_FRAMEBUFFER`, `RANGES_OVERLAP`, `RANGE_TOO_LARGE`, or from the map `NOT_IN_ONE_DESCRIPTOR`, `TYPE_NOT_SWEPT`, `NOT_WRITE_BACK` | `RANGE=` index |
 | `MAP` | the final memory map could not be read or parsed | `EFI=` |
@@ -415,6 +416,7 @@ the run under the pinned UEFI Shell).
 | `python3 tools/test-q1n1-sp11-payload-smmuprobe.py`, `-smmuprobe-doc.py` | `smmuprobe` ([SP11-PAYLOAD-SMMUPROBE.md](SP11-PAYLOAD-SMMUPROBE.md#tests)): the host program over a modelled machine (scripted configuration pages, SMMU registers and RAM that fault where told to) under ASan and UBSan, built again with small pages and a small load cap, its seeded-bug mutants, the allow-list and the memory check on the binary with seeded bad binaries (a write, an unguarded read), and the document against the source; hardware NOT RUN |
 | `python3 tools/test-q1n1-sp11-payload-nvmesnap.py`, `-nvmesnap-doc.py`, `-nvmesnap-refs.py`, `-qemu-nvmesnap.py` | `nvmesnap` ([SP11-PAYLOAD-NVMESNAP.md](SP11-PAYLOAD-NVMESNAP.md#tests)): the read-only probe of the SSD's PCIe link, NVMe controller and admin queues: the host program under ASan and UBSan, seeded bugs and bad binaries, the document and its references, and the QEMU/EDK2 boot; hardware NOT RUN |
 | `python3 tools/test-q1n1-sp11-payload-smmumap.py`, `-smmumap-doc.py` | the runner's opt-in mapping step, `SMMUMAP=1` ([SP11-PAYLOAD-SMMUMAP.md](SP11-PAYLOAD-SMMUMAP.md#tests)): one level-3 descriptor that maps the PCIe SMMU's page for `smmuprobe`: the host program over modelled translation tables under ASan and UBSan, the hook, source audits, the gate-at-zero proof against the base commit, 162 seeded bugs, and the document; hardware NOT RUN |
+| `python3 tools/test-q1n1-sp11-payload-bigfile.py` | the runner's opt-in big-file gate, `BIGFILE=1` ([SP11-PAYLOAD-BIGFILE.md](SP11-PAYLOAD-BIGFILE.md#tests-and-proofs)): files of up to 2 GiB, data at the top of RAM; the gate-at-zero proofs against the base commit, the gate's constants and glue, and the document (its behaviour is tested in `test-q1n1-sp11-payload.py`, `-build.py` and `-qemu.py`) |
 | `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 | `python3 tools/test-q1n1-sp11-payload-retprobe.py`, `-retprobe-doc.py`, `-qemu-retprobe.py` | `retprobe` ([SP11-PAYLOAD-RETPROBE.md](SP11-PAYLOAD-RETPROBE.md#tests)): the host program over a modelled machine, its seeded bugs and bad binaries, the document against the source, and the QEMU/EDK2 boots |
 

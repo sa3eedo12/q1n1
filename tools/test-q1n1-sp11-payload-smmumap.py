@@ -574,7 +574,8 @@ class SmmumapGateOff(unittest.TestCase):
         changed = set(run(['git', 'diff', '--name-only', BASE_COMMIT, '--', 'platform', 'payloads']).stdout.split())
         changed |= set(run(['git', 'ls-files', '--others', '--exclude-standard', '--', 'platform', 'payloads']).stdout.split())
         self.assertEqual(changed, {'platform/uefi/Makefile', 'platform/uefi/main.c', 'platform/uefi/sp11-payload-run.c', 'platform/uefi/sp11-payload.h',
-                                   'platform/uefi/sp11-smmumap.c', 'platform/uefi/sp11-smmumap.h', 'platform/uefi/sp11-smmumap-el2.c'})
+                                   'platform/uefi/sp11-smmumap.c', 'platform/uefi/sp11-smmumap.h', 'platform/uefi/sp11-smmumap-el2.c',
+                                   'platform/uefi/sp11-payload-load.c', 'platform/uefi/sp11-payload-plan.c'})   # the last two: BIGFILE
 
     def make_lines(self, tree, *args):
         done = run(['make', '-n', '-f', 'platform/uefi/Makefile', 'OUT=build/dryrun'] + FIXTURES + ['SP11_BUILD_STAMP=PROOF'] + list(args), cwd=tree)

@@ -46,6 +46,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import sp11_payload_testlib as lib  # noqa: E402 (only for DOC_SIZE_CAPS, the one cap raised on purpose)
+import sp11_payload_bigfile_mutants as bigfile  # noqa: E402 (the seeded bugs of the big-file gate: data only)
 UEFI = ROOT / 'platform' / 'uefi'
 PAYLOADS = ROOT / 'payloads'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD.md'
@@ -81,7 +82,20 @@ PROGRAMS = {
     'timer': ('tools/test-q1n1-sp11-payload-timer.c', ['sp11-payload-text.c'], 8, 8000, 'timer'),
     'usbsmmu': ('tools/test-q1n1-sp11-payload-usbsmmu.c', ['sp11-payload-text.c'], 10, 19000, 'usbsmmu'),
     'cpuon': ('tools/test-q1n1-sp11-payload-cpuon.c', ['sp11-payload-text.c'], 10, 20000, 'cpuon'),
+    # The loader and plan programs again with Q1N1_SP11_BIGFILE=1 (docs/SP11-PAYLOAD-BIGFILE.md): at the default chunk cap of 8 MiB (files of up to 2 GiB) and at 64 KiB (up
+    # to 16 MiB: the limit's own edge is loaded for real). Each runs the same suites as the gate-off program and one or two more.
+    'load-big': ('tools/test-q1n1-sp11-payload-load.c',
+                 ['sp11-payload-load.c', 'sp11-payload-plan.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'], 8, 21000, 'loader'),
+    'load-small': ('tools/test-q1n1-sp11-payload-load.c',
+                   ['sp11-payload-load.c', 'sp11-payload-plan.c', 'sp11-payload-text.c', 'preload.c', 'sha256.c'], 8, 13500, 'loader'),
+    'plan-big': ('tools/test-q1n1-sp11-payload-plan.c', ['sp11-payload-plan.c', 'sp11-payload-text.c'], 7, 20000, 'plan'),
+    'plan-small': ('tools/test-q1n1-sp11-payload-plan.c', ['sp11-payload-plan.c', 'sp11-payload-text.c'], 7, 20000, 'plan'),
 }
+# The host's heap addresses are above the unit's 2^36, so the programs that load for real take a bound that every host address is under; the default bound is
+# audited as text (tools/test-q1n1-sp11-payload-bigfile.py).
+BIG_FLAGS = ['-DQ1N1_SP11_BIGFILE=1', '-DQ1N1_SP11_BIGFILE_TOP=0x7FFFFFFFFFFFull']
+GATE_FLAGS = {'load-big': BIG_FLAGS, 'plan-big': BIG_FLAGS,
+              'load-small': BIG_FLAGS + ['-DQ1N1_SP11_BIGFILE_CHUNK_KIB=64u'], 'plan-small': BIG_FLAGS + ['-DQ1N1_SP11_BIGFILE_CHUNK_KIB=64u']}
 # The programs that test a payload's own source, built natively with a scripted register file (and SMC).
 HOST_PAYLOADS = {'state': 'state.c', 'psci': 'psci.c', 'timer': 'timer.c', 'usbsmmu': 'usbsmmu.c', 'cpuon': 'cpuon.c'}
 # What a copy of the tree needs: the runner, its dependencies, the survey's text file (the panel layout the
@@ -116,10 +130,11 @@ def build_program(name, uefi, payloads, out_dir, relaxed=False):
     test_c, libs = PROGRAMS[name][:2]
     binary = out_dir / f'test-{name}'
     flags = ['-I', str(uefi), '-I', str(payloads), '-DQ1N1_PAYLOAD_HOST_TEST=1'] if name in HOST_PAYLOADS else ['-I', str(uefi)]
+    flags = flags + GATE_FLAGS.get(name, [])
     objects = [str((Path(uefi) / lib).resolve()) for lib in libs]
     if name in HOST_PAYLOADS:
         objects.append(str((Path(payloads) / HOST_PAYLOADS[name]).resolve()))
-    if name == 'plan':
+    if name.split('-')[0] == 'plan':
         survey = Path(uefi) / 'sp11-stk-text.c'
         if survey.is_file():
             obj = out_dir / 'stk-text.o'
@@ -186,6 +201,18 @@ class Native(unittest.TestCase):
     def test_run_suites_pass(self):
         self._check('run')
 
+    def test_the_big_file_loader_suites_pass_at_both_chunk_caps(self):
+        for name in ('load-big', 'load-small'):
+            with self.subTest(program=name):
+                self._check(name)
+
+    def test_the_big_file_plan_suites_pass_at_both_chunk_caps_and_agree_with_slbounce(self):
+        for name in ('plan-big', 'plan-small'):
+            with self.subTest(program=name):
+                output = self._check(name)
+                if slbounce_source():
+                    self.assertNotIn('SKIP: slbounce', output)
+
     def test_the_reference_payload_reads_only_what_it_documents(self):
         self._check('state')
 
@@ -201,7 +228,7 @@ class Native(unittest.TestCase):
 # a change to the source that moves a target is reported as a stale mutant and not as a survivor.
 # (name, file below the copy's root, [(needle, replacement)], programs that must reject it, build error that
 # counts as rejecting it). The programs are listed in the order they are tried.
-ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer', 'usbsmmu', 'cpuon']
+ALL = ['load', 'plan', 'run', 'chain', 'state', 'psci', 'timer', 'usbsmmu', 'cpuon', 'load-big', 'load-small', 'plan-big', 'plan-small']
 LOAD = 'uefi/sp11-payload-load.c'
 PLAN = 'uefi/sp11-payload-plan.c'
 RUNC = 'uefi/sp11-payload-run.c'
@@ -406,6 +433,7 @@ MUTANTS = [
     ('state-e2h-is-the-wrong-bit', STATE, [('hcr >> 34 & 1', 'hcr >> 35 & 1')], ['state'], None),
     ('state-returns-failure', STATE, [('    SHOW("SPSEL", SPSel);\n    return 0;', '    SHOW("SPSEL", SPSel);\n    return 1;')], ['state'], None),
 ]
+MUTANTS += bigfile.bigfile_mutants()
 
 
 def copy_tree(directory):

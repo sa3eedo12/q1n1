@@ -1580,12 +1580,28 @@ static void payload_console(struct efi_system_table *st, const char *line)
     firmware_out(st, "\n");
 }
 
+#if Q1N1_SP11_BIGFILE
+/* The loader's progress lines (one per 64 MiB read and hashed) go to the firmware console, which is all there is before ExitBootServices. */
+static struct efi_system_table *payload_progress_st;
+static void payload_progress(const char *line)
+{
+    payload_console(payload_progress_st, line);
+}
+#endif
+
 /* Before ExitBootServices: finds, checks and loads the payloads and data files from the volume this image
  * came from. Prints one PAYLOAD line on the firmware console and returns non-success, with nothing
  * bounced, when it cannot. */
 static efi_status sp11_payload_prepare(struct efi_system_table *st, struct efi_loaded_image *image)
 {
     struct q1n1_payload_diag diag;
+#if Q1N1_SP11_BIGFILE
+    payload_progress_st = st;
+    q1n1_payload_set_progress(payload_progress);
+    /* The boot manager arms a 5-minute watchdog for a boot option; whether it is still armed under the Shell is UNKNOWN, and a read of up to 4 GiB can outlast it.
+     * leave_firmware makes this call after the load. */
+    st->boot->set_watchdog(0, 0, 0, NULL);
+#endif
     int err = q1n1_payload_prepare(st->boot, image, &payload_loaded, &diag);
     if (err) {
         char line[160];
@@ -1759,6 +1775,10 @@ static void sp11_declare_ranges(struct efi_system_table *st, uint64_t map_base, 
      * table. A table that does not fit, or has a range slbounce must refuse (sp11-payload-plan.c), is
      * not written at all; leave_firmware turns the status into a refusal that returns to the Shell. */
     if (payload_requested) {
+#if Q1N1_SP11_BIGFILE
+        /* The runner's own unit of work (sp11-payload.h): every range of the table is swept in ops of this many bytes at most. */
+        t.chunk_cap = Q1N1_PAYLOAD_CHUNK_BYTES;
+#endif
         payload_plan_status = q1n1_payload_plan_append(&t, sp11_declared_label, &payload_loaded,
                                                        (uintptr_t)fb.pixels, fb.bytes);
         if (payload_plan_status) return;
@@ -1854,6 +1874,17 @@ static efi_status sp11_payload_precheck(struct efi_system_table *st, uint64_t ma
     q1n1_payload_line_dec(&ready, "CODE", payload_loaded.code_count);
     q1n1_payload_note(&payload_loaded, ready.buf);
     payload_console(st, ready.buf);
+#if Q1N1_SP11_BIGFILE
+    /* The unit of work the sweep will use and how many ops its biggest range takes (slbounce prints none): what the film is read against. */
+    struct q1n1_payload_line unit;
+    q1n1_payload_line_begin(&unit, "PAYLOAD BIGFILE");
+    q1n1_payload_line_hex(&unit, "CHUNK", sp11_declared.chunk_cap);
+    q1n1_payload_line_dec(&unit, "MAXOPS", q1n1_payload_table_max_ops(&sp11_declared));
+    q1n1_payload_line_hex(&unit, "MAXFILE", Q1N1_PAYLOAD_MAX_FILE_BYTES);
+    q1n1_payload_line_hex(&unit, "TOP", Q1N1_PAYLOAD_TOP_ADDRESS);
+    q1n1_payload_note(&payload_loaded, unit.buf);
+    payload_console(st, unit.buf);
+#endif
     return 0;
 }
 #endif /* Q1N1_SP11_PAYLOAD */

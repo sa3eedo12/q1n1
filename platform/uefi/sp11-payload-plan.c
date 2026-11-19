@@ -39,6 +39,19 @@ static uint64_t chunks_for(uint64_t size, uint32_t chunk_cap)
     return size / chunk_cap + (size % chunk_cap != 0);
 }
 
+#if Q1N1_SP11_BIGFILE
+uint64_t q1n1_payload_table_max_ops(const struct sp11_ebs_ranges_table *t)
+{
+    uint64_t most = 0;
+    if (!t || !t->chunk_cap) return 0;
+    for (uint32_t i = 0; i < t->count && i < SP11_EBS_MAX_RANGES; i++) {
+        uint64_t ops = chunks_for(t->range[i].size, t->chunk_cap);
+        if (ops > most) most = ops;
+    }
+    return most;
+}
+#endif
+
 static int ranges_overlap(const struct sp11_ebs_range *a, const struct sp11_ebs_range *b)
 {
     return a->base < b->base + b->size && b->base < a->base + a->size;

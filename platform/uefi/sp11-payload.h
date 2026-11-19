@@ -42,6 +42,13 @@
 #if Q1N1_SP11_SMMUMAP && !Q1N1_SP11_PAYLOAD
 #error "Q1N1_SP11_SMMUMAP=1 needs Q1N1_SP11_PAYLOAD=1: the mapping is a step of the payload runner"
 #endif
+/* Files of up to 2 GiB (docs/SP11-PAYLOAD-BIGFILE.md): a third opt-in, default 0, for the one use that needs them, a root image carried into RAM. */
+#ifndef Q1N1_SP11_BIGFILE
+#define Q1N1_SP11_BIGFILE 0
+#endif
+#if Q1N1_SP11_BIGFILE && !Q1N1_SP11_PAYLOAD
+#error "Q1N1_SP11_BIGFILE=1 needs Q1N1_SP11_PAYLOAD=1: the larger files are a property of the payload runner's loader"
+#endif
 #if Q1N1_SP11_PAYLOAD && !SNAP_PLATFORM_SP11
 #error "Q1N1_SP11_PAYLOAD=1 needs SNAP_PLATFORM_SP11=1: the runner loads from the Surface Pro 11's boot stick and declares ranges to its slbounce"
 #endif
@@ -72,8 +79,38 @@
 /* slbounce splits a range into at most this many chunks (SP11_SWEEP_MAX_OPS in its bounce_main.c) and
  * refuses a range that needs more, so a range may be at most this many times chunk_cap bytes. */
 #define Q1N1_PAYLOAD_SWEEP_MAX_OPS 256u
+#if Q1N1_SP11_BIGFILE
+/* The unit of work, the chunk cap q1n1 declares: a build constant, not a manifest field. The manifest layout (Q1N1PLD1, preload.h) is shared
+ * with the A16 loader and fixed in size, and a stick must not be able to change the flush unit that a reviewed runner stands for. In KiB, a power
+ * of two from 64 (slbounce's own "smallest sane" cap) to 8192 (make BIGFILE_CHUNK_KIB=): at 8 MiB 256 ops cover 2 GiB, the most one file may be,
+ * and a smaller cap only lowers that limit (64 KiB: 16 MiB, which is what lets the host tests load a file of exactly the limit). */
+#ifndef Q1N1_SP11_BIGFILE_CHUNK_KIB
+#define Q1N1_SP11_BIGFILE_CHUNK_KIB 8192u
+#endif
+#define Q1N1_PAYLOAD_CHUNK_BYTES ((uint32_t)Q1N1_SP11_BIGFILE_CHUNK_KIB << 10)
+/* The largest file the runner accepts: as many chunks as slbounce splits a range into, at the cap declared above. */
+#define Q1N1_PAYLOAD_MAX_FILE_BYTES ((uint64_t)Q1N1_PAYLOAD_SWEEP_MAX_OPS * Q1N1_PAYLOAD_CHUNK_BYTES)
+#define Q1N1_PAYLOAD_FILE_CEILING (UINT64_C(2) << 30)
+_Static_assert(Q1N1_SP11_BIGFILE_CHUNK_KIB >= 64u && Q1N1_SP11_BIGFILE_CHUNK_KIB <= 8192u &&
+               (Q1N1_SP11_BIGFILE_CHUNK_KIB & (Q1N1_SP11_BIGFILE_CHUNK_KIB - 1u)) == 0,
+               "the chunk cap is a power of two from 64 KiB to 8 MiB");
+_Static_assert(Q1N1_PAYLOAD_MAX_FILE_BYTES <= Q1N1_PAYLOAD_FILE_CEILING, "no file is over 2 GiB");
+/* Sizes are 64-bit throughout the loader; a target whose size_t is narrower would truncate a hash length or an allocation. */
+_Static_assert(sizeof(size_t) >= 8, "the big-file runner needs a 64-bit size_t");
+/* Data files are asked of AllocateMaxAddress: a range whose last byte is at or below this, the top of the unit's RAM. It is a limit, not an address. The unit's RAM ends at 2^36 and its only conventional
+ * extent that can hold a 1.8 GiB file is the 30,720 MiB bank that ends there; the seven low extents total 1,361 MiB, the largest 590 MiB (OBSERVED, boot 6
+ * memory map, the Snapintosh repository's docs/SP11-MONITOR-PORT.md). Where this firmware places such an allocation is UNKNOWN until a run. */
+#ifndef Q1N1_SP11_BIGFILE_TOP
+#define Q1N1_SP11_BIGFILE_TOP UINT64_C(0xFFFFFFFFF)
+#endif
+#define Q1N1_PAYLOAD_TOP_ADDRESS ((uint64_t)Q1N1_SP11_BIGFILE_TOP)
+#define Q1N1_PAYLOAD_ALLOCATE_MAX_ADDRESS 1u
+/* One firmware-console line per this many bytes read, and one per this many hashed: never one per op, never one per read request. */
+#define Q1N1_PAYLOAD_PROGRESS_BYTES (UINT64_C(64) << 20)
+#else
 /* The largest file the runner accepts at the chunk cap q1n1 declares (1 MiB): 256 MiB. */
 #define Q1N1_PAYLOAD_MAX_FILE_BYTES ((uint64_t)Q1N1_PAYLOAD_SWEEP_MAX_OPS << 20)
+#endif
 
 /* UEFI memory types for AllocatePages. A payload is code: the firmware marks LoaderCode executable
  * (q1n1.efi itself runs from it, and so does a chainloaded stage) and may mark LoaderData
@@ -115,6 +152,9 @@ enum {
     Q1N1_PAYLOAD_E_RANGES,          /* the declared table is unusable (q1n1_payload_plan_name says why) */
     Q1N1_PAYLOAD_E_MAP,             /* no usable memory map to check the ranges against */
     Q1N1_PAYLOAD_E_DECLARE,         /* the declared table could not be written */
+#if Q1N1_SP11_BIGFILE
+    Q1N1_PAYLOAD_E_FILE_NO_MEMORY,  /* no range for a data file at or below Q1N1_PAYLOAD_TOP_ADDRESS: names the file, its size and the firmware's status */
+#endif
 };
 const char *q1n1_payload_err_name(int err);
 
@@ -176,6 +216,14 @@ void q1n1_payload_release(struct efi_boot_services *bs, struct q1n1_payload_load
 size_t q1n1_payload_refusal_line(int err, const struct q1n1_payload_diag *diag, char *dst, size_t cap);
 /* The note lines prepare keeps for the page after the bounce. */
 void q1n1_payload_note(struct q1n1_payload_loaded *loaded, const char *line);
+#if Q1N1_SP11_BIGFILE
+/* Where the progress lines go (one finished line, no terminator): main.c sets it to the firmware console before q1n1_payload_prepare; without it the loader
+ * prints nothing. A line "PAYLOAD READ INDEX=<n> MIB=<m> OF=<total MiB>" for every 64 MiB of a file read, "PAYLOAD HASH INDEX=<n> MIB=<m>" for every 64 MiB hashed. */
+void q1n1_payload_set_progress(void (*emit)(const char *line));
+/* 1 when `bytes` at `address` is a place AllocateMaxAddress may have given a data file: a page-aligned, non-zero address whose last byte is at or below
+ * Q1N1_PAYLOAD_TOP_ADDRESS, with no wrap-around. Pure. */
+int q1n1_payload_top_ok(uint64_t address, uint64_t bytes);
+#endif
 
 /* ---- Declared ranges (sp11-payload-plan.c) -------------------------------------------------------- */
 
@@ -206,6 +254,11 @@ int q1n1_payload_plan_append(struct sp11_ebs_ranges_table *table, const char **l
                              const struct q1n1_payload_loaded *loaded, uint64_t fb_base, uint64_t fb_bytes);
 /* Everything about the table that needs no memory map. */
 int q1n1_payload_table_check(const struct sp11_ebs_ranges_table *table, uint64_t fb_base, uint64_t fb_bytes);
+#if Q1N1_SP11_BIGFILE
+/* The most flush operations any one range of the table needs at the table's chunk cap: the number of ops the film should expect from the sweep (slbounce
+ * prints none). 0 for a table without a chunk cap. */
+uint64_t q1n1_payload_table_max_ops(const struct sp11_ebs_ranges_table *table);
+#endif
 /* The rest, against the final memory map: what slbounce will decide for each range, so that a refusal
  * is reported on the firmware console and returned to the Shell instead of failing ExitBootServices.
  * *failing is the index of the first range refused. */

@@ -56,6 +56,9 @@ const char *q1n1_payload_err_name(int err)
     case Q1N1_PAYLOAD_E_RANGES: return "RANGES";
     case Q1N1_PAYLOAD_E_MAP: return "MAP";
     case Q1N1_PAYLOAD_E_DECLARE: return "DECLARE";
+#if Q1N1_SP11_BIGFILE
+    case Q1N1_PAYLOAD_E_FILE_NO_MEMORY: return "FILE_NO_MEMORY";
+#endif
     default: return "UNKNOWN";
     }
 }
@@ -145,6 +148,31 @@ static efi_status file_size(struct efi_file *file, uint64_t *size)
     return 0;
 }
 
+#if Q1N1_SP11_BIGFILE
+/* Progress lines (docs/SP11-PAYLOAD-BIGFILE.md): one per Q1N1_PAYLOAD_PROGRESS_BYTES read and one per as many hashed, to wherever main.c points them. The read request stays 1 MiB
+ * (read_exact below), the one size seen to work on the unit; a larger one is UNKNOWN. */
+static void (*progress_emit)(const char *line);
+static int progress_reading;                    /* set around the data of a manifest entry, never around the manifest itself */
+static uint32_t progress_index;
+static uint64_t progress_total;
+
+void q1n1_payload_set_progress(void (*emit)(const char *line))
+{
+    progress_emit = emit;
+}
+
+static void progress_line(const char *prefix, uint64_t done, int with_total)
+{
+    struct q1n1_payload_line line;
+    if (!progress_emit) return;
+    q1n1_payload_line_begin(&line, prefix);
+    q1n1_payload_line_dec(&line, "INDEX", progress_index);
+    q1n1_payload_line_dec(&line, "MIB", done >> 20);
+    if (with_total) q1n1_payload_line_dec(&line, "OF", (progress_total + 0xFFFFF) >> 20);
+    progress_emit(line.buf);
+}
+#endif
+
 /* Exactly `size` bytes and not one more: a file that is longer than the manifest says is not the file
  * that was reviewed. Reads in 1 MiB requests, as the A16 loader does. */
 static efi_status read_exact(struct efi_file *file, void *data, uint64_t size, uint64_t *got)
@@ -159,6 +187,10 @@ static efi_status read_exact(struct efi_file *file, void *data, uint64_t size, u
         p += n;
         size -= n;
         *got += n;
+#if Q1N1_SP11_BIGFILE
+        if (progress_reading && (*got / Q1N1_PAYLOAD_PROGRESS_BYTES) != ((*got - n) / Q1N1_PAYLOAD_PROGRESS_BYTES))
+            progress_line("PAYLOAD READ", *got / Q1N1_PAYLOAD_PROGRESS_BYTES * Q1N1_PAYLOAD_PROGRESS_BYTES, 1);
+#endif
     }
     uint8_t extra;
     uint64_t n = 1;
@@ -262,6 +294,54 @@ static int allocate(struct efi_boot_services *bs, uint32_t type, uint64_t bytes,
     return Q1N1_PAYLOAD_OK;
 }
 
+#if Q1N1_SP11_BIGFILE
+/* A data file is asked of the firmware with AllocateMaxAddress: any range whose last byte is at or below Q1N1_PAYLOAD_TOP_ADDRESS, the top of the unit's RAM. The bound is a limit,
+ * not an address, and where the firmware puts the range under it is its own choice. There is no second try with AnyPages: on the unit that would put a file where the low extents are
+ * too small for the next one, and a refusal that names the file is better than a range that may not fit. The firmware's answer is checked, not trusted: a success outside the bound,
+ * at zero or off a page boundary is a refusal as well. */
+int q1n1_payload_top_ok(uint64_t address, uint64_t bytes)
+{
+    return address && !(address & (PAGE_BYTES - 1)) && bytes && address <= Q1N1_PAYLOAD_TOP_ADDRESS &&
+           bytes - 1 <= Q1N1_PAYLOAD_TOP_ADDRESS - address;
+}
+
+static int allocate_top(struct efi_boot_services *bs, uint32_t type, uint64_t bytes, uint64_t *base,
+                        struct q1n1_payload_diag *diag)
+{
+    uint64_t address = Q1N1_PAYLOAD_TOP_ADDRESS;
+    efi_status status = bs->allocate_pages(Q1N1_PAYLOAD_ALLOCATE_MAX_ADDRESS, type, bytes / PAGE_BYTES, &address);
+    if (!status && !q1n1_payload_top_ok(address, bytes)) {
+        bs->free_pages(address, bytes / PAGE_BYTES);
+        status = EFI_INVALID_PARAMETER;
+    }
+    if (status) {
+        diag->efi = status;
+        diag->expected = bytes;
+        diag->got = 0;
+        return Q1N1_PAYLOAD_E_FILE_NO_MEMORY;
+    }
+    *base = address;
+    return Q1N1_PAYLOAD_OK;
+}
+
+/* SHA-256 in slices of Q1N1_PAYLOAD_PROGRESS_BYTES, with a line after each full slice. The digest is the one q1n1_sha256 gives for the whole file. */
+static void hash_file(const struct q1n1_payload_file *entry, uint8_t digest[32])
+{
+    struct q1n1_sha256 state;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)entry->base;
+    uint64_t done = 0;
+    q1n1_sha256_init(&state);
+    while (done < entry->bytes) {
+        uint64_t take = entry->bytes - done;
+        if (take > Q1N1_PAYLOAD_PROGRESS_BYTES) take = Q1N1_PAYLOAD_PROGRESS_BYTES;
+        q1n1_sha256_update(&state, p + done, (size_t)take);
+        done += take;
+        if (take == Q1N1_PAYLOAD_PROGRESS_BYTES) progress_line("PAYLOAD HASH", done, 0);
+    }
+    q1n1_sha256_final(&state, digest);
+}
+#endif
+
 static int load_file(struct efi_boot_services *bs, struct efi_file *root, struct q1n1_payload_loaded *out,
                      uint32_t index, struct q1n1_payload_diag *diag)
 {
@@ -288,14 +368,27 @@ static int load_file(struct efi_boot_services *bs, struct efi_file *root, struct
     entry->bytes = bytes;
     entry->alloc = (bytes + PAGE_BYTES - 1) & ~(PAGE_BYTES - 1);
     entry->memory_type = q1n1_payload_path_is_code(want->path) ? Q1N1_PAYLOAD_TYPE_CODE : Q1N1_PAYLOAD_TYPE_DATA;
+#if Q1N1_SP11_BIGFILE
+    int err = entry->memory_type == Q1N1_PAYLOAD_TYPE_DATA ? allocate_top(bs, entry->memory_type, entry->alloc, &entry->base, diag)
+                                                           : allocate(bs, entry->memory_type, entry->alloc, &entry->base, diag);
+#else
     int err = allocate(bs, entry->memory_type, entry->alloc, &entry->base, diag);
+#endif
     if (err) {
         file->close(file);
         return err;
     }
     out->count = index + 1;     /* from here on release() frees it */
     out->code_count += q1n1_payload_file_is_code(entry);
+#if Q1N1_SP11_BIGFILE
+    progress_reading = 1;
+    progress_index = index;
+    progress_total = bytes;
+#endif
     status = read_exact(file, (void *)(uintptr_t)entry->base, bytes, &got);
+#if Q1N1_SP11_BIGFILE
+    progress_reading = 0;
+#endif
     file->close(file);
     if (status) {
         diag->efi = status;
@@ -306,7 +399,12 @@ static int load_file(struct efi_boot_services *bs, struct efi_file *root, struct
     /* The rest of the last page is not the file's: a payload that reads past its end sees zeros, not
      * whatever the firmware left there. */
     zero((uint8_t *)(uintptr_t)entry->base + bytes, entry->alloc - bytes);
+#if Q1N1_SP11_BIGFILE
+    progress_index = index;
+    hash_file(entry, entry->sha256);
+#else
     q1n1_sha256((const void *)(uintptr_t)entry->base, (size_t)bytes, entry->sha256);
+#endif
     if (!digest_equal(entry->sha256, want->sha256)) {
         for (unsigned i = 0; i < 8; i++) {
             diag->hash_want[i] = want->sha256[i];
@@ -391,6 +489,9 @@ int q1n1_payload_prepare(struct efi_boot_services *bs, const struct efi_loaded_i
 /* Which refusals concern one manifest entry. */
 static int names_an_entry(int err)
 {
+#if Q1N1_SP11_BIGFILE
+    if (err == Q1N1_PAYLOAD_E_FILE_NO_MEMORY) return 1;
+#endif
     return err == Q1N1_PAYLOAD_E_BAD_PATH || err == Q1N1_PAYLOAD_E_FILE_OPEN || err == Q1N1_PAYLOAD_E_FILE_SIZE ||
            err == Q1N1_PAYLOAD_E_FILE_TOO_BIG || err == Q1N1_PAYLOAD_E_FILE_READ || err == Q1N1_PAYLOAD_E_HASH;
 }
