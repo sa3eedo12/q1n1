@@ -171,6 +171,11 @@ POLICIES['tsnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'bytes'
 # audit, tools/sp11_payload_gpusnap_audit.py, proves it again from the IR).
 POLICIES['gpusnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'bytes': 12288, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
                        'read_only': True}
+# dispsnap (docs/SP11-PAYLOAD-DISPSNAP.md) stores nothing outside its own stack and reads every device word through the runner's guarded load: MRS of
+# CurrentEL and CNTFRQ_EL0, no SMC, no barrier at all, and `read_only`, which tools/sp11_payload_memcheck.py proves from the disassembly (the compiled-code
+# audit, tools/sp11_payload_dispsnap_audit.py, proves it again from the IR). Its loads through the arguments are the GOP mode it prints.
+POLICIES['dispsnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'bytes': 12288, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
+                        'read_only': True}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}
