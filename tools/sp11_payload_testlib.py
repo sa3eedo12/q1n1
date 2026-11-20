@@ -162,6 +162,10 @@ POLICIES['retprobe'] = {'registers': {'currentel', 'ctr_el0', 'cntfrq_el0', 'par
 # no other barrier, no SMC, and the memory discipline of tools/sp11_payload_memcheck.py (every store through its own stack).
 POLICIES['nvmesnap'] = {'registers': {'currentel', 'cntfrq_el0', 'par_el1'}, 'smc': 0, 'bytes': 20480, 'forbid': {'dsb', 'dmb', 'sb', 'sev', 'sevl'},
                         'allow': {'at': {'s1e2r'}}, 'read_only': True}
+# tsnap (docs/SP11-PAYLOAD-TSNAP.md) stores nothing outside its own stack and reads every device word through the runner's guarded load: MRS of CurrentEL and CNTFRQ_EL0, no SMC, no
+# barrier at all, and `read_only`, which tools/sp11_payload_memcheck.py proves from the disassembly (the compiled-code audit, tools/sp11_payload_tsnap_audit.py, proves it again from the IR).
+POLICIES['tsnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'bytes': 12288, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
+                     'read_only': True}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}
