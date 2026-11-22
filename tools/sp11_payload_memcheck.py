@@ -28,19 +28,32 @@ enters it. The classes:
   ARGS1   a 64-bit value loaded through an ARGS base (map_base, preload_table, an op); a value loaded through anything else is OTHER
   READABLE the join of two different classes among STACK, CALLER, IMAGE, ARGS and ARGS1: memory the payload may read through (a
           string may be on the stack or in the image) and never stores through
-  OTHER   everything else, constants included, and the join of anything with OTHER
+  STACKX  (only for a policy with the key `register_offset_stores`) the result of add/sub of a stack pointer and a register that is not a
+          pointer, and sp itself after `add/sub sp, sp, xN`: readable like a pointer into the stack, never a base a store may use, and kept
+          through a call, so a callee that stores through it is refused as well
 
 A conservative check: it may refuse a safe binary (the source is then written differently), it must never pass an unsafe one, with
 two assumptions it states: a callee does not overwrite the caller's spill slots (it writes only where the caller pointed it), and the
 runner's ops, which are outside the binary, are trusted by ABI. A pointer made from a STACK value by other arithmetic (and, orr,
-shifts) is OTHER, so refused. Hardware: NOT RUN."""
+shifts) is OTHER, so refused. The check proves the base of a store, not its offset: the optional policy key `register_offset_stores` pins the exact
+{function: count} of the stores whose address has a register offset (register_offset_stores below) and, because the offset of such a store is
+a number the program computes, also makes a stack pointer moved by a register (STACKX) unusable as the base of a store. Hardware: NOT RUN."""
 import re
 import subprocess
 import sys
 
 STACK, CALLER, IMAGE, READABLE, ARGS, ARGS1, OTHER = 'S', 'C', 'P', 'R', 'A', 'B', 'X'
+STACKX = 'Y'
 STACKISH = {STACK, CALLER}
-POINTERS = {STACK, CALLER, IMAGE, READABLE, ARGS, ARGS1}
+POINTERS = {STACK, CALLER, IMAGE, READABLE, ARGS, ARGS1, STACKX}
+# `analyse(..., ops=True)` (the write-table policy, tools/sp11_payload_wtab_audit.py) also names where a function pointer was loaded from: a 64-bit
+# load at a known offset of the arguments gives the op of the payload ABI (offsets 120 to 144) or the pointer to the write table's ops (152, class
+# WOPS), and a load at a known offset of that gives one of its three ops. The tags are only ever created when `ops` is set, so every other
+# policy is analysed as it always was.
+WOPS = 'W'
+ARGS_TAGS = {120: 'f:puts', 128: 'f:hex', 136: 'f:load32', 144: 'f:counter', 152: WOPS}
+WOPS_TAGS = {16: 'f:open', 24: 'f:row', 32: 'f:unwind'}
+POINTERS = POINTERS | {WOPS}
 CALLEE_SAVED = list(range(19, 30))
 ARGUMENT_REGISTERS = list(range(0, 8))
 CALL_CLOBBERED = list(range(0, 19)) + [30]
@@ -58,7 +71,7 @@ REGISTER_BYTES = {'x': 8, 'w': 4, 'q': 16, 'd': 8, 's': 4, 'h': 2, 'b': 1, 'v': 
 
 class State:
     """The 31 general registers (a class string, or an int for a stack pointer whose offset from the entry sp is known), the
-    offset of sp (None when unknown) and the 64-bit stack slots whose content is known ({offset: value})."""
+    offset of sp (None when unknown, STACKX when a register moved it under the key `register_offset_stores`) and the 64-bit stack slots whose content is known ({offset: value})."""
     __slots__ = ('regs', 'sp', 'slots')
 
     def __init__(self, regs, sp=0, slots=None):
@@ -88,7 +101,7 @@ def join_value(a, b):
 
 def join_state(a, b):
     slots = {k: join_value(v, b.slots[k]) for k, v in a.slots.items() if k in b.slots}
-    return State([join_value(x, y) for x, y in zip(a.regs, b.regs)], a.sp if a.sp == b.sp else None, slots)
+    return State([join_value(x, y) for x, y in zip(a.regs, b.regs)], a.sp if a.sp == b.sp else STACKX if STACKX in (a.sp, b.sp) else None, slots)
 
 
 def split_operands(text):
@@ -142,7 +155,7 @@ def get(state, name):
 
 def put(state, name, value):
     if name == 'sp':
-        state.sp = value if isinstance(value, int) else None
+        state.sp = value if isinstance(value, int) or value == STACKX else None
         return
     index = register_index(name)
     if index is not None:
@@ -247,9 +260,23 @@ def step_load(new, old, mnemonic, operands, memory):
                 value = old.slots[address + 8 * position]
             elif base_class == ARGS:
                 value = ARGS1
+                if _tag_ops and mnemonic in ('ldr', 'ldur') and memory[2] in ARGS_TAGS:
+                    value = ARGS_TAGS[memory[2]]
+            elif _tag_ops and base_class == WOPS and mnemonic in ('ldr', 'ldur') and memory[2] in WOPS_TAGS:
+                value = WOPS_TAGS[memory[2]]
         new.regs[index] = value
     if memory[3] or memory[4] is not None or memory[5]:
         write_back(new, memory, old)
+
+
+_tag_ops = False
+_strict_stack = False
+
+
+def moved_by_register(klass):
+    """The class of a pointer that a register was added to: only a policy that asked for it (`strict_stack`) loses the right to store through
+    a stack pointer moved this way, because an address that an earlier add moved by a run-time number looks like any other [xN] at the store."""
+    return STACKX if _strict_stack and klass in STACKISH else klass
 
 
 def step_other(new, old, mnemonic, operands):
@@ -261,7 +288,7 @@ def step_other(new, old, mnemonic, operands):
                 value = source
             elif mnemonic in ('add', 'sub') and len(operands) >= 3:
                 delta = immediate(operands[2], operands[3] if len(operands) > 3 else None)
-                value = offset_value(source, delta if mnemonic == 'add' else -delta) if delta is not None else cls(source)
+                value = offset_value(source, delta if mnemonic == 'add' else -delta) if delta is not None else moved_by_register(cls(source))
         put(new, 'sp', value)
         return
     for name in destinations(mnemonic, operands):
@@ -281,11 +308,11 @@ def step_other(new, old, mnemonic, operands):
             else:
                 second = get(old, operands[2]) if is_register(operands[2]) else OTHER
                 if cls(first) in POINTERS and cls(second) not in POINTERS:
-                    result = cls(first)
+                    result = moved_by_register(cls(first))
                 elif cls(second) in POINTERS and cls(first) not in POINTERS and mnemonic.startswith('add'):
-                    result = cls(second)
+                    result = moved_by_register(cls(second))
         elif mnemonic == 'madd' and wide and len(operands) == 4 and is_register(operands[3]):
-            result = cls(get(old, operands[3])) if cls(get(old, operands[3])) in POINTERS else OTHER
+            result = moved_by_register(cls(get(old, operands[3]))) if cls(get(old, operands[3])) in POINTERS else OTHER
         elif mnemonic == 'csel' and wide and len(operands) == 4:
             first, second = get(old, operands[1]), get(old, operands[2])
             result = join_value(first, second) if cls(first) in POINTERS and cls(second) in POINTERS else OTHER
@@ -357,8 +384,20 @@ def run_function(instructions, entry, span, by_start, entries):
     return states, grown
 
 
-def analyse(text, root='_start'):
-    """(problems, loads, stores): loads and stores are lists of (function, address, mnemonic, operand text, base, class)."""
+def analyse(text, root='_start', ops=False, calls=None, strict_stack=False):
+    """(problems, loads, stores): loads and stores are lists of (function, address, mnemonic, operand text, base, class). With `ops`, a function
+    pointer loaded from the arguments' ops table or from the write table's (see ARGS_TAGS) carries the name of its op as its class, and when `calls`
+    is a list every `blr` of the code reached is appended to it as (function, address, register, class of the register). With `strict_stack` a
+    stack pointer moved by a register is STACKX, which no store may use as its base."""
+    global _tag_ops, _strict_stack
+    _tag_ops, _strict_stack = ops, strict_stack
+    try:
+        return _analyse(text, root, calls)
+    finally:
+        _tag_ops = _strict_stack = False
+
+
+def _analyse(text, root, calls):
     table = functions(text)
     if root not in table:
         return [f'the disassembly has no {root}'], [], []
@@ -401,6 +440,8 @@ def analyse(text, root='_start'):
                 if operands[0] != 'sp' or not (from_sp or from_stack):
                     problems.append(f'sp is set in {name} at {address:#x} ({mnemonic} {text_}) from something that is not the stack')
             memory = parse_memory(operands)
+            if calls is not None and mnemonic == 'blr':
+                calls.append((name, address, operands[0] if operands else '', cls(get(state, operands[0])) if operands else OTHER))
             if mnemonic.startswith('st') and memory:
                 stores.append((name, address, mnemonic, text_, memory[1], cls(get(state, memory[1]))))
             elif mnemonic.startswith('ld'):
@@ -416,7 +457,7 @@ def memory_violations(text, policy):
     found = []
     if policy.get('bulk_reads') and not policy.get('read_only'):
         found.append('the policy has bulk_reads without read_only')
-    problems, loads, stores = analyse(text)
+    problems, loads, stores = analyse(text, strict_stack=policy.get('register_offset_stores') is not None)
     found += problems
     for name, address, mnemonic, operands, base, klass in stores:
         if klass not in STACKISH:
@@ -428,6 +469,22 @@ def memory_violations(text, policy):
                              'image, the arguments or a pointer read from them (the policy has no bulk_reads)')
     if len(found) > MESSAGES_MAX:
         found = found[:MESSAGES_MAX] + [f'{len(found) - MESSAGES_MAX} more']
+    return found
+
+
+def register_offset_stores(text):
+    """{function: count} of the stores whose address is a base plus a register ([Xn, Xm], [Xn, Wm, uxtw], [Xn, Xm, lsl #k]) in every function of the disassembly.
+    The check above proves the base of a store, never its offset. A policy that names the exact map (policy key `register_offset_stores`) knows every
+    store whose own addressing mode adds a register; an offset an earlier add folded into the base register is not seen here, and the same key makes
+    memory_violations refuse the base of such a store (STACKX), also in a callee that stores through its pointer parameter."""
+    found = {}
+    for name, (_, instructions) in functions(text).items():
+        for _, mnemonic, operands, _ in instructions:
+            if not mnemonic.startswith('st'):
+                continue
+            memory = parse_memory(operands)
+            if memory and memory[2] is None:
+                found[name] = found.get(name, 0) + 1
     return found
 
 

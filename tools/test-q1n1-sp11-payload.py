@@ -508,13 +508,14 @@ def strip_comments(text):
     return re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', text, flags=re.S))
 
 
-def with_gate_at_zero(text, gate='Q1N1_SP11_SMMUMAP'):
-    """`text` as the compiler sees it with `gate` at 0: the lines of an `#if gate` branch dropped, those of its `#else` branch kept."""
+def with_gate_at_zero(text, gate=('Q1N1_SP11_SMMUMAP', 'Q1N1_SP11_WTAB')):
+    """`text` as the compiler sees it with `gate` (one name or several: the mapping step's, and the write table's) at 0: the lines of an `#if gate` branch dropped, those of its `#else` branch kept."""
+    gates = (gate,) if isinstance(gate, str) else tuple(gate)
     out, state, depth = [], 'plain', 0
     for line in text.splitlines(keepends=True):
         word = re.match(r'[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b(.*)', line)
         kind = word.group(1) if word else ''
-        if state == 'plain' and kind == 'if' and word.group(2).split('/*')[0].strip() == gate:
+        if state == 'plain' and kind == 'if' and word.group(2).split('/*')[0].strip() in gates:
             state, depth = 'dropping', 0
             continue
         if state != 'plain':
@@ -606,9 +607,9 @@ class SourceAudit(unittest.TestCase):
         self.assertIn('return kind == Q1N1_PAYLOAD_G_COPY32 ? live_guarded(0, dst, src, size) : 1;', body)
         glue = main_c[main_c.index('/* ---- Stick payload runner (sp11-payload.h): the platform side'):
                       main_c.index('#endif /* Q1N1_SP11_PAYLOAD */')]
-        # The runner's opt-in mapping step (docs/SP11-PAYLOAD-SMMUMAP.md) is the one gated addition that stores, in two lines of its own; with its gate at 0
-        # (the default, and the pinned runner) the glue is what this test has always pinned, and what the gate adds is audited by
-        # tools/test-q1n1-sp11-payload-smmumap.py (audit_main_store).
+        # The runner's opt-in mapping step (docs/SP11-PAYLOAD-SMMUMAP.md) is a gated addition that stores, in two lines of its own, and so is the write table's (docs/SP11-PAYLOAD-WTAB.md,
+        # one guarded 32-bit store); with their gates at 0 (the default, and the pinned runner) the glue is what this test has always pinned, and what the gates add is audited by
+        # tools/test-q1n1-sp11-payload-smmumap.py (audit_main_store) and tools/test-q1n1-sp11-payload-wtab.py (the glue audit of DefaultOff).
         glue = with_gate_at_zero(glue)
         self.assertEqual(len(re.findall(r'live_guarded\(', glue)), 1)
         for banned in ('live_write32', 'memset32', 'q1n1_memcpy64', 'G_SET32'):

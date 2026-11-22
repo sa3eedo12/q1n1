@@ -1,0 +1,52 @@
+{
+  "spdx": "SPDX-License-Identifier: MIT",
+  "name": "WTABREF",
+  "flags": ["restore_at_end"],
+  "pause_s": 1,
+  "allowed_windows": [
+    {"name": "FAKE-CC", "base": "0x01000000", "size": "0x4000"}
+  ],
+  "windows": [
+    {"name": "FAKE-BLK", "base": "0x01008000", "size": "0x100", "after_row": "CLKB"}
+  ],
+  "rows": [
+    {
+      "tag": "GATE", "step": 0, "addr": "0x01000000", "found": ["0x80000001", "0x00000001"],
+      "readback": {"addr": "0x01000000", "mask": "0x80000000", "value": "0", "timeout_us": 0}
+    },
+    {
+      "tag": "DOMAIN", "step": 1, "addr": "0x01001000", "mask": "0x1", "value": "0x0",
+      "found": ["0x00fff807", "0x0022f801"],
+      "readback": {"addr": "0x01001004", "mask": "0x80000000", "value": "0x80000000", "timeout_us": 2000, "settle_us": 1},
+      "after_us": 1,
+      "undo": {"kind": "restore", "after_us": 500, "timeout_us": 2000,
+               "readback": {"addr": "0x01001004", "mask": "0x80000000", "value": "0"}},
+      "rmw": "the fake register of the model is plain read/write",
+      "effect": "EXPERIMENTAL: the fake power domain of the host model; no hardware",
+      "why": "the fake power domain: clear the collapse bit, wait for the status bit",
+      "source": "reference table of the test suite (no hardware)", "label": "EXPERIMENTAL"
+    },
+    {
+      "tag": "CLKA", "step": 2, "addr": "0x01002000", "mask": "0x1", "value": "0x1", "found": ["0x1", "0x0"],
+      "readback": {"addr": "0x01002000", "mask": "0x80000000", "value": "0", "timeout_us": 200},
+      "undo": {"kind": "restore", "after_us": 10, "timeout_us": 100},
+      "rmw": "the fake register of the model is plain read/write",
+      "effect": "EXPERIMENTAL: the fake clock of the host model; no hardware",
+      "why": "the fake clock the model leaves off", "source": "reference table of the test suite (no hardware)", "label": "EXPERIMENTAL"
+    },
+    {
+      "tag": "CLKB", "step": 2, "addr": "0x01002004", "mask": "0x1", "value": "0x1", "found": ["0x1", "0x0"],
+      "readback": {"addr": "0x01002004", "mask": "0x80000000", "value": "0", "timeout_us": 200},
+      "undo": {"kind": "restore", "after_us": 10, "timeout_us": 100},
+      "rmw": "the fake register of the model is plain read/write",
+      "effect": "EXPERIMENTAL: the fake clock of the host model; no hardware",
+      "why": "the second fake clock the model leaves off: the window opens when both run", "source": "reference table of the test suite (no hardware)",
+      "label": "EXPERIMENTAL"
+    }
+  ],
+  "note": {
+    "hang": "none: a reference table that no stick ever carries",
+    "unknown": "everything about hardware",
+    "after": "restored"
+  }
+}

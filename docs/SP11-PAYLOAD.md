@@ -261,7 +261,7 @@ layout is pinned by `_Static_assert` and by a native test that compares it with 
 | 120 | 32 | `ops` | the ops table below |
 | 152 | 40 | `reserved[5]` | zero in version 1; room for more ops or fields without moving any offset |
 
-The ops table (offsets within `struct q1n1_payload_ops`; there is **no store** in it):
+The ops table (offsets within `struct q1n1_payload_ops`; it stores only through `hex` and `load32`, [restricted to the stack](SP11-PAYLOAD-WTAB.md)):
 
 | Offset | Size | Op | Meaning |
 | --- | --- | --- | --- |
@@ -417,6 +417,7 @@ the run under the pinned UEFI Shell).
 | `python3 tools/test-q1n1-sp11-payload-nvmesnap.py`, `-nvmesnap-doc.py`, `-nvmesnap-refs.py`, `-qemu-nvmesnap.py` | `nvmesnap` ([SP11-PAYLOAD-NVMESNAP.md](SP11-PAYLOAD-NVMESNAP.md#tests)): the read-only probe of the SSD's PCIe link, NVMe controller and admin queues: the host program under ASan and UBSan, seeded bugs and bad binaries, the document and its references, and the QEMU/EDK2 boot; hardware NOT RUN |
 | `python3 tools/test-q1n1-sp11-payload-smmumap.py`, `-smmumap-doc.py` | the runner's opt-in mapping step, `SMMUMAP=1` ([SP11-PAYLOAD-SMMUMAP.md](SP11-PAYLOAD-SMMUMAP.md#tests)): one level-3 descriptor that maps the PCIe SMMU's page for `smmuprobe`: the host program over modelled translation tables under ASan and UBSan, the hook, source audits, the gate-at-zero proof against the base commit, 162 seeded bugs, and the document; hardware NOT RUN |
 | `python3 tools/test-q1n1-sp11-payload-bigfile.py` | the runner's opt-in big-file gate, `BIGFILE=1` ([SP11-PAYLOAD-BIGFILE.md](SP11-PAYLOAD-BIGFILE.md#tests-and-proofs)): files of up to 2 GiB, data at the top of RAM; the gate-at-zero proofs against the base commit, the gate's constants and glue, and the document (its behaviour is tested in `test-q1n1-sp11-payload.py`, `-build.py` and `-qemu.py`) |
+| `python3 tools/test-q1n1-sp11-payload-wtab.py` | the runner's opt-in write table, `WTAB=1` ([SP11-PAYLOAD-WTAB.md](SP11-PAYLOAD-WTAB.md#tests)): the one way a payload may change a device word: host tests against a fake device, the seeded bugs, the gate-at-zero proof. Hardware NOT RUN |
 | `python3 tools/test-q1n1-sp11-payload-qemu-usbsmmu.py` | QEMU/EDK2 at EL2: `psci`, `usbsmmu`, `timer` in one boot, `usbsmmu` alone, and `state`, `psci`, `usbsmmu`, `timer`: the USB windows abort and the SMMU window reads all ones, the payload prints its 10 lines and a normal `DONE` (4 loads, 2 faults) and every later payload runs |
 | `python3 tools/test-q1n1-sp11-payload-retprobe.py`, `-retprobe-doc.py`, `-qemu-retprobe.py` | `retprobe` ([SP11-PAYLOAD-RETPROBE.md](SP11-PAYLOAD-RETPROBE.md#tests)): the host program over a modelled machine, its seeded bugs and bad binaries, the document against the source, and the QEMU/EDK2 boots |
 
@@ -440,8 +441,8 @@ second hash passes), and payload lines reach the right-hand column, 58 of them a
   `\Snapintosh\q1n1-preload.bin` is never read.
 * Fail closed: every refusal before the bounce returns to the Shell; a payload that does not verify at EL2 is not
   called and ends the chain; an unsupported request is an error, never a made-up success.
-* The ops table has no store. `load32` is a guarded load with a destination restricted to the payload stack and a
-  budget. The glue in `main.c` forwards loads only (a source audit checks it).
+* Only `hex` and `load32` store. `load32` is a guarded load with a destination restricted to the payload stack and a
+  budget (`hex` too in a write-table runner). The glue in `main.c` forwards loads only (a source audit checks it).
 * The framebuffer is never declared. Nothing is allocated between the last GetMemoryMap and ExitBootServices.
 * Every payload's hash is verified twice, the second time right before its call. A payload is not sandboxed, and
   neither is a chain (see "The chain").

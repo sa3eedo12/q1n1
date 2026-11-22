@@ -61,6 +61,9 @@
 #if Q1N1_SP11_SMMUMAP
 #include "sp11-smmumap.h"
 #endif
+#if Q1N1_SP11_WTAB
+#include "sp11-payload-wtab.h"
+#endif
 #endif
 
 static struct {
@@ -1551,6 +1554,38 @@ static int payload_smmumap(void)
 }
 #endif
 
+#if Q1N1_SP11_WTAB
+/* The write table's one platform service (sp11-payload-wtab.h): the guarded load and the guarded store of live_guarded, which a fault
+ * answers with an error and not a reset, the SError poll of the proxy (a store's error response reaches the core only after the access
+ * completes), and the counter. A pending SError that cannot be consumed counts as one: the table stops on it. */
+static int wtab_read32(uint32_t pa, uint32_t *out)
+{
+    return live_guarded(0, (uintptr_t)out, pa, 4);
+}
+static int wtab_store32(uint32_t pa, uint32_t value)
+{
+    return live_guarded(2, pa, value, 4);
+}
+static int wtab_serror(void)
+{
+    uint64_t syndrome = 0;
+    int pending = 0;
+    int found = q1n1_platform_serror_poll(&syndrome, &pending);
+    return found || pending;
+}
+/* The mapping of a word's page, classified exactly as the stk survey does (stk_attr): no valid descriptor is NONE, a walk that failed is UNKNOWN, and Device is
+ * q1n1_mmu_attr_device. */
+static int wtab_attr(uint32_t pa)
+{
+    uint32_t attr = 0;
+    int status = live_attr(0, pa, &attr);
+    if (status == -3) return Q1N1_WTAB_ATTR_NONE;
+    if (status) return Q1N1_WTAB_ATTR_UNKNOWN;
+    return q1n1_mmu_attr_device(attr) ? Q1N1_WTAB_ATTR_DEVICE : Q1N1_WTAB_ATTR_NORMAL;
+}
+static struct q1n1_wtab_env wtab_env;
+#endif
+
 /* After the page is drawn, at EL2: runs the chain, which verifies each payload where it now is and calls
  * it, in manifest order. */
 static void sp11_payload_el2_run(void)
@@ -1559,6 +1594,16 @@ static void sp11_payload_el2_run(void)
     struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter, payload_smmumap};
 #else
     struct q1n1_payload_env env = {payload_emit, q1n1_payload_sync_code, q1n1_payload_call, payload_guarded, counter};
+#endif
+#if Q1N1_SP11_WTAB
+    wtab_env.emit = payload_emit;
+    wtab_env.read32 = wtab_read32;
+    wtab_env.store32 = wtab_store32;
+    wtab_env.serror_poll = wtab_serror;
+    wtab_env.counter = counter;
+    wtab_env.counter_hz = frequency();
+    wtab_env.attr = wtab_attr;
+    q1n1_wtab_attach(&wtab_env);
 #endif
     struct q1n1_payload_platform platform = {(uintptr_t)fb.pixels, fb.bytes, info.memory_map, info.memory_map_size,
                                              info.memory_map_stride, fb.width, fb.height, fb.stride, fb.format};

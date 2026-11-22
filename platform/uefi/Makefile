@@ -143,6 +143,16 @@ $(error BIGFILE=1 needs PAYLOAD=1: the larger files are a property of the payloa
 endif
 endif
 
+# The write table (default off), docs/SP11-PAYLOAD-WTAB.md: the one way a payload may change a device word (a guarded, journaled, undone-on-failure store of a table row).
+# A property of the runner: it needs PAYLOAD=1, and with WTAB at 0 no recipe, prerequisite or object below changes, so the runner is the pinned one byte for byte. Build it with
+#   make -f platform/uefi/Makefile SP11=1 PAYLOAD=1 WTAB=1 SP11_USB_TABLE_C=... SP11_STAGE_TABLE_C=... payload-runner
+WTAB ?= 0
+ifeq ($(WTAB),1)
+ifneq ($(PAYLOAD),1)
+$(error WTAB=1 needs PAYLOAD=1: the write table is a service of the payload runner)
+endif
+endif
+
 .PHONY: all clean usb-probe usb-role-probe usb-role-fixture usb-role-change usb-serial usb-typec-probe usb-ucsi-probe
 all: $(OUT)/q1n1.efi stage
 stage: $(OUT)/q1n1-stage.bin $(OUT)/q1n1-stage-alt.bin $(OUT)/q1n1-stage-qemu.bin $(OUT)/q1n1-stage-qemu-alt.bin
@@ -557,6 +567,14 @@ $(OUT)/sp11-smmumap.obj: platform/uefi/sp11-smmumap.c $(PAYLOAD_HEADERS) $(SMMUM
 $(OUT)/sp11-smmumap-el2.obj: platform/uefi/sp11-smmumap-el2.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -DQ1N1_SP11_PAYLOAD=1 $(SMMUMAP_DEFINE) $(BIGFILE_DEFINE) -c $< -o $@
+endif
+
+# The write table rides in the three variables the recipes already carry (its define, its object and its headers), so that with WTAB at 0 not one
+# recipe, prerequisite or object changes.
+ifeq ($(WTAB),1)
+BIGFILE_DEFINE += -DQ1N1_SP11_WTAB=1
+SMMUMAP_OBJS += $(OUT)/sp11-payload-wtab.obj
+SMMUMAP_HEADERS += platform/uefi/sp11-payload-wtab.h platform/uefi/sp11-payload-wtab-abi.h
 endif
 
 $(OUT)/sp11-payload-%.obj: platform/uefi/sp11-payload-%.c $(PAYLOAD_HEADERS) $(SMMUMAP_HEADERS)

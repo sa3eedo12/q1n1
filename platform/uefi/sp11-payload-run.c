@@ -5,9 +5,12 @@
  * run this against a fake platform.
  *
  * The payload gets exactly what the ABI says and the ops are the only way it calls q1n1: puts, hex,
- * load32 and counter. There is no store. load32 reads through the platform's guarded copy and refuses
- * every request whose destination is not the payload's own stack, so it cannot be turned into a store to
- * a device register either. That does not sandbox the payload (it is code at EL2): it keeps the ops
+ * load32 and counter. They are not a sandbox: hex writes into the buffer the payload names and puts reads
+ * the string it names. load32 reads through the platform's guarded copy and refuses every request whose
+ * destination is not the payload's own stack, so it cannot be turned into a store to a device register
+ * either; in a runner built with the opt-in write-table gate hex and puts refuse a pointer outside the
+ * stack (outside the stack and the payload's image, for puts) in the same way, and say so on the page.
+ * That does not sandbox the payload (it is code at EL2): it keeps the ops
  * honest, and the review of the payload and its pinned SHA-256 carry the rest. The same goes for the chain:
  * the hash taken again before each call catches a payload that was damaged (by an earlier payload that
  * scribbled on it, or by memory the bounce did not preserve), not one that was written to lie. */
@@ -15,6 +18,9 @@
 #include "sha256.h"
 #if Q1N1_SP11_SMMUMAP
 #include "sp11-smmumap.h"
+#endif
+#if Q1N1_SP11_WTAB
+#include "sp11-payload-wtab.h"
 #endif
 
 #if Q1N1_SP11_PAYLOAD
@@ -26,6 +32,10 @@ static struct {
     const struct q1n1_payload_env *env;
     uint64_t stack_base, stack_size;
     unsigned lines, dropped, loads, faults, refused;
+#if Q1N1_SP11_WTAB
+    uint64_t image_base, image_size;        /* the payload's own image: where ops.puts may also read a string */
+    unsigned op_lines;                      /* which ops have printed their first refusal line (bit 0 hex, bit 1 puts) */
+#endif
 } session;
 
 /* The physical address space the unit's tables can map: 48 bits. A load beyond it is a translation
@@ -46,11 +56,40 @@ int q1n1_payload_load32_check(uint64_t addr, const uint32_t *out, uint64_t stack
     return Q1N1_PAYLOAD_LOAD_OK;
 }
 
+#if Q1N1_SP11_WTAB
+/* An op that acts on a pointer of the payload was given one outside what the table's run allows (the stack for hex; the stack and the payload's image for puts). Nothing was
+ * read or written. The refusal is counted (REFUSED in the DONE line, which is never dropped) and the first one of each op is a line of the page, inside the payload's line budget:
+ * a payload that tries again does not flood the page, and a refusal is never silent. */
+static void refuse_pointer_op(unsigned bit, const char *op, const void *where, uint64_t cap)
+{
+    struct q1n1_payload_line line;
+    session.refused++;
+    if (session.op_lines & bit) return;
+    session.op_lines |= bit;
+    if (Q1N1_PAYLOAD_LINES_MAX <= session.lines) {
+        session.dropped++;
+        return;
+    }
+    q1n1_payload_line_begin(&line, "PAYLOAD OP REFUSED");
+    q1n1_payload_line_word(&line, op);
+    q1n1_payload_line_hex(&line, "A", (uint64_t)(uintptr_t)where);
+    if (cap) q1n1_payload_line_hex(&line, "CAP", cap);
+    session.lines++;
+    session.env->emit(line.buf);
+}
+#endif
+
 static void op_puts(const char *line)
 {
     char text[Q1N1_PAYLOAD_LINE_MAX + 1];
     unsigned n = 0;
     if (!line) return;
+#if Q1N1_SP11_WTAB
+    if (!q1n1_wtab_puts_ok(line, session.stack_base, session.stack_size, session.image_base, session.image_size)) {
+        refuse_pointer_op(2u, "PUTS", line, 0);
+        return;
+    }
+#endif
     while (line[n] && n < Q1N1_PAYLOAD_LINE_MAX) {
         text[n] = line[n];
         n++;
@@ -67,6 +106,12 @@ static void op_puts(const char *line)
 
 static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)
 {
+#if Q1N1_SP11_WTAB
+    if (!q1n1_wtab_hex_ok(dst, cap, session.stack_base, session.stack_size)) {
+        refuse_pointer_op(1u, "HEX", dst, cap);
+        return 0;
+    }
+#endif
     return (uint32_t)q1n1_payload_fmt_hex(dst, cap, value);
 }
 
@@ -78,6 +123,14 @@ static int32_t op_load32(uint64_t addr, uint32_t *out)
         return refusal;
     }
     uint32_t value = 0;
+#if Q1N1_SP11_WTAB
+    /* A word in a window the table has not opened (or has closed: the run stopped, or was undone) is not read: the block behind it may be
+     * unpowered or unclocked, and a read of that can hang the bus, which no guard recovers. */
+    if (q1n1_wtab_load_check(addr)) {
+        session.refused++;
+        return Q1N1_WTAB_LOAD_E_GATED;
+    }
+#endif
     session.loads++;
     /* Only ever a load: COPY32 reads `addr` into the runner's own variable. The payload's word is
      * written by an ordinary store after the guarded read succeeded. */
@@ -85,6 +138,13 @@ static int32_t op_load32(uint64_t addr, uint32_t *out)
         session.faults++;
         return Q1N1_PAYLOAD_LOAD_E_FAULT;
     }
+#if Q1N1_SP11_WTAB
+    /* A read of a gated block that raised an error response ends the run: the table undoes what it switched on. */
+    if (q1n1_wtab_load_done(addr)) {
+        session.faults++;
+        return Q1N1_WTAB_LOAD_E_GATED;
+    }
+#endif
     *out = value;
     return Q1N1_PAYLOAD_LOAD_OK;
 }
@@ -256,9 +316,23 @@ int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_paylo
         args.ops.hex = op_hex;
         args.ops.load32 = op_load32;
         args.ops.counter = op_counter;
+#if Q1N1_SP11_WTAB
+        /* The table's ops go to this payload alone, in the one field of ABI v1 that is zero by definition; its run, journal and gates start from
+         * nothing for every payload of the chain. */
+        if (q1n1_wtab_attached()) {
+            struct q1n1_wtab_machine machine = {file->base, file->bytes, platform->map_base, platform->map_size, platform->map_stride};
+            q1n1_wtab_begin(q1n1_wtab_attached(), &machine);
+            args.reserved[0] = (uint64_t)(uintptr_t)q1n1_wtab_ops();
+        }
+#endif
         session.stack_base = args.stack_base;
         session.stack_size = args.stack_size;
         session.lines = session.dropped = session.loads = session.faults = session.refused = 0;
+#if Q1N1_SP11_WTAB
+        session.image_base = file->base;
+        session.image_size = file->bytes;
+        session.op_lines = 0;
+#endif
 
         for (unsigned i = 0; i < GUARD_WORDS; i++) guard[i] = GUARD_PATTERN;
         env->sync_code(file->base, file->alloc);
@@ -271,6 +345,11 @@ int q1n1_payload_run(const struct q1n1_payload_env *env, const struct q1n1_paylo
         q1n1_payload_line_digest(&line, 0, file->sha256);
         emit_line(env, &line);
         uint64_t value = env->call(file->base, &args, args.stack_base + args.stack_size);
+#if Q1N1_SP11_WTAB
+        /* Before the DONE line: what is still in force is undone (when the table says so) and the run's END is printed even if the payload
+         * returned in the middle of it. */
+        if (q1n1_wtab_attached()) q1n1_wtab_finish(0);
+#endif
 
         int intact = 1;
         for (unsigned i = 0; i < GUARD_WORDS; i++) intact &= guard[i] == GUARD_PATTERN;

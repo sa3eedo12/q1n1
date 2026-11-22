@@ -61,6 +61,8 @@ SP11_FIXTURES = ['SP11=1', 'SP11_USB_TABLE_C=tools/testdata/sp11-usb-table-fixtu
                  'SP11_STAGE_TABLE_C=tools/testdata/sp11-stage-table-fixture.c']
 SP11_ARTEFACTS = ('q1n1.efi', 'q1n1-stage.bin', 'q1n1-stage-alt.bin', 'q1n1-stage-qemu.bin', 'q1n1-stage-qemu-alt.bin')
 RUNNER_SOURCES = sorted(UEFI.glob('sp11-payload-*.c')) + sorted(UEFI.glob('sp11-payload-*.S'))
+# Linked only when a gate asks for it, through that gate's own Makefile variables, so that with the gate at zero the link line is the base's (the write table, WTAB=1).
+GATED_RUNNER_SOURCES = {'sp11-payload-wtab'}
 MANIFEST_MAGIC = 0x31444C50314E3151
 TOOL_NAMES = ('sp11_payload_manifest.py', 'sp11_payload_elfcheck.py', 'preload.py')
 READELF = lambda: shutil.which('llvm-readelf', path=lib.ENV['PATH']) or 'llvm-readelf'  # noqa: E731
@@ -754,7 +756,7 @@ class PayloadDefaultOff(unittest.TestCase):
         makefile = (UEFI / 'Makefile').read_text(encoding='utf-8')
         block = makefile[makefile.index('PAYLOAD_OBJS :='):makefile.index('PAYLOAD_HEADERS :=')]
         listed = set(re.findall(r'sp11-payload-([a-z0-9]+)\.obj', block))
-        self.assertEqual(listed, {p.stem[len('sp11-payload-'):] for p in RUNNER_SOURCES})
+        self.assertEqual(listed, {p.stem[len('sp11-payload-'):] for p in RUNNER_SOURCES if p.stem not in GATED_RUNNER_SOURCES})
 
     # -- the builds -------------------------------------------------------------------------------------------------
     @unittest.skipUnless(SP11_BASE, 'Q1N1_SP11_BASE_DIR not set: no pre-runner tree to compare against')

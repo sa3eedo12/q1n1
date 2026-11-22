@@ -49,6 +49,13 @@
 #if Q1N1_SP11_BIGFILE && !Q1N1_SP11_PAYLOAD
 #error "Q1N1_SP11_BIGFILE=1 needs Q1N1_SP11_PAYLOAD=1: the larger files are a property of the payload runner's loader"
 #endif
+/* The write table (sp11-payload-wtab.h, docs/SP11-PAYLOAD-WTAB.md): the only way a payload may ask the runner to change a device word, a fourth opt-in, default 0. */
+#ifndef Q1N1_SP11_WTAB
+#define Q1N1_SP11_WTAB 0
+#endif
+#if Q1N1_SP11_WTAB && !Q1N1_SP11_PAYLOAD
+#error "Q1N1_SP11_WTAB=1 needs Q1N1_SP11_PAYLOAD=1: the write table is a service of the payload runner"
+#endif
 #if Q1N1_SP11_PAYLOAD && !SNAP_PLATFORM_SP11
 #error "Q1N1_SP11_PAYLOAD=1 needs SNAP_PLATFORM_SP11=1: the runner loads from the Surface Pro 11's boot stick and declares ranges to its slbounce"
 #endif

@@ -38,7 +38,7 @@ def changed_since(base_commit, *paths, root=ROOT):
     """The tracked and untracked files below `paths` that differ from `base_commit`, without the files of the newer payloads."""
     names = set(run(['git', 'diff', '--name-only', base_commit, '--', *paths], cwd=root).stdout.split())
     names |= set(run(['git', 'ls-files', '--others', '--exclude-standard', '--', *paths], cwd=root).stdout.split())
-    own = {part for stem in newer_payloads(base_commit, root) for part in (stem, f'{stem}-regs')}
+    own = {part for stem in newer_payloads(base_commit, root) for part in (stem, f'{stem}-regs', f'{stem}-table')}
     return {name for name in names if not (name.startswith('payloads/') and Path(name).name.split('.')[0] in own)}
 
 
@@ -273,13 +273,24 @@ def _memcheck():
     return module
 
 
+def _wtab_audit():
+    """tools/sp11_payload_wtab_audit.py: the write-table policy key's checks of the table in the ELF and of the indirect calls of the binary."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('sp11_payload_wtab_audit', Path(__file__).with_name('sp11_payload_wtab_audit.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
     """Everything in a payload's code that `policy` does not allow, as sentences; an empty list means it is clean.
     Reads the disassembly of the ELF (every mnemonic, every MRS register, every SMC and its immediate, the timer
     offsets) and, independently, every aligned word of the flat binary's code by encoding. The optional policy keys
     `allow`, `smc_ids` and `single_reads` (see POLICIES) widen what is allowed in exact forms only, and `read_only` and
-    `bulk_reads` add the memory discipline of tools/sp11_payload_memcheck.py; a policy without them is checked as it
-    always was."""
+    `bulk_reads` add the memory discipline of tools/sp11_payload_memcheck.py; `register_offset_stores` pins the exact {function: count} of the stores whose addressing mode has a
+    register offset and, in the same check, makes a stack pointer moved by a register unusable as the base of a store (the base of a store is proved by `read_only`, never its
+    offset) and `write_table` the table of a payload that changes device words through the runner
+    (tools/sp11_payload_wtab_audit.py); a policy without them is checked as it always was."""
     problems = []
     dis = run(['llvm-objdump', '-d', '--no-show-raw-insn', str(elf)])
     if dis.returncode:
@@ -290,6 +301,28 @@ def binary_violations(elf, flat, policy, readelf='llvm-readelf'):
             problems.append(f'the disassembly holds {undecodable}: a word that is not a known instruction')
     if policy.get('read_only') or policy.get('bulk_reads'):
         problems += _memcheck().memory_violations(text, policy)
+    if policy.get('register_offset_stores') is not None:
+        # The base of a store is proved above, never its offset. A store whose addressing mode adds a register is the one form that shows a computed offset, so the
+        # policy names the exact map of them and anything else (a new site, a site in another function) is a finding; the offset of an earlier add is covered above,
+        # because the same key makes memory_violations refuse a stack pointer moved by a register as a store base.
+        found_stores = _memcheck().register_offset_stores(text)
+        if found_stores != policy['register_offset_stores']:
+            problems.append(f'stores with a register offset {dict(sorted(found_stores.items()))}, the policy names exactly {dict(sorted(policy["register_offset_stores"].items()))}')
+    if policy.get('write_table') is not None:
+        # The payload that changes device words through the runner's table (docs/SP11-PAYLOAD-WTAB.md): the table the ELF carries, by the runner's
+        # own rules and against the approved digest when the policy names one, and every indirect call of the disassembly. The policy must also say
+        # `read_only`: that checks the base of every store of the payload (a lint, with the bytes of the staged payload reviewed and pinned by the manifest:
+        # docs/SP11-PAYLOAD-WTAB.md, what this does not establish).
+        audit = _wtab_audit()
+        if not policy.get('read_only'):
+            problems.append('the write_table policy needs read_only: a payload with a table stores only to its own stack')
+        table_found, table_info = audit.table_problems(elf, flat, policy['write_table'].get('table_sha256'))
+        if policy['write_table'].get('allow_draft'):
+            # A draft table may be built and audited for the host model and the survey; it gets no approval note (tools/sp11_wtab.py refuses one).
+            table_found = [f for f in table_found if audit.codes_of([f]) != {'TABLE_DRAFT'}]
+        problems += table_found
+        if table_info.get('rows'):
+            problems += audit.binary_call_problems(text, table_info['rows'])
     found = (re.match(r'\s+[0-9a-f]+:\s+(\S+)\s*(.*)$', line) for line in text.splitlines())
     instructions = [(m.group(1).lower(), m.group(2)) for m in found if m]
     mnemonics = {m for m, _ in instructions}
@@ -404,7 +437,8 @@ def _w0_before(items, smc_index, branch_targets):
         fields = [field.strip() for field in operands.split(',')]
         if fields[0] in ('w0', 'x0') and mnemonic in ('mov', 'movz', 'movn', 'movk') and len(fields) in (2, 3):
             try:
-                immediate = int(fields[1].lstrip('#'), 0)
+                # `mov w0, wzr` is how the compiler spells a literal 0
+                immediate = 0 if mnemonic == 'mov' and fields[1] in ('wzr', 'xzr') else int(fields[1].lstrip('#'), 0)
                 shift = int(fields[2].replace('lsl', '').strip().lstrip('#'), 0) if len(fields) == 3 else 0
             except ValueError:
                 return None
