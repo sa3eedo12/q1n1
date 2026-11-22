@@ -289,6 +289,13 @@ RUNNER_MUTANTS = [
 ]
 
 # The runner loop (platform/uefi/sp11-payload-run.c), judged by the same harness: (name, old, new, checks that must fail). S38 and S39 are run against the first two as well.
+# The mutants from the ninth on change the window of a check, a count or a line. A window is changed by a macro that calls the same function with another argument, written inside
+# the gate in front of the function that uses it, so the entries above still find their text exactly once in such a runner, and the runner without the gate is as it was. The
+# mutant that charges a refusal line dropped at a full budget adds a statement inside the text of the two entries for the line budget, which it does not keep.
+OP_HEX_FN = 'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n'
+OP_PUTS_FN = 'static void op_puts(const char *line)\n'
+HEX_OK_MACRO = '#if Q1N1_SP11_WTAB\n#define q1n1_wtab_hex_ok(d, c, sb, ss) q1n1_wtab_hex_ok(d, c, %s)\n#endif\n'
+PUTS_OK_MACRO = '#if Q1N1_SP11_WTAB\n#define q1n1_wtab_puts_ok(l, sb, ss, ib, im) q1n1_wtab_puts_ok(l, %s)\n#endif\n'
 OPS_RUNNER_MUTANTS = [
     ('the destination of ops.hex is not checked', 'if (!q1n1_wtab_hex_ok(dst, cap, session.stack_base, session.stack_size)) {', 'if (0) {',
      {'ops/hex_outside_the_stack.nothing_is_written'}),
@@ -311,6 +318,49 @@ OPS_RUNNER_MUTANTS = [
      'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n'
      '    if (q1n1_wtab_hex_ok(dst, cap, session.image_base, session.image_size)) return (uint32_t)q1n1_payload_fmt_hex(dst, cap, value);\n',
      {'ops/hex_into_the_image.nothing_is_written'}),
+    # What follows: one change each at an edge of a window, in a count or in a line (a probe far from an edge passes them all).
+    ('a refused ops.hex still writes one byte through its destination when that starts inside the stack and the range leaves it',
+     '        refuse_pointer_op(1u, "HEX", dst, cap);\n        return 0;\n',
+     '        refuse_pointer_op(1u, "HEX", dst, cap);\n'
+     '        if (cap && (uintptr_t)dst >= session.stack_base && (uintptr_t)dst - session.stack_base < session.stack_size) dst[0] = 0;\n        return 0;\n',
+     {'ops/hex_leaving_the_stack_from_inside.stack_bytes_untouched'}),
+    ('the window of ops.hex is 8 bytes longer at its end (a call-site argument)', OP_HEX_FN, HEX_OK_MACRO % '(sb), (ss) + 8' + OP_HEX_FN,
+     {'ops/hex_one_past_the_end_of_the_stack.nothing_is_written'}),
+    ('the window of ops.hex starts 8 bytes below the stack (a call-site argument)', OP_HEX_FN, HEX_OK_MACRO % '(sb) - 8, (ss) + 8' + OP_HEX_FN,
+     {'ops/hex_one_below_the_stack.nothing_is_written'}),
+    ('a refusal line is printed but not charged to the lines of the payload', '    session.lines++;\n    session.env->emit(line.buf);\n}\n#endif',
+     '    session.env->emit(line.buf);\n}\n#endif', {'ops/hex_and_puts_both_refused.two_lines_are_charged_to_the_budget'}),
+    ('ops.hex may write into the image at its first byte only (a hole of one byte)',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n'
+     '    if (cap && (uint64_t)(uintptr_t)dst == session.image_base) return (uint32_t)q1n1_payload_fmt_hex(dst, cap, value);\n',
+     {'ops/hex_at_the_first_byte_of_the_image.nothing_is_written'}),
+    ('a refusal line shows A=0 instead of the pointer', '    q1n1_payload_line_hex(&line, "A", (uint64_t)(uintptr_t)where);\n',
+     '    (void)where;\n    q1n1_payload_line_hex(&line, "A", 0);\n', {'ops/hex_outside_the_stack.the_line_names_the_pointer_and_cap'}),
+    ('a refusal at a full line budget is tried again at the next call: DROPPED counts every refusal, not the one line of the op',
+     '    session.op_lines |= bit;\n    if (Q1N1_PAYLOAD_LINES_MAX <= session.lines) {\n        session.dropped++;\n        return;\n    }\n'
+     '    q1n1_payload_line_begin(&line, "PAYLOAD OP REFUSED");\n',
+     '    if (Q1N1_PAYLOAD_LINES_MAX <= session.lines) {\n        session.dropped++;\n        return;\n    }\n'
+     '    q1n1_payload_line_begin(&line, "PAYLOAD OP REFUSED");\n    session.op_lines |= bit;\n',
+     {'ops/hex_and_puts_refused_at_the_line_budget.dropped_once_per_op'}),
+    ('the window of ops.hex leaves out the two guard words at the stack base: a write there is refused instead of accepted and reported by the guard',
+     OP_HEX_FN, HEX_OK_MACRO % '(sb) + 16, (ss) - 16' + OP_HEX_FN, {'ops/hex_first_byte_of_the_stack.is_written_and_the_guard_reports_it'}),
+    ('the stack window of ops.puts is 8 bytes longer at its end (a call-site argument)', OP_PUTS_FN, PUTS_OK_MACRO % 'sb, (ss) + 8, ib, im' + OP_PUTS_FN,
+     {'ops/puts_at_the_first_byte_past_the_stack.is_not_read'}),
+    ('the stack window of ops.puts starts 8 bytes below the stack (a call-site argument)', OP_PUTS_FN, PUTS_OK_MACRO % '(sb) - 8, (ss) + 8, ib, im' + OP_PUTS_FN,
+     {'ops/puts_one_below_the_stack.is_not_read'}),
+    # The probes that close the mutants of one byte: a window longer by one byte, a dropped line that is still charged, a hole of one byte at the last byte of the image.
+    ('the stack window of ops.puts is longer by one byte at its end (a call-site argument)', OP_PUTS_FN, PUTS_OK_MACRO % 'sb, (ss) + 1, ib, im' + OP_PUTS_FN,
+     {'ops/puts_at_the_first_byte_past_the_stack.empty_string_is_not_read'}),
+    ('a refusal line dropped at a full line budget is still charged to the lines of the payload',
+     '        session.dropped++;\n        return;\n    }\n    q1n1_payload_line_begin(&line, "PAYLOAD OP REFUSED");',
+     '        session.dropped++;\n        session.lines++;\n        return;\n    }\n    q1n1_payload_line_begin(&line, "PAYLOAD OP REFUSED");',
+     {'ops/hex_and_puts_refused_at_the_line_budget.dropped_once_per_op'}),
+    ('ops.hex may write into the image at its last byte only (a hole of one byte)',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n'
+     '    if (cap && (uint64_t)(uintptr_t)dst == session.image_base + session.image_size - 1) return (uint32_t)q1n1_payload_fmt_hex(dst, cap, value);\n',
+     {'ops/hex_at_every_byte_of_the_image.nothing_is_written'}),
 ]
 
 

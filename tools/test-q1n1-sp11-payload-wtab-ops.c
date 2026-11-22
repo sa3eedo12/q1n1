@@ -11,8 +11,11 @@ static struct { uint8_t before[64]; uint8_t stack[4096]; uint8_t after[64]; } op
 static char ops_other[64] __attribute__((aligned(8)));
 static const char ops_host_text[] = "HOSTSTR";
 enum { P_HEX_IN, P_HEX_OUT, P_HEX_END, P_HEX_THRICE, P_HEX_DEVICE, P_HEX_AT_BUDGET, P_PUTS_STACK, P_PUTS_IMAGE, P_PUTS_PAST, P_PUTS_HOST, P_PUTS_DEVICE, P_LOAD_OUT,
-       P_BOTH_TWICE, P_HEX_IMAGE };
+       P_BOTH_TWICE, P_HEX_IMAGE, P_HEX_LAST, P_HEX_ONE_PAST, P_HEX_FIRST, P_HEX_ONE_BELOW, P_HEX_LEAVING, P_HEX_IMAGE_FIRST, P_BOTH_AT_BUDGET, P_PUTS_AT_END, P_PUTS_AFTER,
+       P_PUTS_BELOW, P_PUTS_AFTER_EMPTY, P_HEX_IMAGE_SWEEP };
 static const char ops_image_bytes[] = "IMAGE-BYTES-THAT-NO-OP-MAY-CHANGE";
+static uint8_t ops_image_head[8];       /* the first bytes of the payload's image as the probe found them */
+static uint8_t ops_image_copy[CHAIN_EXTRA_AT + sizeof ops_image_bytes];     /* the whole image as the sweep probe found it */
 static unsigned probe_case;
 static uint64_t probe_ret;
 
@@ -44,6 +47,38 @@ static uint64_t ops_probe(const struct q1n1_payload_args *a)
         a->ops.puts(ops_host_text);
         break;
     case P_HEX_IMAGE: probe_ret = a->ops.hex((char *)image + 8, 24, 0x1234); break;
+    /* the edges of the stack, one byte each way (a window that is off by a few bytes at a call site passes every probe that is far from the edge) */
+    case P_HEX_LAST: ops_mem.stack[sizeof ops_mem.stack - 1] = 'Z'; probe_ret = a->ops.hex((char *)ops_mem.stack + sizeof ops_mem.stack - 1, 1, 0x1234); break;
+    case P_HEX_ONE_PAST: ops_mem.stack[sizeof ops_mem.stack - 1] = 'Z'; probe_ret = a->ops.hex((char *)ops_mem.stack + sizeof ops_mem.stack - 1, 2, 0x1234); break;
+    case P_HEX_FIRST: probe_ret = a->ops.hex((char *)ops_mem.stack, 8, 0x1234); break;      /* over the guard words: accepted, and the stack guard says so */
+    case P_HEX_ONE_BELOW: probe_ret = a->ops.hex((char *)ops_mem.stack - 1, 1, 0x1234); break;
+    case P_HEX_LEAVING:         /* starts inside the stack and leaves it: a refusal writes nothing, not even the first byte */
+        memset(ops_mem.stack + sizeof ops_mem.stack - 16, 'Z', 16);
+        probe_ret = a->ops.hex((char *)ops_mem.stack + sizeof ops_mem.stack - 8, 24, 0x1234);
+        break;
+    case P_HEX_IMAGE_FIRST:     /* the first byte of the image itself */
+        memcpy(ops_image_head, (const void *)(uintptr_t)a->payload_base, sizeof ops_image_head);
+        probe_ret = a->ops.hex((char *)(uintptr_t)a->payload_base, 8, 0x1234);
+        break;
+    case P_BOTH_AT_BUDGET:      /* both ops refused twice with every line of the budget used: one dropped line for each op, not one for each refusal */
+        strcpy(in, "FULL");
+        for (unsigned i = 0; i < Q1N1_PAYLOAD_LINES_MAX; i++) a->ops.puts(in);
+        a->ops.hex(ops_other, 24, 1);
+        a->ops.puts(ops_host_text);
+        a->ops.hex(ops_other + 8, 24, 2);
+        a->ops.puts(ops_host_text);
+        break;
+    case P_PUTS_AT_END: memcpy(ops_mem.stack + sizeof ops_mem.stack - 8, "TAILSTR", 8); a->ops.puts((const char *)ops_mem.stack + sizeof ops_mem.stack - 8); break;
+    case P_PUTS_AFTER:          /* short enough (8 bytes with its NUL) to end inside a window that is a few bytes too long */
+        memcpy(ops_mem.after, "AFTRSTR", 8);
+        a->ops.puts((const char *)ops_mem.stack + sizeof ops_mem.stack);
+        break;
+    case P_PUTS_BELOW: ops_mem.before[63] = 'Q'; a->ops.puts((const char *)ops_mem.before + 63); break;      /* the byte before the stack, which the guard words then continue */
+    case P_PUTS_AFTER_EMPTY: ops_mem.after[0] = 0; a->ops.puts((const char *)ops_mem.stack + sizeof ops_mem.stack); break;      /* even a window longer by one byte reads an empty string there */
+    case P_HEX_IMAGE_SWEEP:     /* every byte of the image: a cap of 2, because a cap of 1 only writes a NUL, which a byte that is already zero hides */
+        memcpy(ops_image_copy, (const void *)(uintptr_t)a->payload_base, sizeof ops_image_copy);
+        for (size_t i = 0; i < sizeof ops_image_copy; i++) a->ops.hex((char *)(uintptr_t)a->payload_base + i, 2, 0x1234);
+        break;
     }
     return 0;
 }
@@ -81,10 +116,25 @@ static int untouched(const void *p, size_t n)
     return 1;
 }
 
+/* The last `n` bytes of the probe's stack are all `value`. */
+static int stack_tail_is(uint8_t value, size_t n)
+{
+    for (size_t i = 0; i < n; i++) if (ops_mem.stack[sizeof ops_mem.stack - n + i] != value) return 0;
+    return 1;
+}
+
 static int done_line_says(const char *text)
 {
     int at = line_index("PAYLOAD DONE");
     return at >= 0 && strstr(ev[at].text, text) != 0;
+}
+
+/* How many lines of the page are exactly `text` (lines_with matches a prefix only). */
+static unsigned lines_equal(const char *text)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < nev; i++) n += ev[i].kind == EV_LINE && !strcmp(ev[i].text, text);
+    return n;
 }
 
 void suite_ops(void)
@@ -126,6 +176,11 @@ void suite_ops(void)
     r = ops_run(P_HEX_OUT, 0, 0);
     CHECK("hex_outside_the_stack.nothing_is_written", probe_ret == 0 && untouched(ops_other, sizeof ops_other));
     CHECK("hex_outside_the_stack.is_counted_and_on_the_page", r.call[0].refused == 1 && lines_with("PAYLOAD OP REFUSED HEX A=0X") == 1 && done_line_says("REFUSED=1"));
+    {
+        char want[96];
+        snprintf(want, sizeof want, "PAYLOAD OP REFUSED HEX A=0X%llX CAP=0X18", (unsigned long long)(uintptr_t)ops_other);
+        CHECK("hex_outside_the_stack.the_line_names_the_pointer_and_cap", lines_equal(want) == 1);
+    }
     r = ops_run(P_HEX_END, 0, 0);
     CHECK("hex_across_the_end_of_the_stack.nothing_is_written", untouched(ops_mem.after, sizeof ops_mem.after) && r.call[0].refused == 1 && lines_with("PAYLOAD OP REFUSED HEX") == 1);
     r = ops_run(P_HEX_THRICE, 0, 0);
@@ -147,19 +202,61 @@ void suite_ops(void)
     CHECK("puts_unterminated_in_the_image.is_refused", r.call[0].refused == 1 && lines_with("ABCD") == 0);
     r = ops_run(P_PUTS_HOST, 0, 0);
     CHECK("puts_of_a_string_in_neither.is_not_read", r.call[0].refused == 1 && lines_with("HOSTSTR") == 0 && done_line_says("REFUSED=1"));
+    {
+        char want[96];
+        snprintf(want, sizeof want, "PAYLOAD OP REFUSED PUTS A=0X%llX", (unsigned long long)(uintptr_t)ops_host_text);
+        CHECK("puts_of_a_string_in_neither.the_line_names_the_pointer", lines_equal(want) == 1);
+    }
     r = ops_run(P_PUTS_DEVICE, 0, 0);
     CHECK("puts_at_a_device_address.is_not_read", r.call[0].refused == 1);
+    /* the end of the stack for ops.puts, exactly: a string that ends on its last byte is read, one that starts on the first byte past it is not */
+    r = ops_run(P_PUTS_AT_END, 0, 0);
+    CHECK("puts_at_the_end_of_the_stack.is_printed", lines_with("TAILSTR") == 1 && r.call[0].refused == 0);
+    r = ops_run(P_PUTS_AFTER, 0, 0);
+    CHECK("puts_at_the_first_byte_past_the_stack.is_not_read", r.call[0].refused == 1 && lines_with("AFTRSTR") == 0 && lines_with("PAYLOAD OP REFUSED PUTS A=0X") == 1);
+    r = ops_run(P_PUTS_AFTER_EMPTY, 0, 0);
+    CHECK("puts_at_the_first_byte_past_the_stack.empty_string_is_not_read", r.call[0].refused == 1 && lines_with("PAYLOAD OP REFUSED PUTS A=0X") == 1);
+    r = ops_run(P_PUTS_BELOW, 0, 0);
+    CHECK("puts_one_below_the_stack.is_not_read", r.call[0].refused == 1 && lines_with("Q") == 0 && lines_with("PAYLOAD OP REFUSED PUTS A=0X") == 1);
 
     /* both ops refused in one run: each says so on the page, once (a line bit shared by the two would silence the second op) */
     r = ops_run(P_BOTH_TWICE, 0, 0);
     CHECK("hex_and_puts_both_refused.each_op_has_its_own_line", lines_with("PAYLOAD OP REFUSED HEX") == 1 && lines_with("PAYLOAD OP REFUSED PUTS") == 1);
     CHECK("hex_and_puts_both_refused.all_four_are_counted", r.call[0].refused == 4 && lines_with("PAYLOAD OP REFUSED") == 2 && done_line_says("REFUSED=4") &&
           untouched(ops_other, sizeof ops_other));
+    CHECK("hex_and_puts_both_refused.two_lines_are_charged_to_the_budget", done_line_says("REFUSED=4 LINES=2 DROPPED=0"));
+    /* with every line of the budget used the refusals are dropped, counted once for each op (the op's one line) and never printed */
+    r = ops_run(P_BOTH_AT_BUDGET, 0, 0);
+    {
+        char used[16];
+        snprintf(used, sizeof used, "LINES=%u", Q1N1_PAYLOAD_LINES_MAX);
+        CHECK("hex_and_puts_refused_at_the_line_budget.dropped_once_per_op", r.call[0].refused == 4 && done_line_says("REFUSED=4") && done_line_says("DROPPED=2") && done_line_says(used) &&
+              lines_with("PAYLOAD OP REFUSED") == 0 && untouched(ops_other, sizeof ops_other));
+    }
 
     /* the destination of ops.hex is the payload's stack only: its image is not written, though ops.puts reads it */
     r = ops_run(P_HEX_IMAGE, ops_image_bytes, sizeof ops_image_bytes);
     CHECK("hex_into_the_image.nothing_is_written", probe_ret == 0 && !memcmp((const char *)table_page + CHAIN_EXTRA_AT, ops_image_bytes, sizeof ops_image_bytes));
     CHECK("hex_into_the_image.is_counted_and_on_the_page", r.call[0].refused == 1 && lines_with("PAYLOAD OP REFUSED HEX A=0X") == 1 && done_line_says("REFUSED=1"));
+    r = ops_run(P_HEX_IMAGE_FIRST, 0, 0);
+    CHECK("hex_at_the_first_byte_of_the_image.nothing_is_written", probe_ret == 0 && r.call[0].refused == 1 && !memcmp(table_page, ops_image_head, sizeof ops_image_head));
+    r = ops_run(P_HEX_IMAGE_SWEEP, ops_image_bytes, sizeof ops_image_bytes);
+    CHECK("hex_at_every_byte_of_the_image.nothing_is_written", r.call[0].refused == sizeof ops_image_copy && !memcmp(table_page, ops_image_copy, sizeof ops_image_copy));
+
+    /* the edges of the stack for ops.hex, one byte each way: the last byte and the first are written (the first lies on the guard words, which the guard then reports), one past the end
+     * and one below the start are not, and a refusal writes nothing even where its destination starts inside the stack */
+    r = ops_run(P_HEX_LAST, 0, 0);
+    CHECK("hex_last_byte_of_the_stack.is_written", r.call[0].refused == 0 && ops_mem.stack[sizeof ops_mem.stack - 1] == 0 && untouched(ops_mem.after, sizeof ops_mem.after));
+    r = ops_run(P_HEX_ONE_PAST, 0, 0);
+    CHECK("hex_one_past_the_end_of_the_stack.nothing_is_written", probe_ret == 0 && r.call[0].refused == 1 && ops_mem.stack[sizeof ops_mem.stack - 1] == 'Z' &&
+          untouched(ops_mem.after, sizeof ops_mem.after));
+    r = ops_run(P_HEX_FIRST, 0, 0);
+    CHECK("hex_first_byte_of_the_stack.is_written_and_the_guard_reports_it", probe_ret == 6 && r.call[0].refused == 0 && !memcmp(ops_mem.stack, "0X1234", 7) &&
+          done_line_says("STACK=OVERFLOW") && untouched(ops_mem.before, sizeof ops_mem.before));
+    r = ops_run(P_HEX_ONE_BELOW, 0, 0);
+    CHECK("hex_one_below_the_stack.nothing_is_written", probe_ret == 0 && r.call[0].refused == 1 && untouched(ops_mem.before, sizeof ops_mem.before));
+    r = ops_run(P_HEX_LEAVING, 0, 0);
+    CHECK("hex_leaving_the_stack_from_inside.stack_bytes_untouched", r.call[0].refused == 1 && stack_tail_is('Z', 16) && untouched(ops_mem.after, sizeof ops_mem.after));
 
     r = ops_run(P_LOAD_OUT, 0, 0);
     CHECK("load32_out_of_the_stack.is_still_refused", probe_ret == (uint64_t)(int64_t)Q1N1_PAYLOAD_LOAD_E_OUT && untouched(ops_other, sizeof ops_other) && r.call[0].refused == 1);
