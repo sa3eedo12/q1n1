@@ -1,0 +1,90 @@
+{
+  "spdx": "SPDX-License-Identifier: MIT",
+  "name": "GPUS1-DRAFT",
+  "flags": ["restore_at_end"],
+  "pause_s": 8,
+  "draft": [
+    "the CX-domain clock tree is only partly observed: GPU_CC_FF_CLK_SRC (0x03d99474/78) and its branch GPU_CC_CX_FF_CLK (0x03d9914c), CRC_AHB (0x03d99120), MEMNOC_GFX (0x03d99150), SLEEP (0x03d99134), CB (0x03d993a4) were never read: a branch of the domain that is enabled on a root parked on a dead source can wedge the GDSC controller (clk-rcg2.c:1531-1537). The pre-S1 survey (docs/SP11-GPU-S1-DESIGN.md section 6) adds a check row for each before this table can be approved.",
+    "no row has run on the unit; every expectation of a row is one word read once on one unit at boot 30",
+    "the mapping attribute of the page of the word this table writes is unknown until the dry run's WTAB ATTR CXGDSC line has been filmed"
+  ],
+  "allowed_windows": [
+    {"name": "GCC", "base": "0x00100000", "size": "0x200000"},
+    {"name": "GPUCC", "base": "0x03d90000", "size": "0xa000"}
+  ],
+  "rows": [
+    {
+      "tag": "GCCAHB", "step": 0, "addr": "0x00171004", "found": ["0x80000001", "0x00000001"],
+      "why": "GPUCC is reachable only while the GPU configuration AHB branch of the GCC runs: enable set and CLK_OFF clear; nothing is written before this holds",
+      "source": "Linux gcc-x1e80100.c:7451 (critical CBCR list); boot 30 page: GCC CFGA=1.ON", "label": "OBSERVED"
+    },
+    {
+      "tag": "GMURCG", "step": 0, "addr": "0x03d9931c", "found": ["0x0000071f", "0x0"],
+      "why": "the shared GMU root clock generator must be parked on XO (source 0, divider 0) before its GDSC powers: a root stuck on a dead source wedges the GDSC controller",
+      "source": "Linux clk-rcg2.c:1519-1546 (park at init, the wedge comment at 1531-1537), gpucc-x1e80100.c:181-195; boot 30 page: GRC=0X80000000 (root off) GRF=0", "label": "OBSERVED"
+    },
+    {
+      "tag": "HUBRCG", "step": 0, "addr": "0x03d993f0", "found": ["0x0000071f", "0x0"],
+      "why": "the hub root clock generator feeds the AHB branch: source XO, divider 0 as found, so that the branches below it cannot come up on a source that is not running",
+      "source": "Linux gpucc-x1e80100.c:196-210; boot 30 page: HRC=0.ON HRF=0", "label": "OBSERVED"
+    },
+    {
+      "tag": "CXGDSC", "step": 1, "addr": "0x03d99108", "mask": "0x1", "value": "0x0",
+      "found": ["0x00fff807", "0x0022f801"],
+      "readback": {"addr": "0x03d9953c", "mask": "0x80000000", "value": "0x80000000", "timeout_us": 2000, "settle_us": 1},
+      "after_us": 1,
+      "undo": {"kind": "restore", "after_us": 500, "timeout_us": 2000,
+               "readback": {"addr": "0x03d9953c", "mask": "0x80000000", "value": "0"}},
+      "rmw": "GDSCR is a plain read/write control word: Linux updates it with regmap_update_bits (gdsc.c:134-145); bit 0 SW_COLLAPSE, bit 1 HW_CONTROL, bit 2 SW_OVERRIDE, the wait values and RETAIN_FF in bits 23:11",
+      "effect": "VERIFIED that Linux does this sequence for this GDSC at the pinned revision (gdsc.c gdsc_enable, gpu_cx_gdsc); UNKNOWN on this unit: whether the domain powers from EL2 with no vote of the GMU, the RSC or AOSS, and what the unread clock-tree words do to it",
+      "why": "the one write that cannot be avoided: clear SW_COLLAPSE, the AP's vote that powers the votable CX GDSC; wait 1 us, then the status bit (GDS_HW_CTRL bit 31) within 2000 us. The wait values (2, 2, 15), RETAIN_FF, HW_CONTROL and SW_OVERRIDE are required to be what Linux's gdsc_init would write, so no other bit is written; the undo sets SW_COLLAPSE again, waits 500 us (the votable GDSC is not polled off) and requires the status to clear",
+      "source": "Linux gdsc.c:147-195, 285-341 (gdsc_toggle_logic, gdsc_enable), gpucc-x1e80100.c:532-543 (gpu_cx_gdsc: VOTABLE, gdscr 0x9108, status 0x953c, waits 2/2/0xf); boot 30 page: CXGD=0X22F801 SC=1 HW=0",
+      "label": "OBSERVED"
+    },
+    {
+      "tag": "AHB", "step": 2, "addr": "0x03d9911c",
+      "readback": {"addr": "0x03d9911c", "mask": "0x80000000", "value": "0x0", "timeout_us": 200},
+      "why": "the AHB branch of the GMU node's clock list: found 0 (enable clear, CLK_OFF clear), so it is checked, not written; it must still say CLK_OFF clear after the domain is on, or the table stops and the next table adds the enable write",
+      "source": "Linux gpucc-x1e80100.c:256-270 (BRANCH_HALT_VOTED), clk-branch.c:62-92, hamoa.dtsi:4184-4197; boot 30 page: AHB=0.ODD", "label": "OBSERVED"
+    },
+    {
+      "tag": "CXGMU", "step": 2, "addr": "0x03d9913c", "found": ["0x1", "0x1"],
+      "readback": {"addr": "0x03d9913c", "mask": "0x80000000", "value": "0x0", "timeout_us": 200},
+      "why": "the GMU's own clock branch: enable already set at hand-off, so it must show CLK_OFF clear within 200 us (the halt check Linux makes) once the domain is on",
+      "source": "Linux gpucc-x1e80100.c:310-324 (BRANCH_HALT_VOTED, aon ops: never disabled), clk-branch.c:62-92; boot 30 page: CGMU=0X80002001", "label": "OBSERVED"
+    },
+    {
+      "tag": "CXO", "step": 2, "addr": "0x03d99144", "found": ["0x1", "0x1"],
+      "readback": {"addr": "0x03d99144", "mask": "0x80000000", "value": "0x0", "timeout_us": 200},
+      "why": "the XO branch of the domain: enable already set; CLK_OFF must clear within 200 us once the domain is on",
+      "source": "Linux gpucc-x1e80100.c:346-360 (BRANCH_HALT), clk-branch.c:62-92; boot 30 page: CXO=0X80000001", "label": "OBSERVED"
+    },
+    {
+      "tag": "AXI", "step": 2, "addr": "0x0017115c", "found": ["0x3", "0x3"],
+      "why": "the GCC branch of the GPU's AXI path: enable and hardware clock gating set as found; BRANCH_HALT_SKIP, so CLK_OFF says nothing and the row only requires that it was left as found",
+      "source": "Linux gcc-x1e80100.c:2976-2990 (HALT_SKIP, hwcg bit 1); boot 30 page: AXI_NW=0X82300003", "label": "OBSERVED"
+    },
+    {
+      "tag": "MEMNOC", "step": 2, "addr": "0x00171010", "found": ["0x3", "0x3"],
+      "why": "the GCC branch of the GPU's memory NoC path: enable and hardware clock gating set as found; in hardware-gated mode Linux skips its halt check, so the row only requires that it was left as found",
+      "source": "Linux gcc-x1e80100.c:3094-3107 (HALT_VOTED, hwcg bit 1), clk-branch.c:17-27,72; boot 30 page: MNOC=0X82000003", "label": "OBSERVED"
+    },
+    {
+      "tag": "HUBCX", "step": 2, "addr": "0x03d99148", "found": ["0x1", "0x1"],
+      "readback": {"addr": "0x03d99148", "mask": "0x80000000", "value": "0x0", "timeout_us": 200},
+      "why": "the hub branch inside the domain: enable already set; CLK_OFF must clear within 200 us once the domain is on",
+      "source": "Linux gpucc-x1e80100.c:462-476 (BRANCH_HALT_VOTED), clk-branch.c:62-92; boot 30 page: HUB=0X80000001", "label": "OBSERVED"
+    },
+    {
+      "tag": "DEMET", "step": 2, "addr": "0x03d9900c", "found": ["0x1", "0x1"],
+      "readback": {"addr": "0x03d9900c", "mask": "0x80000000", "value": "0x0", "timeout_us": 200},
+      "why": "the last clock of the GMU node's list; found running (0x1) before the domain, it must still run after",
+      "source": "Linux gpucc-x1e80100.c:364-378 (BRANCH_HALT, aon ops), hamoa.dtsi:4184-4197; boot 30 page: DMT=1.ON", "label": "OBSERVED"
+    }
+  ],
+  "note": {
+    "hang": "If the page stops on a W line (or on the NEXT STEP line before it), the store, its read-back or the pause hung: wait 60 s, hold the power button until the panel is dark, wait 10 s, power on. Do not run this bundle again. Photograph the last lines and record the last one: a hang on W 3 CXGDSC says the GDSC write itself is the hazard (the unit may need the RPMh path); a hang after the line of a check row says the read of the next row hung, or one of the payload's own reads between two rows (the eight snapshot reads between rows 2 and 3). INFERRED, never observed on the unit: a hard power-off returns every register this table touches to its power-on state.",
+    "unknown": "Whether the domain powers from EL2 without a vote from the GMU or the RSC; whether the clocks come up by themselves once it does; whether the CX rail is at a level that holds the domain; whether an SError would be seen at all (EL3 may route it away); whether the status bit clears after the undo if another master holds the vote. The mapping attribute of the page of the written word: the dry run's WTAB ATTR CXGDSC line is the only evidence, and without it in a film this table is not approved.",
+    "after": "Success: the domain was on for the length of the checks and is off again, every word the table touched as found (the payload prints the snapshots and RESTORED=YES). A stop: the reason, the undo lines, RESULT=RESTORED or UNDO_FAILED (the domain then stays on until the next power-off)."
+  }
+}

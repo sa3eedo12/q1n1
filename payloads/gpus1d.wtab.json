@@ -1,0 +1,42 @@
+{
+  "spdx": "SPDX-License-Identifier: MIT",
+  "name": "GPUS1D",
+  "flags": ["restore_at_end"],
+  "pause_s": 0,
+  "allowed_windows": [
+    {"name": "GCC", "base": "0x00100000", "size": "0x200000"},
+    {"name": "GPUCC", "base": "0x03d90000", "size": "0xa000"}
+  ],
+  "rows": [
+    {
+      "tag": "GCCAHB", "step": 0, "addr": "0x00171004", "found": ["0x80000001", "0x00000001"],
+      "readback": {"addr": "0x00171004", "mask": "0x80000001", "value": "0x00000001", "timeout_us": 200, "settle_us": 1},
+      "why": "the dry run of the write table: 32 reads in all (each of the four rows reads its word twice, for the check and for the read-back, and the payload's three snapshots read 24), every word one that boot 30 read, and no store at all; the GPU configuration AHB branch of the GCC runs. Each row waits 1 us and reads its own word back within 200 us, so that the runner's counter, its timed poll and its SError poll run",
+      "source": "Linux gcc-x1e80100.c:7451 (critical CBCR list); boot 30 page: GCC CFGA=1.ON", "label": "OBSERVED"
+    },
+    {
+      "tag": "GMURCG", "step": 0, "addr": "0x03d9931c", "found": ["0x0000071f", "0x0"],
+      "readback": {"addr": "0x03d9931c", "mask": "0x0000071f", "value": "0x0", "timeout_us": 200, "settle_us": 1},
+      "why": "the shared GMU root clock generator is parked on XO, source 0 and divider 0, as found (its configuration word 0x03d9931c; the command word is 0x03d99318)",
+      "source": "Linux clk-rcg2.c:1519-1546; boot 30 page: GRC=0X80000000 GRF=0", "label": "OBSERVED"
+    },
+    {
+      "tag": "HUBRCG", "step": 0, "addr": "0x03d993f0", "found": ["0x0000071f", "0x0"],
+      "readback": {"addr": "0x03d993f0", "mask": "0x0000071f", "value": "0x0", "timeout_us": 200, "settle_us": 1},
+      "why": "the hub root clock generator is on XO, divider 0, as found (its configuration word 0x03d993f0; the command word is 0x03d993ec)",
+      "source": "Linux gpucc-x1e80100.c:196-210; boot 30 page: HRC=0.ON HRF=0", "label": "OBSERVED"
+    },
+    {
+      "tag": "CXGDSC", "step": 0, "addr": "0x03d99108", "found": ["0x00fff807", "0x0022f801"],
+      "readback": {"addr": "0x03d99108", "mask": "0x00fff807", "value": "0x0022f801", "timeout_us": 200, "settle_us": 1},
+      "why": "the CX GDSC control word is what Linux's gdsc_init would leave: collapsed, no hardware control, no override, the wait values and RETAIN_FF set; the live table writes this word, this one only reads it. Its WTAB ATTR line is the unit's answer for the mapping of the page the live row would store to",
+      "source": "Linux gdsc.c:429-500 (gdsc_init), gpucc-x1e80100.c:532-543; boot 30 page: CXGD=0X22F801 SC=1 HW=0", "label": "OBSERVED"
+    }
+  ],
+  "note": {
+    "hang": "If the page stops after the table opened, a guarded read of the GCC or GPUCC hung: in the next row, or in one of the payload's own snapshot reads (see HOW TO READ A HANG). Wait 60 s, hold the power button until the panel is dark, wait 10 s, power on. These words were read on boot 30 and answered. Nothing is written by this run.",
+    "reads": "gpus1d: the eight snapshot reads between rows 2 and 3",
+    "unknown": "Whether the runner's table machinery behaves on the unit as it does in the host model: the lines, the counter and the timed polls (new in this table: a wait of 1 us and a read-back of 200 us on every row), the platform check at open, the mapping classification of the four pages (WTAB ATTR), the SError poll (EL3 may hide SErrors). Whether the page of the CX GDSC word is Device memory: its WTAB ATTR CXGDSC line is the evidence a live table needs.",
+    "after": "Nothing changed: no store was made. The END line says RESTORED with STORES=0. Keep the WTAB ATTR lines in the film."
+  }
+}

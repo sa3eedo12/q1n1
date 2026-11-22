@@ -6,7 +6,7 @@
 [line catalogue](SP11-PAYLOAD.md#line-catalogue) are defined there and not repeated. Every payload so far is read only: `tools/sp11_payload_memcheck.py` checks from the
 disassembly that the base of each of its stores is its own stack. Boot 29 (the keyboard-link and touch engines' clocks are off) and boot 30 (the Adreno X1-85's CX power domain and its
 clocks are off) both need register **writes** to be examined further. This document is the framework that has to exist before any payload writes a device word, and the
-first use of it (GPU stage S1, a separate change). Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
+first use of it ([GPU stage S1](#first-use-gpus1-and-gpus1d)). Evidence labels as there: VERIFIED, OBSERVED, INFERRED, EXPERIMENTAL, UNIMPLEMENTED, UNKNOWN.
 **EXPERIMENTAL; hardware NOT RUN: nothing of this has run on the unit, the host model is this tree's own statement of what a domain and a clock do, and this document
 authorises no run.** Each run that writes needs the operator's approval of [its note](#the-approval-note).
 
@@ -105,7 +105,7 @@ run ends `LEFT`.
   lines for each row) and a **reserve** that they cannot use, 2 + 2 per write row (+2 for a table with windows): the `STOP` (or `AUTO_UNWIND`) line, a `U` line and at most one
   `U FAIL` line for each write row, the `END` line and, in a table with windows, the two `READ REFUSED` lines. A table whose ordinary lines plus its reserve exceed 32 is refused
   when it is opened (`LINES`), so the stop, the undo and the end always have their lines; a line beyond the limit is dropped and counted (`DROPPED`), never cut in half, and a store
-  whose own `W` line cannot be printed is not made. The ATTR lines cost one line per row.
+  whose own `W` line cannot be printed is not made. The ATTR lines cost one line per row: 4 for the dry table of S1, 11 for the live draft.
 
 ## A hang is not recoverable by the guard
 
@@ -171,6 +171,7 @@ is untouched. A runner without the gate hands a payload no ops (`args.reserved[0
 | Command | What it says |
 |---|---|
 | `python3 tools/test-q1n1-sp11-payload-wtab.py` | the framework: `TableTool`, `Differential` (C against Python on thousands of damaged tables, every table reason reached, the draft included), `Harness` (`tools/test-q1n1-sp11-payload-wtab.c` with `-rules.c`, `-open.c`, `-faults.c` and `-ops.c`, twelve suites under ASan and UBSan against a fake device that faults, applies a write and then faults, raises an SError at the n-th poll, sticks, hangs, loses its page and runs on a counter that lies, and a probe that hands the runner's ops pointers of its choosing; built with and without the draft allowance), `CompiledCode`, `IrAudit`, `Mutants` (payload, table and runner seeded bugs, the ops' seeds S38 to S40 run through the real loop, each by its own check), `DefaultOff`, `GateOffBuild` (its base is the parent of the commit that added the runner's table source, derived from the history) |
+| `python3 tools/test-q1n1-sp11-payload-gpus1.py` | the first use: the tables, the audit of the two payloads, the model of the CX domain (live, dry and the two refusals of a draft), the seeded bugs of the payload and the review's seeds |
 
 The seeded bugs of the policy tooling, each refused for its own reason:
 
@@ -219,3 +220,14 @@ The seeded bugs of the policy tooling, each refused for its own reason:
 * The write is visible to the device by its read-back: the model treats a read of the same word as ordered after the store; on the unit that is the device memory's ordering. The runner
   refuses a write to a page it cannot show to be Device (`ROW_ATTR`), which is what makes that ordering the right one; no payload has a barrier (`forbid isb/dsb/dmb`), the runner's glue owns that.
 * The Python mirror of the C rules proves the tool and the runner agree, not that either is complete.
+
+## First use: gpus1 and gpus1d
+
+[`payloads/gpus1.c`](../payloads/gpus1.c) is GPU stage S1: the CX power domain of the Adreno X1-85 powered from the off state boot 30 found, and returned to how it was found. It has **no
+device store anywhere in its code**; its live table ([`payloads/gpus1.wtab.json`](../payloads/gpus1.wtab.json)) writes exactly one word, the CX GDSC control word, has **no window** (nothing
+behind the domain is read), and is a **draft**: the CX-domain clock tree is only partly observed, the note tool refuses it, the runner as the Makefile builds it refuses it at `open`
+(`DRAFT`), and the payload stops after saying so unless it is built for the host model. [`payloads/gpus1d.c`](../payloads/gpus1d.c) is the same code over the dry table
+([`payloads/gpus1d.wtab.json`](../payloads/gpus1d.wtab.json)), which writes nothing: its rows check the words the live table would find, with a settle and a read-back of their own, so that
+the runner's timed machinery and its `WTAB ATTR` lines run on the unit before any write. It is the first run of the framework there, and its digest is pinned by the policy `gpus1d`.
+**The live table is not to be approved**: that needs the read-only survey of the clock-tree words it never read, turned into check rows, and the `WTAB ATTR CXGDSC` line of the dry run in a
+film. The design, the sources, what is unknown and the survey are in [SP11-GPU-S1-DESIGN.md](SP11-GPU-S1-DESIGN.md).

@@ -211,6 +211,18 @@ POLICIES['inpsnap2'] = {'registers': {'currentel'}, 'smc': 0, 'bytes': 8192, 'fo
 # audit, tools/sp11_payload_dispsnap_audit.py, proves it again from the IR). Its loads through the arguments are the GOP mode it prints.
 POLICIES['dispsnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'bytes': 12288, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
                         'read_only': True}
+# gpus1 and gpus1d (docs/SP11-GPU-S1-DESIGN.md, docs/SP11-PAYLOAD-WTAB.md): the first payloads with a table. They read no system register, store only to their own stack and
+# change the CX GDSC word, in the live table only, through the runner. `gpus1` is built over a DRAFT table (the CX-domain clock tree is only partly observed), so its
+# policy allows the draft and the approval tooling refuses it; `gpus1d` carries the dry table, which writes nothing, pinned by its digest.
+GPUS1D_TABLE_SHA256 = '2e2a5adf1552aea2eba39f7e1ce4596e9a1158b3b540541adc2a36d3167feee8'
+GPUS1_DRAFT_TABLE_SHA256 = 'a962e8cd26cbfe8d8f0cd1d2b739fcd2ab4d603ac7e3c4d9a03e810edc5c9b66'
+# The stores whose offset is a register are the line-append helpers (payloads/gpus1.c: text, head, field_name): `register_offset_stores` pins the exact map, so that a new site, or a
+# site in another function, is a finding (`read_only` checks the base of a store; with this key a stack pointer moved by a register is no store base either).
+GPUS1_REGISTER_OFFSET_STORES = {'field_name': 6, 'head': 2, 'text': 2}
+POLICIES['gpus1'] = {'registers': set(), 'smc': 0, 'bytes': 10240, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'}, 'read_only': True,
+                     'register_offset_stores': GPUS1_REGISTER_OFFSET_STORES, 'write_table': {'allow_draft': True, 'table_sha256': GPUS1_DRAFT_TABLE_SHA256}}
+POLICIES['gpus1d'] = {'registers': set(), 'smc': 0, 'bytes': 8192, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'}, 'read_only': True,
+                      'register_offset_stores': GPUS1_REGISTER_OFFSET_STORES, 'write_table': {'table_sha256': GPUS1D_TABLE_SHA256}}
 # Mnemonics no payload has a use for (smc is counted against the policy instead of being forbidden outright).
 FORBIDDEN = {'msr', 'sys', 'sysl', 'dc', 'ic', 'tlbi', 'at', 'hvc', 'svc', 'eret', 'eretaa', 'eretab', 'drps', 'wfi',
              'wfe', 'wfit', 'wfet', 'hlt', 'brk', 'dcps1', 'dcps2', 'dcps3'}
