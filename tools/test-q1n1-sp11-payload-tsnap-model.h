@@ -364,22 +364,24 @@ static const char *m_token(const char *line, const char *key)
 }
 
 /* ---- The model's own decode of a status word ---- */
-static void m_cell(uint32_t raw, char *out)
+/* The cell a word shows in sensor slot `sensor`: its sensor-number field (bits 26:22) must be the slot's own index and bits 31:27 clear, or the word is odd (O); then VALID (bit 21), then the
+ * plausible window. This is the model's own statement of the rule, written from the film's words and the driver's field list, and not from the payload's code. */
+static void m_cell(uint32_t raw, unsigned sensor, char *out)
 {
     int t = (int)(raw & 0xfff);
     if (t >= 2048) t -= 4096;
-    if (raw >> 22) strcpy(out, "O");
+    if ((raw >> 27) != 0 || ((raw >> 22) & 31) != sensor) strcpy(out, "O");
     else if (!(raw >> 21 & 1)) strcpy(out, "?");
     else if (t < -400 || t > 1200) strcpy(out, "O");
     else snprintf(out, 16, "%d", t);
 }
 
-static int m_valid_tenths(uint32_t raw, int *t)
+static int m_valid_tenths(uint32_t raw, unsigned sensor, int *t)
 {
     char cell[16];
     int v = (int)(raw & 0xfff);
     if (v >= 2048) v -= 4096;
-    m_cell(raw, cell);
+    m_cell(raw, sensor, cell);
     *t = v;
     return cell[0] != '?' && cell[0] != 'O';
 }
@@ -397,9 +399,17 @@ static int m_tenths2(unsigned n, unsigned i)
     return m_tenths(n, i) + (int)((n + i) % 3) - 1;
 }
 
-static uint32_t m_status(int tenths)
+/* A VALID status word in the layout of the unit's own words (boot 29, read from a film): the sensor's number in bits 26:22, VALID, the temperature in tenths. */
+static uint32_t m_status(int tenths, unsigned sensor)
 {
-    return (1u << 21) | ((uint32_t)tenths & 0xfff);
+    return (sensor << 22) | (1u << 21) | ((uint32_t)tenths & 0xfff);
+}
+
+/* The word of a sensor that is not enabled in the same layout: its own number and nothing else (INFERRED from the film's count of 60 odd words in 64, which includes the sensors
+ * that the controllers do not enable). */
+static uint32_t m_status_off(unsigned sensor)
+{
+    return sensor << 22;
 }
 
 static void m_set(unsigned win, uint32_t off, uint32_t value)
@@ -414,7 +424,8 @@ static void m_set2(unsigned win, uint32_t off, uint32_t value)
 }
 
 /* Four healthy blocks (made-up: not the unit's values): HW_VER 2.4.0, enabled, temperature format, the sensors a DT zone reads enabled, ready, 30.0 C and up, a conversion word per
- * enabled sensor, no interrupt status; in the second reading every sensor moves by -0.1, 0 or +0.1 C. */
+ * enabled sensor, no interrupt status; in the second reading every sensor moves by -0.1, 0 or +0.1 C. The words are in the layout of the unit's own (boot 29): every sensor, enabled or
+ * not, carries its own number in bits 26:22. */
 static void m_fx_unit(void)
 {
     m_reset();
@@ -423,9 +434,10 @@ static void m_fx_unit(void)
         m_set(M_SROT(n), 0x00, 0x20040000u);
         m_set(M_SROT(n), 0x04, (1u << 21) | (mask << 3) | 1u);
         m_set(M_TM(n), 0xe4, 1);
+        for (unsigned i = 0; i < 16; i++) m_set(M_TM(n), 0xa0 + 4 * i, m_status_off(i));
         for (unsigned i = 0; i < M_COUNT[n]; i++) {
-            m_set(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths(n, i)));
-            m_set2(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths2(n, i)));
+            m_set(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths(n, i), i));
+            m_set2(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths2(n, i), i));
             m_set(M_SROT(n), 0x60 + 4 * i, 0x01b3416au + i);
         }
     }
@@ -476,7 +488,7 @@ static void m_oracle(const uint32_t w[M_BLOCKS][16], struct m_sum *s)
             uint32_t raw = w[n][i];
             int t = (int)(raw & 0xfff);
             if (t >= 2048) t -= 4096;
-            if (raw >> 22) {
+            if ((raw >> 27) != 0 || ((raw >> 22) & 31) != i) {
                 s->odd++;
                 continue;
             }
@@ -635,7 +647,7 @@ static void m_check_values(const struct m_world *w)
         }
         for (unsigned i = 0; i < 16; i++) {
             char cell[16];
-            m_cell(w->w1[n][i], cell);
+            m_cell(w->w1[n][i], i, cell);
             if (cell[0] != '?' && cell[0] != 'O') v++;
             snprintf(items[i], 48, "%s", cell);
         }
@@ -649,7 +661,7 @@ static void m_check_values(const struct m_world *w)
         m_oracle(one, &b2);
         for (unsigned i = 0; i < 16; i++) {
             int t1, t2;
-            if (m_valid_tenths(w->w1[n][i], &t1) && m_valid_tenths(w->w2[n][i], &t2)) {
+            if (m_valid_tenths(w->w1[n][i], i, &t1) && m_valid_tenths(w->w2[n][i], i, &t2)) {
                 int d = t1 > t2 ? t1 - t2 : t2 - t1;
                 both++;
                 chg += d != 0;

@@ -56,6 +56,23 @@ def span_text(lines, span):
     return '\n'.join(lines[first - 1:last])
 
 
+def status_fields(lines):
+    """{name: (lsb, msb)} of the fields the driver declares for the status word of a sensor (REG_FIELD_FOR_EACH_SENSOR16 on TM_Sn_STATUS_OFF)."""
+    found = {}
+    for line in lines:
+        match = re.search(r'REG_FIELD_FOR_EACH_SENSOR16\((\w+),\s*TM_Sn_STATUS_OFF,\s*(\d+),\s*(\d+)\)', line)
+        if match:
+            found[match[1]] = (int(match[2]), int(match[3]))
+    return found
+
+
+def header_constant(text, name):
+    """The value of a plain `#define NAME <number, shifts and sums>` of the header."""
+    found = re.search(rf'^#define {name} (.+?)(?:\s*/\*.*)?$', text, re.M)
+    expression = re.sub(r'\b(0x[0-9a-fA-F]+|[0-9]+)u\b', r'\1', found.group(1))
+    return eval(expression, {'__builtins__': {}})
+
+
 def refuse(name, spans, lines):
     """The problems of a ledger ({span: [text]}) against the lines of a copy."""
     problems = []
@@ -164,6 +181,27 @@ class Refs(unittest.TestCase):
         self.assertTrue(any('UP_INT_STATUS' in problem for problem in refuse('tsens.c', {}, status)))
         third = self.lines['tsens-v2.c'] + ['\tregmap_field_write(priv->rf[CODE_OR_TEMP], 0);']
         self.assertTrue(any('CODE_OR_TEMP' in problem for problem in refuse('tsens-v2.c', {}, third)))
+
+    def test_the_status_word_fields_are_the_headers_and_none_lies_above_bit_21(self):
+        self.assertEqual(status_fields(self.lines['tsens-v2.c']), refs.STATUS_FIELDS)
+        self.assertEqual(max(msb for _, msb in refs.STATUS_FIELDS.values()), 21, 'the sensor number of the unit\'s words (bits 26:22) is in no pinned field')
+        header = (ROOT / 'payloads' / 'tsnap-regs.h').read_text(encoding='utf-8')
+        value = {name: header_constant(header, name) for name in ('ST_TEMP_MASK', 'ST_CRIT_FLAGS', 'ST_VALID', 'ST_ID_SHIFT', 'ST_ID_MASK', 'ST_RESERVED_SHIFT')}
+        low, high = refs.STATUS_FIELDS['LAST_TEMP']
+        self.assertEqual(value['ST_TEMP_MASK'], (1 << (high + 1)) - (1 << low))
+        self.assertEqual(value['ST_VALID'], 1 << refs.STATUS_FIELDS['VALID'][0])
+        self.assertEqual(value['ST_CRIT_FLAGS'], 1 << refs.STATUS_FIELDS['CRITICAL_STATUS'][0] | 1 << refs.STATUS_FIELDS['MAX_STATUS'][0])
+        # What the header checks beyond the driver's fields starts above them: the sensor number at bit 22, the reserved bits after the five-bit number.
+        self.assertEqual(value['ST_ID_SHIFT'], refs.STATUS_FIELDS['VALID'][1] + 1)
+        self.assertEqual(value['ST_RESERVED_SHIFT'], value['ST_ID_SHIFT'] + bin(value['ST_ID_MASK']).count('1'))
+
+    def test_a_status_word_field_above_bit_21_in_the_driver_is_refused(self):
+        lines = list(self.lines['tsens-v2.c'])
+        at = next(i for i, line in enumerate(lines) if 'REG_FIELD_FOR_EACH_SENSOR16(VALID,' in line)
+        added = lines[:at + 1] + ['\tREG_FIELD_FOR_EACH_SENSOR16(SENSOR_ID,      TM_Sn_STATUS_OFF, 22,  26),'] + lines[at + 1:]
+        self.assertNotEqual(status_fields(added), refs.STATUS_FIELDS)
+        moved = [line.replace('TM_Sn_STATUS_OFF, 21,  21', 'TM_Sn_STATUS_OFF, 20,  20') for line in lines]
+        self.assertNotEqual(status_fields(moved), refs.STATUS_FIELDS)
 
     def test_the_board_device_tree_has_no_thermal_text(self):
         folder = Path(os.environ.get('SNAPINTOSH_DIR', '/nonexistent')) / 'build' / 'sp11-stick-log' / 'refs'

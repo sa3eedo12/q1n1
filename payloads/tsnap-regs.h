@@ -77,7 +77,13 @@ static const uint8_t block_order[INSTANCES] = {0, 1, 2, 3};
  * LOWER, UPPER, CRITICAL and MAX at 16 to 20, VALID at 21; Linux reads these constantly. TRDY at 0xe4, bit 0 (1 = ready): Linux reads it only for HW_VER major 0 (tsens.c:834-835),
  * never for a v2 block, so it is the one word of the first reading with no precedent and is read last. The two interrupt status words are read only to see whether a threshold
  * was ever flagged: the driver clears them through separate registers (0x0c and 0x18, tsens-v2.c:37, 40), so a read is not destructive (INFERRED). Linux reads 0x14 as its
- * bit 31 (WDOG_BARK_STATUS, tsens-v2.c:119, tsens.c:637) and nothing reads 0x08. */
+ * bit 31 (WDOG_BARK_STATUS, tsens-v2.c:119, tsens.c:637) and nothing reads 0x08.
+ *
+ * Bits 26:22 are named by no pinned file: the unit's own words (boot 29, read from a film) carry the sensor's own number there, 0x00200000 + (n << 22) + the temperature, for every
+ * sensor of every block (INFERRED from those words, and only the film's reading of them; the field's name is a guess, and the film cannot tell a four-bit field from a five-bit one:
+ * the largest id is 15, so bit 26 is never set, and the check below is the same for both). The decode therefore never depends on the field: it is a consistency check, and a word
+ * whose field is not the sensor's own index is ODD (an all-ones word is one, as is a word read from the wrong place). Bits 31:27 are reserved (the film's words have them clear): a
+ * set bit there is ODD too. Bits 15:12 lie between the two fields the driver names and are not looked at. */
 #define TM_UL_STATUS 0x08u
 #define TM_CRIT_STATUS 0x14u
 #define TM_STATUS 0xa0u
@@ -85,7 +91,9 @@ static const uint8_t block_order[INSTANCES] = {0, 1, 2, 3};
 #define ST_TEMP_MASK 0xfffu
 #define ST_CRIT_FLAGS (3u << 19)
 #define ST_VALID (1u << 21)
-#define ST_RESERVED_SHIFT 22u
+#define ST_ID_SHIFT 22u
+#define ST_ID_MASK 0x1fu
+#define ST_RESERVED_SHIFT 27u
 
 /* Decode: 12-bit two's complement in tenths of a degree C (tsens.c:386-399 with `.adc = 0`, tsens-v2.c:54; INFERRED for the unit until a reading looks plausible).
  * A word that is VALID but decodes outside this window is OUT: the sensor, the mode or the decode is wrong, not the die (the window is the guard model's, compat/

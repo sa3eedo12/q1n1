@@ -41,7 +41,7 @@ DOC = ROOT / 'docs' / 'SP11-PAYLOAD-TSNAP.md'
 SOURCE = ROOT / 'payloads' / 'tsnap.c'
 REGS = ROOT / 'payloads' / 'tsnap-regs.h'
 TOOLS = ('clang', 'ld.lld', 'make', 'llvm-objdump', 'llvm-readelf', 'llvm-objcopy')
-SUITES = ('unit', 'order', 'cells', 'random', 'gate', 'faults', 'hang', 'drift', 'counter', 'el', 'budget', 'storm')
+SUITES = ('unit', 'order', 'cells', 'boot29', 'random', 'gate', 'faults', 'hang', 'drift', 'counter', 'el', 'budget', 'storm')
 
 
 def need_tools():
@@ -444,6 +444,8 @@ class Doc(unittest.TestCase):
             ('LAST_TEMP 11:0', header_value('ST_TEMP_MASK') == 0xfff),
             ('VALID at 21', header_value('ST_VALID') == 1 << 21),
             ('violated at 16 to 20', header_value('ST_CRIT_FLAGS') == 3 << 19),
+            ('bits 26:22', header_value('ST_ID_SHIFT') == 22 and header_value('ST_ID_MASK') == 0x1f),
+            ('31:27', header_value('ST_RESERVED_SHIFT') == 27 and header_value('ST_ID_SHIFT') + 5 == 27),
             ('outside -40.0 to 120.0 C', (header_value('TEMP_MIN_TENTHS'), header_value('TEMP_MAX_TENTHS')) == (-400, 1200)),
             ('GAP=2 S', header_value('GAP_S') == 2),
             ('NEXT S2 AFTER 2 S', header_value('GAP_S') == 2),
@@ -493,6 +495,29 @@ class Doc(unittest.TestCase):
             self.assertIn(f'`{suite}`', section, suite)
         self.assertIn('--slow', section)
 
+    def test_the_versions_paragraph_names_the_file_that_ran_and_says_v1_1_has_not(self):
+        self.assertIn('9,212 bytes', self.text)
+        self.assertIn('dc74cd3e2a1d760a3b8053f25790b7ca0a7f40da5589cd0159fc6e177209ab56', self.text)
+        self.assertIn('it has **not run**', self.text)
+        self.assertIn('v1.1 is **not** the file of boot 29', self.text)
+        self.assertIn("An independent review of its own (2026-11-22) found the binary named in the operator's note safe for one read-only run", ' '.join(self.text.split()))
+
+    def test_the_inference_from_the_film_alone_is_labelled_inferred(self):
+        text = ' '.join(self.text.split())
+        self.assertIn('**INFERRED, from the film only:** that the 14 sensors that are not enabled read their own number', text)
+        self.assertIn('none of the raw words of boot 29 is in this tree', text)
+        self.assertIn('v1.1 prints `ODD=14` for them and `V=50/64` still stands', text)
+
+    def test_the_status_word_table_has_the_five_rules_in_order(self):
+        section = re.search(r'\*\*The status word \(v1\.1\)\.\*\*.*?\n\n(\| Step.*?)\n\n', self.text, re.S).group(1)
+        rows = table_rows(section)
+        self.assertEqual([row[0] for row in rows], ['1', '2', '3', '4', '5'])
+        self.assertIn('**ODD**', rows[0][1])
+        self.assertIn('31:27', rows[0][1])
+        self.assertIn('not valid', rows[1][1])
+        self.assertIn('CODE_OR_TEMP', rows[2][1])
+        self.assertIn('-40.0 to 120.0 C', rows[3][1])
+
     def test_the_links_resolve(self):
         links = re.findall(r'\]\(([^)#\s]+)(?:#([^)\s]+))?\)', self.text)
         self.assertTrue(links)
@@ -537,6 +562,16 @@ MISTAKES = (
     ('the-recovery-sentence-is-dropped', 'boot the stick again', 'start again', 'test_the_outcome_table_has_a_row_for_every_outcome_the_page_can_show'),
     ('the-ready-offset-is-dropped-from-the-unverified-list', 'none of the TM words 0x08 and 0xe4 (TRDY:', 'none of the TM word 0x08 (TRDY:', 'test_the_offsets_that_no_linux_path_reads_are_listed_as_unverified'),
     ('the-slow-suite-is-not-named', 'With `--slow` one more suite, `slow`,', 'With one more suite', 'test_the_counts_and_the_suites_the_document_names_are_the_tests'),
+    ('the-number-field-is-moved', 'bits 26:22', 'bits 25:22', 'test_the_bit_fields_and_numbers_the_document_states_are_the_headers'),
+    ('the-reserved-bits-are-moved', '31:27', '31:28', 'test_the_bit_fields_and_numbers_the_document_states_are_the_headers'),
+    ('the-boot29-suite-is-not-named', '`boot29` (the replay', '`boot28` (the replay', 'test_the_counts_and_the_suites_the_document_names_are_the_tests'),
+    ('v1s-digest-is-misquoted', 'dc74cd3e2a1d760a3b8053f25790b7ca0a7f40da5589cd0159fc6e177209ab56', 'dc74cd3e2a1d760a3b8053f25790b7ca0a7f40da5589cd0159fc6e177209ab57',
+     'test_the_versions_paragraph_names_the_file_that_ran_and_says_v1_1_has_not'),
+    ('v1-1-is-said-to-have-run', 'it has **not run**', 'it has run', 'test_the_versions_paragraph_names_the_file_that_ran_and_says_v1_1_has_not'),
+    ('the-review-of-v1-1-is-dropped', 'An independent review of its own (2026-11-22)', 'A review of its own (2026-11-23)', 'test_the_versions_paragraph_names_the_file_that_ran_and_says_v1_1_has_not'),
+    ('the-film-only-inference-is-called-observed', '**INFERRED, from the film only:**', '**OBSERVED, from the film only:**', 'test_the_inference_from_the_film_alone_is_labelled_inferred'),
+    ('the-fallback-for-the-14-is-misquoted', 'v1.1 prints `ODD=14` for them', 'v1.1 prints `ODD=0` for them', 'test_the_inference_from_the_film_alone_is_labelled_inferred'),
+    ('a-decode-rule-is-dropped-from-the-table', '| 3 | a VALID word of a block', '| 6 | a VALID word of a block', 'test_the_status_word_table_has_the_five_rules_in_order'),
 )
 
 

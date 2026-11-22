@@ -40,8 +40,8 @@ enum { V_NONE, V_OK, V_FAULT, V_SKIP, V_BUDGET };
 /* A block: BS_GATED its HW_VER did not read as a block's, BS_OFF its CTRL read and says it is not running, BS_CTLERR its CTRL did not read, BS_SKIPPED a line that announces it could not
  * be printed. */
 enum { BS_NEW, BS_OK, BS_GATED, BS_OFF, BS_CTLERR, BS_SKIPPED };
-/* What a status word is: VALID and plausible, VALID clear, reserved bits set (an all-ones word is one) or VALID in a block whose CTRL says ADC codes, or VALID and outside
- * TEMP_MIN_TENTHS..TEMP_MAX_TENTHS. */
+/* What a status word is: VALID and plausible, VALID clear, odd (a word whose sensor-number field is not the sensor's own index, or with a reserved bit set: an all-ones word is one; or
+ * VALID in a block whose CTRL says ADC codes), or VALID and outside TEMP_MIN_TENTHS..TEMP_MAX_TENTHS. */
 enum { K_OK, K_INVALID, K_ODD, K_OUT };
 /* How a wait ended: the time passed, the counter does not run (it stands still or goes backwards), or it runs but SPIN_MAX reads did not span the wait. */
 enum { DELAY_OK, DELAY_STUCK, DELAY_SPIN };
@@ -317,14 +317,16 @@ OUT_OF_LINE int running(const struct val *w)
     return w->st == V_OK && (w->v & CTRL_EN) && !(w->v & CTRL_SW_RST);
 }
 
-/* A reserved bit (31:22) set means the word is not the layout the driver describes, so it is not decoded: an all-ones word is the usual case, a failed read. A VALID word of a block
- * whose CTRL has CODE_OR_TEMP clear is not a temperature either (INFERRED: ADC codes), and is as little decoded. */
-OUT_OF_LINE unsigned classify(uint32_t raw, unsigned code, int32_t *tenths)
+/* A word whose sensor-number field (bits 26:22: INFERRED from the unit's own words, regs.h says how) is not the sensor's own index, or with a reserved bit (31:27) set, is not the layout
+ * the driver and the film describe, so it is not decoded: an all-ones word is the usual case, a failed read, and a word read from another sensor's slot is the other. A VALID word of a block
+ * whose CTRL has CODE_OR_TEMP clear is not a temperature either (INFERRED: ADC codes), and is as little decoded. The field is checked before VALID, so that a sensor that is not
+ * enabled and reads its own number alone is `?` and one that reads anything else is `O`. */
+OUT_OF_LINE unsigned classify(uint32_t raw, unsigned code, unsigned sensor, int32_t *tenths)
 {
     int32_t t = (int32_t)(raw & ST_TEMP_MASK);
     if (t & 0x800) t -= 0x1000;
     *tenths = t;
-    if (raw >> ST_RESERVED_SHIFT) return K_ODD;
+    if (raw >> ST_RESERVED_SHIFT || (raw >> ST_ID_SHIFT & ST_ID_MASK) != sensor) return K_ODD;
     if (!(raw & ST_VALID)) return K_INVALID;
     if (code) return K_ODD;
     if (t < TEMP_MIN_TENTHS || t > TEMP_MAX_TENTHS) return K_OUT;
@@ -338,11 +340,12 @@ OUT_OF_LINE void agg_clear(struct agg *a)
     a->min_at = a->max_at = 0;
 }
 
-/* One status word into a set. CRIT counts the CRITICAL and MAX flags of words that are not odd. */
+/* One status word into a set; `at` is block << 4 | sensor, and the sensor is the index the word's own number is checked against. CRIT counts the CRITICAL and MAX flags of words that
+ * are not odd. */
 OUT_OF_LINE void agg_sample(struct agg *a, unsigned at, uint32_t raw, unsigned code)
 {
     int32_t t;
-    unsigned kind = classify(raw, code, &t);
+    unsigned kind = classify(raw, code, at & 15, &t);
     if (kind != K_ODD && (raw & ST_CRIT_FLAGS)) a->crit++;
     if (kind == K_ODD) {
         a->odd++;
@@ -402,15 +405,16 @@ OUT_OF_LINE void pk_extreme(struct ctx *c, struct pl_line *line, const char *key
     pk_add(c, line, &item);
 }
 
-/* One cell of the temperature line: tenths of a degree, or ? (VALID clear), O (odd, out of range, or any VALID word of a CODE block), X (not read). */
-OUT_OF_LINE void cell(struct pl_line *item, const struct val *w, unsigned code)
+/* One cell of the temperature line: tenths of a degree, or ? (VALID clear), O (odd: the word's sensor number is not `sensor`, a reserved bit is set, it is out of range, or it is a VALID word of
+ * a CODE block), X (not read). */
+OUT_OF_LINE void cell(struct pl_line *item, const struct val *w, unsigned code, unsigned sensor)
 {
     int32_t t;
     if (w->st != V_OK) {
         tx(item, "X");
         return;
     }
-    switch (classify(w->v, code, &t)) {
+    switch (classify(w->v, code, sensor, &t)) {
     case K_OK:
         sdec(item, t);
         break;
@@ -467,7 +471,7 @@ OUT_OF_LINE void cells_line(struct ctx *c, unsigned n, const struct agg *a)
     pk_begin(&line, head.buf);
     for (unsigned i = 0; i < SENSORS; i++) {
         pl_begin(&item);
-        cell(&item, &c->blk[n].st[0][i], c->blk[n].code);
+        cell(&item, &c->blk[n].st[0][i], c->blk[n].code, i);
         pk_add(c, &line, &item);
     }
     pk_word(c, &line, "RDY=", &c->blk[n].rdy);
@@ -644,7 +648,7 @@ OUT_OF_LINE int block_two(struct ctx *c, unsigned n, unsigned next)
                 continue;
             }
             agg_sample(&a, n << 4 | i, w->v, code);
-            if (b->st[0][i].st == V_OK && classify(b->st[0][i].v, b->code, &before) == K_OK && classify(w->v, code, &after) == K_OK) {
+            if (b->st[0][i].st == V_OK && classify(b->st[0][i].v, b->code, i, &before) == K_OK && classify(w->v, code, i, &after) == K_OK) {
                 int32_t d = after > before ? after - before : before - after;
                 a.both++;
                 if (d) a.chg++;

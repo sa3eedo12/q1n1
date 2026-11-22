@@ -6,8 +6,11 @@
  *   unit      the golden page of the made-up fixture (NOT the unit's page: nothing was ever read there), its loads, and that the loads are exactly the model's own list
  *   order     the events in order: each block's NEXT line before its first load, its identity line before the first load of its TM window, TRDY last in the block, the second reading
  *             before the conversion pass, each line right after the loads it holds, tsens3 last, the closing lines last
- *   cells     every kind of status word (VALID, not VALID, all ones, reserved bits, the edges of the plausible window, the critical flags) against the model's own decode, in curated
- *             and in random worlds, down to the raw lines, the temperature lines, SUM1 and the second reading
+ *   cells     every kind of status word (VALID, not VALID, all ones, reserved bits, the edges of the plausible window, the critical flags, every sensor number in every slot) against the
+ *             model's own decode and a table of words, in curated and in random worlds, down to the raw lines, the temperature lines, SUM1 and the second reading (the suite is in
+ *             tools/test-q1n1-sp11-payload-tsnap-words.inc)
+ *   boot29    a replay of the unit's own page (boot 29): the words and digits the film gives, which the old decode turns into `V=4/64 ... ODD=60` and the new one into 50 valid sensors at 38.1
+ *             to 42.6 C (what is filler there and what is read is in the .inc)
  *   gate      HW_VER aborting, zero or all ones; CTRL with EN clear, SW_RST set, all ones, aborting, or with CODE_OR_TEMP clear: the block is GATED, OFF, CTLERR or CODE, its TM window
  *             is never read (but for CODE), the other blocks do not change
  *   faults    an abort at every load in turn, the SROT or the TM windows aborting, every window aborting, an abort storm from every load on: one access to a window that aborted, the
@@ -26,29 +29,30 @@
 
 /* The builds with small caps run only suite_caps, so the other suites and their helpers are unused there. */
 #pragma clang diagnostic ignored "-Wunused-function"
-/* The page of the fixture, line by line (without the prefix). A made-up page: HW_VER 2.4.0, 30.0 C and up. DT and GAP_MS are the counter's and are matched as `#`. */
+/* The page of the fixture, line by line (without the prefix). A made-up page: HW_VER 2.4.0, 30.0 C and up, the words in the layout of the unit's own (each sensor's number in bits 26:22,
+ * the sensors that are not enabled included). DT and GAP_MS are the counter's and are matched as `#`. */
 static const char *const GOLDEN[] = {
     "READ ONLY EL=2 HZ=0X124F800 GAP=2 S",
     "KEY T0..T3=BLOCK R=RAW STATUS HEX C=TENTHS OF C INFERRED ?=NOT VALID X=NOT READ O=ODD",
     "NEXT T0",
     "T0 VER=0X20040000 CTL=0X20FFF9 SEN=0X1FFF",
-    "T0 R0 0020012C 0020012F 00200132 00200135 00200138 0020013B 0020013E 00200141",
-    "T0 R8 00200144 00200147 0020014A 0020014D 00200150 00000000 00000000 00000000",
+    "T0 R0 0020012C 0060012F 00A00132 00E00135 01200138 0160013B 01A0013E 01E00141",
+    "T0 R8 02200144 02600147 02A0014A 02E0014D 03200150 03400000 03800000 03C00000",
     "T0 C 300 303 306 309 312 315 318 321 324 327 330 333 336 ? ? ? RDY=0X1 V=13",
     "NEXT T1",
     "T1 VER=0X20040000 CTL=0X203FF9 SEN=0X7FF",
-    "T1 R0 00200133 00200136 00200139 0020013C 0020013F 00200142 00200145 00200148",
-    "T1 R8 0020014B 0020014E 00200151 00000000 00000000 00000000 00000000 00000000",
+    "T1 R0 00200133 00600136 00A00139 00E0013C 0120013F 01600142 01A00145 01E00148",
+    "T1 R8 0220014B 0260014E 02A00151 02C00000 03000000 03400000 03800000 03C00000",
     "T1 C 307 310 313 316 319 322 325 328 331 334 337 ? ? ? ? ? RDY=0X1 V=11",
     "NEXT T2",
     "T2 VER=0X20040000 CTL=0X203FF9 SEN=0X7FF",
-    "T2 R0 0020013A 0020013D 00200140 00200143 00200146 00200149 0020014C 0020014F",
-    "T2 R8 00200152 00200155 00200158 00000000 00000000 00000000 00000000 00000000",
+    "T2 R0 0020013A 0060013D 00A00140 00E00143 01200146 01600149 01A0014C 01E0014F",
+    "T2 R8 02200152 02600155 02A00158 02C00000 03000000 03400000 03800000 03C00000",
     "T2 C 314 317 320 323 326 329 332 335 338 341 344 ? ? ? ? ? RDY=0X1 V=11",
     "NEXT T3",
     "T3 VER=0X20040000 CTL=0X23FFF9 SEN=0X7FFF",
-    "T3 R0 00200141 00200144 00200147 0020014A 0020014D 00200150 00200153 00200156",
-    "T3 R8 00200159 0020015C 0020015F 00200162 00200165 00200168 0020016B 00000000",
+    "T3 R0 00200141 00600144 00A00147 00E0014A 0120014D 01600150 01A00153 01E00156",
+    "T3 R8 02200159 0260015C 02A0015F 02E00162 03200165 03600168 03A0016B 03C00000",
     "T3 C 321 324 327 330 333 336 339 342 345 348 351 354 357 360 363 ? RDY=0X1 V=15",
     "SUM1 V=50/64 MIN=300(T0.0) MAX=363(T3.14) CRIT=0 OUT=0 ODD=0",
     "NEXT S2 AFTER 2 S",
@@ -174,16 +178,6 @@ static int suite_unit(void)
     return 0;
 }
 
-/* ---- The status words ---- */
-static const struct {
-    uint32_t raw;
-    const char *cell;
-} CELLS[] = {
-    {0x0020012c, "300"}, {0x00200fff, "-1"}, {0x00200000, "0"}, {0x00200001, "1"}, {0x002004b0, "1200"}, {0x002004b1, "O"}, {0x00200e70, "-400"}, {0x00200e6f, "O"},
-    {0x00200800, "O"}, {0x002007ff, "O"}, {0x0000012c, "?"}, {0x00000000, "?"}, {0x00000fff, "?"}, {0x0060012c, "O"}, {0x8020012c, "O"}, {0xffffffff, "O"},
-    {0x0028012c, "300"}, {0x0030012c, "300"}, {0x0010012c, "?"}, {0x0007012c, "?"}, {0x00e0012c, "O"}, {0x0020b12c, "300"}, {0x00a0012c, "O"}, {0x04200000, "O"},
-};
-
 static void m_fx_words(const uint32_t w[M_BLOCKS][16])
 {
     m_fx_unit();
@@ -196,64 +190,7 @@ static void m_fx_words(const uint32_t w[M_BLOCKS][16])
     }
 }
 
-static int suite_cells(void)
-{
-    uint32_t w[M_BLOCKS][16];
-    struct m_world world;
-    static const uint32_t FLAGS[] = {1u << 16, 1u << 17, 1u << 18, 1u << 19, 1u << 20, 3u << 19, 0x1fu << 16};
-    /* Every kind of word, in every slot of a block, in all four blocks. */
-    for (unsigned shift = 0; shift < sizeof CELLS / sizeof CELLS[0]; shift++) {
-        for (unsigned n = 0; n < M_BLOCKS; n++)
-            for (unsigned i = 0; i < 16; i++) w[n][i] = CELLS[(shift + n * 5 + i) % (sizeof CELLS / sizeof CELLS[0])].raw;
-        m_fx_words(w);
-        m_capture(&world);
-        RUN_CLEAN();
-        for (unsigned n = 0; n < M_BLOCKS; n++) {
-            char head[16];
-            int at;
-            snprintf(head, sizeof head, "T%u C", n);
-            at = m_find(head, 0);
-            CHECK(at >= 0);
-            for (unsigned i = 0; i < 16; i++) {
-                char cell[16];
-                m_cell(w[n][i], cell);
-                for (unsigned c = 0; c < sizeof CELLS / sizeof CELLS[0]; c++)
-                    if (CELLS[c].raw == w[n][i]) CHECK(!strcmp(CELLS[c].cell, cell));
-            }
-        }
-        m_check_values(&world);
-    }
-    /* The critical flags are counted for any word that is not odd, whether or not it is VALID; MIN, LOWER and UPPER alone are not critical. */
-    for (unsigned f = 0; f < sizeof FLAGS / sizeof FLAGS[0]; f++) {
-        struct m_sum s;
-        memset(w, 0, sizeof w);
-        w[2][5] = 0x0020012c | FLAGS[f];
-        w[3][0] = 0x0000012c | FLAGS[f];
-        w[1][1] = 0x8020012c | FLAGS[f];
-        m_fx_words(w);
-        m_capture(&world);
-        RUN_CLEAN();
-        m_oracle(world.w1, &s);
-        CHECK(s.crit == (FLAGS[f] >> 19 & 3 ? 2u : 0u));
-        CHECK(s.odd == 1 && s.valid == 1);
-        m_check_values(&world);
-    }
-    /* Ties: the first sensor in block order wins both the minimum and the maximum. */
-    memset(w, 0, sizeof w);
-    for (unsigned n = 0; n < M_BLOCKS; n++)
-        for (unsigned i = 0; i < 16; i++) w[n][i] = 0x00200190;
-    m_fx_words(w);
-    m_capture(&world);
-    RUN_CLEAN();
-    CHECK(m_line_is((unsigned)m_find("SUM1", 0), "SUM1 V=64/64 MIN=400(T0.0) MAX=400(T0.0) CRIT=0 OUT=0 ODD=0"));
-    /* No valid sensor at all: NA, and the second reading has nothing to compare. */
-    memset(w, 0, sizeof w);
-    m_fx_words(w);
-    RUN_CLEAN();
-    CHECK(m_line_is((unsigned)m_find("SUM1", 0), "SUM1 V=0/64 MIN=NA MAX=NA CRIT=0 OUT=0 ODD=0"));
-    CHECK(m_line_is((unsigned)m_find("SUM2", 0), "SUM2 V=0/64 MIN=NA MAX=NA CHG=0/0 DMAX=0 CRIT=0 OUT=0 ODD=0"));
-    return 0;
-}
+#include "test-q1n1-sp11-payload-tsnap-words.inc"        /* suite_cells and suite_boot29: what a status word says */
 
 static uint32_t m_rng = 0x2545f491u;
 static uint32_t m_rand(void)
@@ -264,16 +201,21 @@ static uint32_t m_rand(void)
     return m_rng;
 }
 
-static uint32_t m_word(void)
+/* A random word for sensor slot `slot`: mostly in the unit's layout (the slot's own number, VALID or not, a plausible or a wild temperature, flags), sometimes another number, a reserved
+ * bit, bits of the 15:12 gap, all ones, zero, or anything at all. */
+static uint32_t m_word(unsigned slot)
 {
-    uint32_t kind = m_rand() % 20, flags = (m_rand() & 0x1f) << 16;
+    uint32_t kind = m_rand() % 26, flags = (m_rand() & 0x1f) << 16, id = slot << 22;
     if (m_rand() % 4) flags = 0;
-    if (kind < 8) return (1u << 21) | ((uint32_t)((int)(m_rand() % 1601) - 400) & 0xfff) | flags;
-    if (kind < 11) return (1u << 21) | (m_rand() & 0xfff) | flags;
-    if (kind < 14) return (m_rand() & 0xfff) | flags;
+    if (kind < 8) return id | (1u << 21) | ((uint32_t)((int)(m_rand() % 1601) - 400) & 0xfff) | flags;
+    if (kind < 11) return id | (1u << 21) | (m_rand() & 0xfff) | flags;
+    if (kind < 14) return id | (m_rand() & 0xfff) | flags;
     if (kind < 16) return (m_rand() & 0xffc00000u) | (m_rand() & 0x3fffff);
     if (kind == 16) return 0xffffffffu;
     if (kind == 17) return 0;
+    if (kind < 20) return (((slot + 1 + m_rand() % 31) & 31) << 22) | (1u << 21) | (m_rand() & 0xfff) | flags;       /* another sensor's number, never this one's */
+    if (kind < 22) return id | (1u << 21) | (m_rand() & 0xfff) | ((1u + m_rand() % 31) << 27);                    /* the right number and a reserved bit or more */
+    if (kind < 24) return id | (1u << 21) | (m_rand() & 0xffff) | flags;                                          /* bits 15:12 too */
     return m_rand();
 }
 
@@ -284,11 +226,11 @@ static int suite_random(void)
         uint32_t w[M_BLOCKS][16];
         struct m_world world;
         for (unsigned n = 0; n < M_BLOCKS; n++)
-            for (unsigned i = 0; i < 16; i++) w[n][i] = m_word();
+            for (unsigned i = 0; i < 16; i++) w[n][i] = m_word(i);
         m_fx_words(w);
         for (unsigned n = 0; n < M_BLOCKS; n++)
             for (unsigned i = 0; i < 16; i++)
-                if (m_rand() % 3) m_set2(M_TM(n), 0xa0 + 4 * i, (m_rand() % 2 && !(w[n][i] >> 22)) ? ((w[n][i] & ~0xfffu) | (((w[n][i] & 0xfff) + m_rand() % 7 - 3) & 0xfff)) : m_word());
+                if (m_rand() % 3) m_set2(M_TM(n), 0xa0 + 4 * i, (m_rand() % 2 && w[n][i] != 0xffffffffu) ? ((w[n][i] & ~0xfffu) | (((w[n][i] & 0xfff) + m_rand() % 7 - 3) & 0xfff)) : m_word(i));
         m_capture(&world);
         RUN_CLEAN();
         m_check_values(&world);
@@ -447,7 +389,7 @@ static int suite_faults(void)
     m_fx_unit();
     m_abort_nth = 2 + 5;                                              /* block 0's sixth status word */
     RUN_CLEAN();
-    CHECK(m_line_is((unsigned)m_find("T0 R0", 0), "T0 R0 0020012C 0020012F 00200132 00200135 00200138 FAULT:6 SKIP SKIP"));
+    CHECK(m_line_is((unsigned)m_find("T0 R0", 0), "T0 R0 0020012C 0060012F 00A00132 00E00135 01200138 FAULT:6 SKIP SKIP"));
     CHECK(m_line_is((unsigned)m_find("T0 R8", 0), "T0 R8 SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP"));
     CHECK(m_line_is((unsigned)m_find("T0 C", 0), "T0 C 300 303 306 309 312 X X X X X X X X X X X RDY=SKIP V=5"));
     CHECK(m_find("S2 T0", 0) < 0 && m_find("S2 T1", 0) >= 0);
@@ -559,17 +501,17 @@ static int suite_drift(void)
     /* Everything moves by 10 (1.0 C). */
     m_fx_unit();
     for (unsigned n = 0; n < M_BLOCKS; n++)
-        for (unsigned i = 0; i < M_COUNT[n]; i++) m_set2(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths(n, i) + 10));
+        for (unsigned i = 0; i < M_COUNT[n]; i++) m_set2(M_TM(n), 0xa0 + 4 * i, m_status(m_tenths(n, i) + 10, i));
     m_capture(&w);
     RUN_CLEAN();
     m_check_values(&w);
     CHECK(m_line_is((unsigned)m_find("SUM2", 0), "SUM2 V=50/64 MIN=310(T0.0) MAX=373(T3.14) CHG=50/50 DMAX=10 CRIT=0 OUT=0 ODD=0"));
     /* A sensor goes invalid, one goes odd, one jumps by 50 C, one leaves the plausible window. */
     m_fx_unit();
-    m_set2(M_TM(1), 0xa0 + 4 * 2, 0x0000012c);
+    m_set2(M_TM(1), 0xa0 + 4 * 2, m_status_off(2) | 0x12c);
     m_set2(M_TM(2), 0xa0 + 4 * 4, 0xffffffffu);
-    m_set2(M_TM(3), 0xa0 + 4 * 6, m_status(m_tenths(3, 6) + 500));
-    m_set2(M_TM(0), 0xa0 + 4 * 9, m_status(1300));
+    m_set2(M_TM(3), 0xa0 + 4 * 6, m_status(m_tenths(3, 6) + 500, 6));
+    m_set2(M_TM(0), 0xa0 + 4 * 9, m_status(1300, 9));
     m_capture(&w);
     RUN_CLEAN();
     m_check_values(&w);
@@ -712,14 +654,14 @@ static int suite_budget(void)
     uint32_t w[M_BLOCKS][16];
     /* The widest values that a normal page has: every cell three digits. Nothing is cut and the page is as long as the nominal one. */
     for (unsigned n = 0; n < M_BLOCKS; n++)
-        for (unsigned i = 0; i < 16; i++) w[n][i] = 0x00200000u | (900 + n * 16 + i);
+        for (unsigned i = 0; i < 16; i++) w[n][i] = m_status(900 + (int)(n * 16 + i), i);
     m_fx_words(w);
     RUN_CLEAN();
     CHECK(m_nlines == PAGE_LINES && m_field(m_text(m_nlines - 1), "CUTS") == 0);
     CHECK(m_nlines == LINE_CAP);                                      /* the nominal page is the cap, and the closing lines are still there */
     /* Every cell four characters wide: neither RDY= nor V= of a temperature line fits any more; both are dropped, counted, and nothing else is. */
     for (unsigned n = 0; n < M_BLOCKS; n++)
-        for (unsigned i = 0; i < 16; i++) w[n][i] = 0x00200000u | (1100 + n);
+        for (unsigned i = 0; i < 16; i++) w[n][i] = m_status(1100 + (int)n, i);
     m_fx_words(w);
     RUN_CLEAN();
     CHECK(m_nlines == PAGE_LINES && m_field(m_text(m_nlines - 1), "CUTS") == 8);
@@ -732,7 +674,7 @@ static int suite_budget(void)
     }
     /* Six cells four characters wide and ten three: RDY= still fits, V= is the one that goes (RDY= comes first because only its absence is a gap in what the run is for). */
     for (unsigned n = 0; n < M_BLOCKS; n++)
-        for (unsigned i = 0; i < 16; i++) w[n][i] = 0x00200000u | (i < 6 ? 1100 : 300);
+        for (unsigned i = 0; i < 16; i++) w[n][i] = m_status(i < 6 ? 1100 : 300, i);
     m_fx_words(w);
     RUN_CLEAN();
     CHECK(m_nlines == PAGE_LINES && m_field(m_text(m_nlines - 1), "CUTS") == 4);
@@ -764,12 +706,12 @@ static int suite_storm(void)
     for (unsigned round = 0; round < 1500; round++) {
         m_fx_unit();
         for (unsigned n = 0; n < M_BLOCKS; n++) {
-            if (m_rand() % 4 == 0) m_set(M_SROT(n), 0x00, m_word());
-            if (m_rand() % 4 == 0) m_set(M_SROT(n), 0x04, m_word());
+            if (m_rand() % 4 == 0) m_set(M_SROT(n), 0x00, m_word(0));
+            if (m_rand() % 4 == 0) m_set(M_SROT(n), 0x04, m_word(0));
             if (m_rand() % 4 == 0) m_set(M_TM(n), 0xe4, m_rand());
             for (unsigned i = 0; i < 16; i++) {
-                if (m_rand() % 3 == 0) m_set(M_TM(n), 0xa0 + 4 * i, m_word());
-                if (m_rand() % 3 == 0) m_set2(M_TM(n), 0xa0 + 4 * i, m_word());
+                if (m_rand() % 3 == 0) m_set(M_TM(n), 0xa0 + 4 * i, m_word(i));
+                if (m_rand() % 3 == 0) m_set2(M_TM(n), 0xa0 + 4 * i, m_word(i));
                 if (m_rand() % 5 == 0) m_set(M_SROT(n), 0x60 + 4 * i, m_rand());
             }
             if (m_rand() % 6 == 0) m_set2(M_SROT(n), 0x04, m_rand());
@@ -878,6 +820,7 @@ int main(int argc, char **argv)
     SUITE(unit);
     SUITE(order);
     SUITE(cells);
+    SUITE(boot29);
     SUITE(random);
     SUITE(gate);
     SUITE(faults);

@@ -69,6 +69,9 @@ LEDGER = {
 }
 # Spans that must NOT hold a text: the generic v2 driver never calibrates (no `.calibrate` among its ops).
 ABSENT = {('tsens-v2.c', '263-266'): ['calibrate']}
+# The fields of the status word Sn_STATUS in the pinned driver (tsens-v2.c:128-138), as (lsb, msb): the header's ST_ values are these, and no field lies above bit 21. The sensor
+# number that the unit's own words carry in bits 26:22 (boot 29: INFERRED from the film) is named by no pinned file, which is why the decode only checks it.
+STATUS_FIELDS = {'LAST_TEMP': (0, 11), 'VALID': (21, 21), 'MIN_STATUS': (16, 16), 'LOWER_STATUS': (17, 17), 'UPPER_STATUS': (18, 18), 'CRITICAL_STATUS': (19, 19), 'MAX_STATUS': (20, 20)}
 # What whole files must not hold or hold a given number of times (the claims "Linux never ..." and "only ..."): the generic v2 path never writes CODE_OR_TEMP (tsens.c has no mention of
 # it at all, tsens-v2.c names it only in its field table and in the ipq5332 init, which spans lines 223 to 261), nothing reads the upper, lower or critical interrupt status fields or the
 # CC monitor status through a regmap field, TRDY is read once (the VER_0 path) and the TM+0x14 word is read once, as its watchdog bit.
