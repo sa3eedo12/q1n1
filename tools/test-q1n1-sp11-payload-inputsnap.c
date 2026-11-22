@@ -956,6 +956,7 @@ int main(int argc, char **argv)
     m_run_suite("unit", suite_unit);
     m_run_suite("decode", suite_decode);
     m_run_suite("gate", suite_gate);
+    m_run_suite("gate2", suite_gate2);
     m_run_suite("drift", suite_drift);
     m_run_suite("note", suite_note);
     m_run_suite("stream", suite_stream);

@@ -7,7 +7,8 @@
  * harness's OWN list (written from the design note, not from the payload's table) does not name, in the FIFO window of an engine, at a pin the design excludes, in a
  * window after an abort in it (in GCC: in its group of words; so no retry either), the same register twice in one snapshot, a 64-bit register read other than as low then
  * high word, an engine window read while the model's OWN reading of that snapshot's clock words does not say all of the engine's clocks run (a word that aborted, was not
- * read or is stopped counts as stopped), a new block's first load whose NEXT line is not the last line printed, a load of an earlier block after a later one, a
+ * read or is stopped counts as stopped; so does a clock that says only hardware gating while its vote is clear or was not read, and so do all of them when the three vote
+ * words read zero), a new block's first load whose NEXT line is not the last line printed, a load of an earlier block after a later one, a
  * snapshot-2 load of a register the harness's snapshot-2 list does not name or not under its `NEXT S2 <window>` line, a system register other than CurrentEL and
  * CNTFRQ_EL0, more lines than the ABI or the payload's cap, a line of more than 100 characters or outside the page font, a missing end line, a counter read more than
  * five million times (an unbounded wait), and any access that reaches a device window other than through load32 (the five windows are unmapped here, so a payload that
@@ -190,6 +191,12 @@ static const uint32_t M_U2_S2[] = {0x040, 0x800, 0x804, 0x610, 0x640, 0x908};
 static const uint32_t M_GATE_U2[] = {0x23000, 0x23004, 0x23008, 0x42274};
 static const uint32_t M_GATE_S10[] = {0x23150, 0x23154, 0x23158, 0x18274, 0x18280};
 static const uint32_t M_HWCG[] = {0x23000, 0x23004, 0x23150, 0x23154};
+/* The vote that backs each of those four (gcc-x1e80100.c:4954-5009: enable_reg and enable_mask of the wrapper's m_ahb and s_ahb clocks), and the three vote words. */
+static const struct {
+    uint32_t clock, vote;
+    unsigned bit;
+} M_HWVOTE[] = {{0x23000, 0x52020, 6}, {0x23004, 0x52020, 7}, {0x23150, 0x52008, 20}, {0x23154, 0x52008, 21}};
+static const uint32_t M_VOTES[] = {0x52020, 0x52008, 0x52028};
 
 static int m_in_hwcg(uint32_t off)
 {
@@ -202,6 +209,12 @@ static int m_in_hwcg(uint32_t off)
 static int m_stopped(uint32_t v, int hwcg)
 {
     return v == 0xffffffffu || ((v >> 31) && !(hwcg && ((v >> 1) & 1)) && ((v >> 28) & 7) != 2);
+}
+
+/* A hardware-gated clock that says nothing about running: CLK_OFF set, HW_CTL set on a clock that declares a hardware gating bit, no NoC FSM verdict of ON, not all ones. */
+static int m_is_hw(uint32_t v, int hwcg)
+{
+    return hwcg && v != 0xffffffffu && (v >> 31) && ((v >> 1) & 1) && ((v >> 28) & 7) != 2;
 }
 
 /* The register of a window at an offset (the high word of a 64-bit one counts, `hi` says so), or NULL. */
@@ -277,13 +290,26 @@ static int m_last_line_starts(const char *tail)
     return m_nlines && !strncmp(m_lines[m_nlines - 1], want, n) && (m_lines[m_nlines - 1][n] == 0 || m_lines[m_nlines - 1][n] == ' ');
 }
 
-/* The harness's own verdict on an engine's clocks in this snapshot: every one of its clock words was loaded in this snapshot, did not abort and is not stopped. In the late
- * blocks, the snapshot is the freshest one that read clock words: snapshot 2 if it loaded any, else snapshot 1. Returns 1, or 0 with `why` saying which word and what was wrong
+/* The snapshot-1 load of a GCC word, whichever snapshot is being judged (the vote words are read in snapshot 1 only): 1 with its value if it loaded, 0 if it did not or aborted. */
+static int m_s1_gcc(uint32_t off, uint32_t *value)
+{
+    for (unsigned e = 0; e < m_nevents; e++) {
+        if (m_events[e].kind != M_LOAD || m_events[e].win != M_GCC || m_events[e].phase != 1 || m_events[e].addr != M_BASE[M_GCC] + off) continue;
+        *value = m_events[e].value;
+        return !m_events[e].fault;
+    }
+    return 0;
+}
+
+/* The harness's own verdict on an engine's clocks in this snapshot: every one of its clock words was loaded in this snapshot, did not abort and is not stopped, a clock that says
+ * only hardware gating has its vote set in the vote word snapshot 1 loaded, and the three vote words do not all read zero (a window of zeros reads every branch as running). In the
+ * late blocks, the snapshot is the freshest one that read clock words: snapshot 2 if it loaded any, else snapshot 1. Returns 1, or 0 with `why` saying which word and what was wrong
  * with it. */
 static int m_gate_ok(unsigned w, char *why, size_t size)
 {
     const uint32_t *list = w == M_U2 ? M_GATE_U2 : M_GATE_S10;
-    unsigned n = w == M_U2 ? 4 : 5, phase = m_phase == 3 ? (m_p2_gcc ? 2u : 1u) : m_phase;
+    unsigned n = w == M_U2 ? 4 : 5, phase = m_phase == 3 ? (m_p2_gcc ? 2u : 1u) : m_phase, seen_votes = 0, zero;
+    uint32_t any_vote = 0, v = 0;
     for (unsigned i = 0; i < n; i++) {
         int found = 0;
         for (unsigned e = 0; e < m_nevents; e++) {
@@ -297,11 +323,36 @@ static int m_gate_ok(unsigned w, char *why, size_t size)
                 snprintf(why, size, "the clock word GCC+%#x of the engine is stopped (%#x)", list[i], m_events[e].value);
                 return 0;
             }
+            if (m_is_hw(m_events[e].value, m_in_hwcg(list[i]))) {
+                for (unsigned k = 0; k < sizeof M_HWVOTE / sizeof M_HWVOTE[0]; k++) {
+                    if (M_HWVOTE[k].clock != list[i]) continue;
+                    if (!m_s1_gcc(M_HWVOTE[k].vote, &v)) {
+                        snprintf(why, size, "the clock word GCC+%#x of the engine says hardware gating and its vote word GCC+%#x was not read", list[i], M_HWVOTE[k].vote);
+                        return 0;
+                    }
+                    if (!(v >> M_HWVOTE[k].bit & 1)) {
+                        snprintf(why, size, "the clock word GCC+%#x of the engine says hardware gating and bit %u of its vote word GCC+%#x is clear (%#x)", list[i],
+                                 M_HWVOTE[k].bit, M_HWVOTE[k].vote, v);
+                        return 0;
+                    }
+                }
+            }
         }
         if (!found) {
             snprintf(why, size, "the clock word GCC+%#x of the engine was not read in this snapshot", list[i]);
             return 0;
         }
+    }
+    for (unsigned i = 0; i < sizeof M_VOTES / sizeof M_VOTES[0]; i++) {
+        if (m_s1_gcc(M_VOTES[i], &v)) {
+            seen_votes++;
+            any_vote |= v;
+        }
+    }
+    zero = seen_votes == sizeof M_VOTES / sizeof M_VOTES[0] && !any_vote;
+    if (zero) {
+        snprintf(why, size, "the three vote words read zero, so nothing backs the clock words of the engine");
+        return 0;
     }
     return 1;
 }

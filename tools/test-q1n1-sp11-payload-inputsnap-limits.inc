@@ -98,7 +98,7 @@ static int suite_storm(void)
     CHECK(m_has("U2 GATED ERR") && m_has("S10 GATED ERR"));      /* an all-ones clock word is a failed read: the engine is gated, and the clock is not called off */
     m_fill = 0;
     RUN_CLEAN();
-    CHECK(!m_has("U2 GATED") && !m_has("S10 GATED"));
+    CHECK(m_has("U2 GATED ERR") && m_has("S10 GATED ERR") && !m_has("GATED OFF"));       /* a window of zeros reads every branch as running, and every vote as clear: nothing backs them */
     m_fill_all = 0;
     m_fx_unit();
     for (uint64_t seed = 1; seed <= 400; seed++) {
@@ -337,6 +337,165 @@ static int suite_order(void)
     m_have_counter = 0;
     RUN_CLEAN();
     CHECK(m_line_index("NEXT X U2", 0) > m_line_index("NEXT TLMM", 0) && m_loads_in(3) == LOADS_X);
+    return 0;
+}
+
+/* What an engine's gate needs besides its clock words, and the second lines of defence the page never shows: a clock that says only hardware gating needs its own vote bit in the
+ * vote word snapshot 1 read; three vote words that read zero gate every engine (a window of zeros reads every branch as running); the read primitive refuses a window the table does not
+ * have, an offset past its window and an unaligned one before it loads; the load-level gate holds an engine back by itself; the line cap holds at its boundary. */
+static void m_ctx_init(struct ctx *c)
+{
+    memset(c, 0, sizeof *c);
+    c->puts = m_puts;
+    c->hex = m_hex;
+    c->load32 = m_load32;
+    c->counter = m_counter;
+}
+
+static void m_wait_ma0_hw(void) { m_fset(M_GCC, 0x23000, 0x80000002u); }
+static void m_wait_votes_zero(void)
+{
+    m_fset(M_GCC, 0x52020, 0);
+    m_fset(M_GCC, 0x52008, 0);
+    m_fset(M_GCC, 0x52028, 0);
+}
+
+static int suite_gate2(void)
+{
+    static const uint32_t VOTE_OFF[] = {0x52020, 0x52008, 0x52028};
+    struct ctx c;
+    struct pl_line line;
+    uint32_t value = 0;
+    CHECK(sizeof hw_votes / sizeof hw_votes[0] == sizeof M_HWVOTE / sizeof M_HWVOTE[0]);
+    for (unsigned k = 0; k < sizeof M_HWVOTE / sizeof M_HWVOTE[0]; k++) {
+        unsigned engine = M_HWVOTE[k].clock < 0x23100 ? M_U2 : M_S10, other = engine == M_U2 ? M_S10 : M_U2;
+        char off[24], err[24];
+        snprintf(off, sizeof off, "%s GATED OFF", M_NAME[engine]);
+        snprintf(err, sizeof err, "%s GATED ERR", M_NAME[engine]);
+        CHECK(regs[hw_votes[k].clock].off == M_HWVOTE[k].clock);
+        CHECK(regs[hw_votes[k].vote].off == M_HWVOTE[k].vote);
+        CHECK(hw_votes[k].bit == M_HWVOTE[k].bit);
+        CHECK(regs[hw_votes[k].clock].win == WIN_GCC && regs[hw_votes[k].vote].win == WIN_GCC && (regs[hw_votes[k].clock].flags & F_HWCG) && !hw_votes[k].pad);
+        /* The clock says only hardware gating and its vote is set (the unit-like fixture's): the engine is read. */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000002u);
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) < 0 && m_line_index(err, 0) < 0 && m_window_loads(engine, 1) > 0 && m_window_loads(other, 1) > 0);
+        /* Its own vote bit clear, every other bit of the word set: stopped, `GATED OFF`, in every snapshot, and the other engine is not touched. */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000002u);
+        m_fset(M_GCC, M_HWVOTE[k].vote, 0xffffffffu & ~(1u << M_HWVOTE[k].bit));
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) >= 0 && m_line_index(err, 0) < 0 && m_window_loads(engine, 1) == 0 && m_window_loads(engine, 3) == 0 && m_window_loads(other, 1) > 0);
+        /* Only its own bit clear, the word otherwise as the fixture has it: the same; and the neighbour's bit clear with its own set: read. */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000002u);
+        m_fset(M_GCC, M_HWVOTE[k].vote, M_HWVOTE[k].vote == 0x52020 ? 0x10c0u & ~(1u << M_HWVOTE[k].bit) : 0x1380000u & ~(1u << M_HWVOTE[k].bit));
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) >= 0 && m_window_loads(engine, 1) == 0);
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000002u);
+        m_fset(M_GCC, M_HWVOTE[k].vote, 1u << M_HWVOTE[k].bit);
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) < 0 && m_line_index(err, 0) < 0 && m_window_loads(engine, 1) > 0);
+        /* The vote bit is asked of a hardware-gated clock only: a clock that reads ON with its bit clear is read (an other master's vote may run it). */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].vote, 0xffffffffu & ~(1u << M_HWVOTE[k].bit));
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) < 0 && m_line_index(err, 0) < 0 && m_window_loads(engine, 1) > 0);
+        /* The vote word did not read: a hardware-gated clock is unknown, never stopped (the group of vote words is silent after the abort). */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000002u);
+        m_ffault(M_GCC, M_HWVOTE[k].vote);
+        RUN_CLEAN();
+        CHECK(m_line_index(err, 0) >= 0 && m_line_index(off, 0) < 0 && m_window_loads(engine, 1) == 0 && m_window_loads(other, 1) > 0);
+        /* The same abort with the clock reading ON gates nothing, as before: no vote evidence is asked of it. */
+        m_fx_unit();
+        m_ffault(M_GCC, M_HWVOTE[k].vote);
+        RUN_CLEAN();
+        CHECK(m_line_index(err, 0) < 0 && m_line_index(off, 0) < 0 && m_window_loads(engine, 1) > 0);
+        /* A word that says stopped outranks a vote word that did not read. */
+        m_fx_unit();
+        m_fset(M_GCC, M_HWVOTE[k].clock, 0x80000000u);
+        m_ffault(M_GCC, M_HWVOTE[k].vote);
+        RUN_CLEAN();
+        CHECK(m_line_index(off, 0) >= 0 && m_line_index(err, 0) < 0);
+    }
+    /* Snapshot 2 and the late blocks use the votes snapshot 1 read: a clock that turns hardware-gated during the wait keeps the engine visited while the vote was set then, and the
+     * vote words going to zero during the wait change nothing (they are not read again). */
+    m_fx_unit();
+    m_at_wait = m_wait_ma0_hw;
+    RUN_CLEAN();
+    CHECK(m_line_starts("NEXT S2 U2") > 0 && m_window_loads(M_U2, 2) == 6 && m_window_loads(M_U2, 3) == LOADS_XU2);
+    m_fx_unit();
+    m_at_wait = m_wait_votes_zero;
+    RUN_CLEAN();
+    CHECK(m_line_starts("NEXT S2 U2") > 0 && m_window_loads(M_U2, 2) == 6 && m_window_loads(M_S10, 3) == LOADS_XS10);
+    /* A hardware-gated clock whose vote is clear in snapshot 1 is stopped in snapshot 1, and stays so for the late blocks even if the clock word goes ON in the wait. */
+    m_fx_unit();
+    m_fset(M_GCC, 0x23000, 0x80000002u);
+    m_fset(M_GCC, 0x52020, 0x1000);
+    m_at_wait = m_wait_ma0_on;
+    RUN_CLEAN();
+    CHECK(m_line_index("U2 GATED OFF", 0) >= 0 && m_window_loads(M_U2, 1) == 0 && m_line_starts("S2 U2") < 0 && m_window_loads(M_U2, 3) == LOADS_XU2);
+    /* Three vote words that read zero gate both engines: `GATED ERR` (nothing is known of the clocks), in snapshot 1, snapshot 2 and the late blocks. */
+    m_fx_unit();
+    m_wait_votes_zero();
+    RUN_CLEAN();
+    CHECK(m_line_index("U2 GATED ERR", 0) >= 0 && m_line_index("S10 GATED ERR", 0) >= 0 && m_line_index("U2 GATED OFF", 0) < 0 && m_wloads[M_U2] == 0 && m_wloads[M_S10] == 0);
+    CHECK(m_line_index("X U2 GATED ERR", 0) >= 0 && m_line_index("X S10 GATED ERR", 0) >= 0 && m_wloads[M_GIC] > 0 && m_wloads[M_TLMM] > 0 && m_end_field("BLK") != 0);
+    m_fx_unit();
+    m_gcc_all(0);
+    m_wait_votes_zero();
+    RUN_CLEAN();
+    CHECK(m_line_index("U2 GATED ERR", 0) >= 0 && m_line_index("S10 GATED ERR", 0) >= 0 && m_wloads[M_U2] == 0 && m_wloads[M_S10] == 0);
+    /* Not every vote word: any one of the three that reads non-zero is vote evidence enough. */
+    for (unsigned keep = 0; keep < 3; keep++) {
+        m_fx_unit();
+        m_wait_votes_zero();
+        m_fset(M_GCC, VOTE_OFF[keep], 0x10);
+        RUN_CLEAN();
+        CHECK(m_line_index("U2 GATED ERR", 0) < 0 && m_line_index("S10 GATED ERR", 0) < 0 && m_window_loads(M_U2, 1) > 0 && m_window_loads(M_S10, 1) > 0);
+    }
+    /* A vote word that did not read is not a word that read zero: the others at zero do not gate the engines of clocks that read ON. */
+    m_fx_unit();
+    m_wait_votes_zero();
+    m_ffault(M_GCC, 0x52028);
+    RUN_CLEAN();
+    CHECK(m_line_index("U2 GATED ERR", 0) < 0 && m_window_loads(M_U2, 1) > 0);
+    /* The read primitive refuses before it loads: a window the table does not have (any number from WINDOWS up), an offset at or past the end of its window, an unaligned one. */
+    m_fx_unit();
+    m_reset_run();
+    m_ctx_init(&c);
+    CHECK(rd32(&c, WINDOWS, 0, 0, &value) == RD_RANGE && rd32(&c, WINDOWS + 3u, 0, 0x100, &value) == RD_RANGE && rd32(&c, 0xffffu, 0, 0, &value) == RD_RANGE);
+    CHECK(rd32(&c, WIN_U2, 0, windows[WIN_U2].size, &value) == RD_RANGE && rd32(&c, WIN_U2, 0, windows[WIN_U2].size - 2u, &value) == RD_ALIGN);
+    CHECK(rd32(&c, WIN_GCC, 0, 2, &value) == RD_ALIGN && value == 0);
+    CHECK(c.loads == 0 && m_nloads == 0 && c.dead == 0);
+    /* The load-level gate: a row of an engine is not loaded when the clock words it is handed say stopped, whoever calls; and it is loaded when they say running. */
+    m_fx_unit();
+    m_reset_run();
+    m_ctx_init(&c);
+    for (unsigned id = R_G_MA0; id <= R_G_VT2; id++) {
+        c.s[0].v[id].st = V_OK;
+        c.s[0].v[id].v = regs[id].off >= 0x52000 ? 0x10 : 0x1;
+    }
+    c.s[0].v[R_G_MA0].v = 0x80000000u;
+    read_row(&c, &c.s[0], &c.s[0], R_U_FW);
+    CHECK(c.s[0].v[R_U_FW].st == V_GATED && c.loads == 0 && m_nloads == 0 && (c.blocks >> B_U2 & 1));
+    c.s[0].v[R_G_MA0].v = 0x1;
+    read_row(&c, &c.s[0], &c.s[0], R_U_FW);
+    CHECK(c.s[0].v[R_U_FW].st == V_OK && c.loads == 1 && m_nloads == 1);
+    /* The line cap holds at its boundary: a line that would leave fewer lines free than it must keep is cut and counted, one that leaves exactly that many is printed. */
+    m_reset_run();
+    m_ctx_init(&c);
+    pl_begin(&line);
+    tx(&line, PREFIX);
+    tx(&line, "T");
+    c.lines = LINE_CAP - 1u;
+    CHECK(emit(&c, &line, 1) == 0 && c.cuts == 1 && c.lines == LINE_CAP - 1u && m_nlines == 0);
+    c.lines = LINE_CAP - 2u;
+    CHECK(emit(&c, &line, 1) == 1 && c.cuts == 1 && c.lines == LINE_CAP - 1u && m_nlines == 1);
+    CHECK(emit(&c, &line, 0) == 1 && c.lines == LINE_CAP && emit(&c, &line, 0) == 0 && c.cuts == 2 && m_nlines == 2);
     return 0;
 }
 

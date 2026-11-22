@@ -44,7 +44,7 @@ SOURCE = ROOT / 'payloads' / 'inputsnap.c'
 REGS = ROOT / 'payloads' / 'inputsnap-regs.h'
 MAKE_ARGS = ['-f', 'platform/uefi/Makefile']
 TOOLS = ('clang', 'ld.lld', 'make', 'llvm-objdump', 'llvm-readelf', 'llvm-objcopy')
-SUITES = ('table', 'unit', 'decode', 'gate', 'drift', 'note', 'stream', 'order', 'faults', 'faults2', 'faults3', 'wide', 'storm', 'counter', 'spin', 'el', 'budget')
+SUITES = ('table', 'unit', 'decode', 'gate', 'gate2', 'drift', 'note', 'stream', 'order', 'faults', 'faults2', 'faults3', 'wide', 'storm', 'counter', 'spin', 'el', 'budget')
 
 
 def need_tools():

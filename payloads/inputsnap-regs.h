@@ -237,6 +237,14 @@ static const char reg_key[R_COUNT][8] = {
 #undef X
 };
 static const uint8_t block_first[BLOCKS + 1] = {R_G_MA0, R_I_CTL, R_U_FW, R_S_FW, R_T_F8, R_U_CM, R_S_CM, R_I_G616, R_COUNT};
+/* The vote that backs each of the four AHB clocks that declare a hardware gating bit: the apps' enable bit of the clock in the vote word it is registered in (gcc-x1e80100.c:4955-4961,
+ * 4970-4976, 4985-4991 and 5000-5006: wrapper 0's m_ahb and s_ahb in 0x52020 bits 6 and 7, wrapper 1's in 0x52008 bits 20 and 21). A hardware-gated clock whose CLK_OFF is set is a healthy
+ * idle clock only if something asked for it, so the engine gate takes `.HW` as running only when this bit is set in the vote word of the snapshot that read it. */
+struct hw_vote {
+    uint8_t clock, vote, bit, pad;
+};
+_Static_assert(sizeof(struct hw_vote) == 4, "inputsnap: a vote row is 4 bytes");
+static const struct hw_vote hw_votes[4] = {{R_G_MA0, R_G_VT0, 6, 0}, {R_G_SA0, R_G_VT0, 7, 0}, {R_G_MA1, R_G_VT1, 20, 0}, {R_G_SA1, R_G_VT1, 21, 0}};
 #define S1_LOADS_MAX 86u                /* the rows of the first five blocks, once each; no wide row among them */
 #define S2_LOADS_MAX 19u                /* the rows flagged F_S2: eleven clock words, six engine words, two pin levels */
 #define X_LOADS_MAX 27u                 /* the rows of the late blocks, a wide row as two loads: the table gives all three numbers (tools/test-q1n1-sp11-payload-inputsnap.c) */

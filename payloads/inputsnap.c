@@ -20,7 +20,8 @@
  * late blocks (X U2, X S10, X GIC), so that a hang on a word nobody has read through Linux loses nothing the run exists for. Every block is announced by a `NEXT <block>` line
  * before its first load, and is not read at all if the line cannot be printed (a late block also not if no line of values would fit after it), so that the last line on the
  * panel names what hung. The first load of a block is a register Linux reads; the late blocks hold none. An engine is read only if every one of its clock words (the wrapper's
- * two AHB clocks and core clock, the engine's own clock, and for the SPI engine its QSPI clock) has been read and does not say the clock is stopped: otherwise the block is
+ * two AHB clocks and core clock, the engine's own clock, and for the SPI engine its QSPI clock) has been read and does not say the clock is stopped (an AHB clock in hardware
+ * gating mode counts as running only with its vote set, and no clock word counts when the three vote words read zero): otherwise the block is
  * one line, `<engine> GATED OFF`, or `GATED ERR` when a word could not be read (fail closed: an unread word counts as stopped, but is not reported as a clock that says so).
  * Each line goes out as soon as its loads are done, so that a hang keeps what was printed before it; snapshot 2 says what it found in GCC on the next NEXT line and gates the
  * engine on its own clock words again, and the late blocks gate on the freshest clock words there are.
@@ -56,8 +57,9 @@ enum { RD_OK, RD_RANGE, RD_ALIGN, RD_DEAD, RD_BUDGET, RD_FAULT };
 /* The state of one value: V_NONE not read (snapshot 2 reads only what snapshot 1 read), V_SKIP not read after an abort, V_GATED not read because the engine's clock words
  * do not all read ON. */
 enum { V_NONE, V_OK, V_FAULT, V_SKIP, V_BUDGET, V_GATED };
-/* What a branch clock word says (clock_state()), and what the clock words of an engine say together (engine_gate()): OFF is a word that read and says stopped, ERR is a word
- * that did not read, or read as nothing a clock word can be, and no word that says stopped. */
+/* What a branch clock word says (clock_state()), and what the clock words of an engine say together (engine_gate()): OFF is a word that read and says stopped, or says hardware
+ * gating with no vote behind it, ERR is a word that did not read, or read as nothing a clock word can be, or the vote evidence it needs did not read or is absent, and no word that
+ * says stopped. */
 enum { CK_ON, CK_OFF, CK_HW, CK_ODD };
 enum { GATE_OPEN, GATE_OFF, GATE_ERR };
 /* How the wait ended: the counter reached the gap, it does not run (it stands still or runs backwards), or it runs and SPIN_MAX reads were not enough. */
@@ -242,12 +244,14 @@ OUT_OF_LINE unsigned dead_bit(unsigned win, unsigned grp)
     return win == WIN_GCC ? grp : 2u + win;
 }
 
-/* A register of a window. */
+/* A register of a window. A window the table does not have, an offset past the window and one that is not aligned are refused before anything is loaded. */
 OUT_OF_LINE int rd32(struct ctx *c, unsigned win, unsigned grp, uint64_t off, uint32_t *value)
 {
     int rc;
     *value = 0;
-    if (off & 3) {
+    if (win >= WINDOWS) {
+        rc = RD_RANGE;
+    } else if (off & 3) {
         rc = RD_ALIGN;
     } else if (off >= windows[win].size || windows[win].size - off < 4) {
         rc = RD_RANGE;
@@ -271,7 +275,8 @@ OUT_OF_LINE int rd64(struct ctx *c, unsigned win, unsigned grp, uint64_t off, ui
 
 /* What a branch clock word says. ON: CLK_OFF (bit 31) clear, or the NoC FSM status (bits 30:28) says ON (2), which is how Linux reads a branch that is being enabled
  * (clk-branch.c, clk_branch2_check_halt). HW: CLK_OFF set, no FSM verdict, and the branch declares a hardware clock gating bit (the four AHB clocks: `hwcg`) with HW_CTL
- * (bit 1) set: Linux does not wait for the halt bit of a branch in hardware gating mode (clk_branch_wait, clk_branch_in_hwcg_mode), so the bit is no verdict. OFF: CLK_OFF set
+ * (bit 1) set: Linux does not wait for the halt bit of a branch in hardware gating mode (clk_branch_wait, clk_branch_in_hwcg_mode), so the bit is no verdict (engine_gate asks
+ * the clock's vote for one). OFF: CLK_OFF set
  * with neither of those. ODD: all ones, what a failed read returns, which no clock word is. Every branch that declares no hardware gating bit is judged by CLK_OFF alone, even
  * with bit 1 set. */
 OUT_OF_LINE unsigned clock_state(const struct val *v, unsigned hwcg)
@@ -284,8 +289,13 @@ OUT_OF_LINE unsigned clock_state(const struct val *v, unsigned hwcg)
 /* What the clock words of an engine say in a snapshot. An engine whose clock words do not ALL read ON is not read: a load from an engine without its bus or engine clock can
  * hang the SoC and no guard recovers that. A word that did not read (an abort, a skip, a window that was never visited) or that read as nothing a clock word can be is not a
  * clock that is off but one that is unknown, and an unknown clock is not read through either: GATE_ERR, which the page does not call OFF. GATE_OFF only when a word that read
- * says stopped. Only the two engine windows are ever gated. */
-OUT_OF_LINE unsigned engine_gate(const struct snap *s, unsigned win)
+ * says stopped. Only the two engine windows are ever gated.
+ * Two readings need more than the clock word, because a clock word alone cannot tell them from what a dead window or an idle clock nobody asked for also reads. `.HW` (CLK_OFF
+ * set with HW_CTL, which Linux does not wait on) is a healthy idle clock only if its apps vote is set: with the vote word read and the bit set it counts as running, with the bit clear
+ * as stopped, and with the word not read as unknown. And a window that reads zero everywhere shows every branch as running (CLK_OFF clear): when all three vote words read zero there is
+ * no vote behind any clock word, and the engine is not read. `votes` is the snapshot that read the vote words (snapshot 1: snapshot 2 and the late blocks do not read them again, so
+ * they are as old as the first reading; nothing runs between the two). */
+OUT_OF_LINE unsigned engine_gate(const struct snap *s, const struct snap *votes, unsigned win)
 {
     unsigned engine = win == WIN_U2 ? GATE_U2 : win == WIN_S10 ? GATE_S10 : 0, off = 0, unknown = 0;
     if (!engine) return GATE_OPEN;
@@ -297,9 +307,18 @@ OUT_OF_LINE unsigned engine_gate(const struct snap *s, unsigned win)
             continue;
         }
         state = clock_state(&s->v[id], regs[id].flags & F_HWCG);
+        if (state == CK_HW) {
+            state = CK_ODD;
+            for (unsigned k = 0; k < sizeof hw_votes / sizeof hw_votes[0]; k++) {
+                const struct val *vote = &votes->v[hw_votes[k].vote];
+                if (hw_votes[k].clock != id || vote->st != V_OK) continue;
+                state = vote->v >> hw_votes[k].bit & 1 ? CK_ON : CK_OFF;
+            }
+        }
         off |= state == CK_OFF;
         unknown |= state == CK_ODD;
     }
+    if (votes->v[R_G_VT0].st == V_OK && votes->v[R_G_VT1].st == V_OK && votes->v[R_G_VT2].st == V_OK && !(votes->v[R_G_VT0].v | votes->v[R_G_VT1].v | votes->v[R_G_VT2].v)) unknown = 1;
     return off ? GATE_OFF : unknown ? GATE_ERR : GATE_OPEN;
 }
 
@@ -321,7 +340,7 @@ OUT_OF_LINE void read_row(struct ctx *c, struct snap *s, const struct snap *gate
     v->code = 0;
     v->st = V_NONE;
     /* stream_block() and snapshot_two() decide first and say so on the page; this is the check at the load itself, so that no path reaches an engine's registers without it. */
-    if (engine_gate(gate, r->win) != GATE_OPEN) {
+    if (engine_gate(gate, &c->s[0], r->win) != GATE_OPEN) {
         v->st = V_GATED;
         c->blocks |= 1u << r->block;
         return;
@@ -494,7 +513,7 @@ OUT_OF_LINE unsigned room_for(const struct ctx *c, unsigned b)
 OUT_OF_LINE void stream_block(struct ctx *c, struct snap *s, const struct snap *gate, unsigned b)
 {
     struct out o;
-    unsigned verdict = engine_gate(gate, block_win[b]), keep = b >= B_XU2 ? KEEP_X : KEEP_DATA;
+    unsigned verdict = engine_gate(gate, &c->s[0], block_win[b]), keep = b >= B_XU2 ? KEEP_X : KEEP_DATA;
     if (verdict != GATE_OPEN) {
         struct pl_line gated;
         for (unsigned id = block_first[b]; id < block_first[b + 1]; id++) {
@@ -681,7 +700,7 @@ OUT_OF_LINE void snapshot_two(struct ctx *c)
         struct pl_line next;
         if (!window_has_reads(c, win)) continue;
         /* An engine whose clock words went off during the wait, or that S2's own GCC pass could not read, is not visited: S2's own clock words, read just before, decide. */
-        verdict = engine_gate(&c->s[1], win);
+        verdict = engine_gate(&c->s[1], &c->s[0], win);
         pl_begin(&next);
         tx(&next, verdict != GATE_OPEN ? "S2 " : "NEXT S2 ");
         tx(&next, window_name[win]);

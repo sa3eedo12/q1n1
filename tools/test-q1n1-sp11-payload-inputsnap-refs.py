@@ -102,6 +102,20 @@ class Pinned(unittest.TestCase):
         for struct, _ in CLOCKS.values():
             self.assertIn(refs.struct_field(gcc, struct, 'enable_reg'), VOTES.values())
 
+    def test_the_vote_bits_of_the_hardware_gated_clocks_are_the_pinned_ones(self):
+        # The engine gate counts a clock that says only `.HW` as running when this vote bit is set (the review of v1, finding 1): the four rows of the payload's vote table are the
+        # four AHB clocks that name a hardware gating bit, each with the vote word and the bit its pinned struct enables it by.
+        gcc = self.f('gcc')
+        found = re.findall(r'\{R_(G_[A-Z0-9]+), R_(G_VT\d), (\d+), 0\}', self.regs_text[self.regs_text.index('hw_votes['):])
+        self.assertEqual([clock for clock, _, _ in found], ['G_MA0', 'G_SA0', 'G_MA1', 'G_SA1'])
+        hwcg = {key for key, (struct, _) in CLOCKS.items() if refs.struct_field(gcc, struct, 'hwcg_reg')}
+        self.assertEqual({clock[2:] for clock, _, _ in found}, hwcg, 'a vote row for every clock that names a hardware gating bit, and for no other')
+        for clock, vote, bit in found:
+            struct = CLOCKS[clock[2:]][0]
+            with self.subTest(clock=clock):
+                self.assertEqual(refs.struct_field(gcc, struct, 'enable_reg'), f'0x{self.by_key[("B_GCC", vote[2:])]["off"]:x}')
+                self.assertEqual(refs.struct_field(gcc, struct, 'enable_mask'), f'BIT({bit})')
+
     def test_the_gates_are_the_clocks_each_engine_needs(self):
         gcc = self.f('gcc')
         # The UART engine (uart2, wrapper 0) needs the wrapper's two AHB clocks, its core clock and its own s2 clock; the SPI engine (spi10, wrapper 1) the same of wrapper
