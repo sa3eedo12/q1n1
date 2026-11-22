@@ -33,6 +33,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import sp11_payload_manifest as manifest_tool  # noqa: E402
+import sp11_payload_testlib as lib  # noqa: E402
 
 UEFI = ROOT / 'platform' / 'uefi'
 DOC = ROOT / 'docs' / 'SP11-PAYLOAD-BIGFILE.md'
@@ -156,25 +157,15 @@ class BigfileGateOff(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return [' '.join(line.split()) for line in done.stdout.replace('\\\n', ' ').splitlines()]
 
-    def newer_payloads(self, base):
-        """The payloads this tree has and the base commit lacks: `all` builds them, so their command lines are not the base's to compare."""
-        return {path.stem for path in (ROOT / 'payloads').glob('*.c')} - {path.stem for path in (base / 'payloads').glob('*.c')}
-
     def test_the_makefiles_command_lines_are_the_base_commits_with_the_gate_off(self):
         base = base_tree()
         if base is None:
             self.skipTest(f'git cannot name {BASE_COMMIT}')
-        newer = self.newer_payloads(base)
-        about_newer = re.compile(r'/(?:%s)(?:[./\s]|$)' % '|'.join(sorted(newer))) if newer else None
         for args in (['SP11=1', 'all'], ['SP11=1', 'PAYLOAD=1', 'payload-runner'], ['SP11=1', 'PAYLOAD=1', 'SMMUMAP=1', 'payload-runner'],
                      ['SP11=1', 'PAYLOAD=1', 'BIGFILE=0', 'payload-runner'], ['SP11=1', 'PAYLOAD=1', 'all']):
             with self.subTest(args=args):
-                mine = self.make_lines(ROOT, *args)
-                theirs = self.make_lines(base, *[a for a in args if a != 'BIGFILE=0'])
-                if about_newer:
-                    # `all` also creates the directory once for each newer payload's object, and those lines name no payload.
-                    mine = [line for line in mine if not about_newer.search(line) and not line.startswith('mkdir -p ')]
-                    theirs = [line for line in theirs if not line.startswith('mkdir -p ')]
+                mine = lib.without_newer_payloads(BASE_COMMIT, self.make_lines(ROOT, *args))
+                theirs = lib.without_newer_payloads(BASE_COMMIT, self.make_lines(base, *[a for a in args if a != 'BIGFILE=0']))
                 self.assertGreater(len(mine), 10)
                 self.assertEqual(mine, theirs)
                 self.assertNotIn('bigfile', ' '.join(mine).lower())

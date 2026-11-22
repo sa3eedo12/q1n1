@@ -26,6 +26,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import sp11_payload_smmumap_mutants as mut  # noqa: E402
+import sp11_payload_testlib as lib  # noqa: E402
 
 UEFI = ROOT / 'platform' / 'uefi'
 TOOLS = ROOT / 'tools'
@@ -95,12 +96,6 @@ def base_tree():
         archive = subprocess.run(['git', 'archive', BASE_COMMIT], cwd=ROOT, capture_output=True, check=True).stdout
         subprocess.run(['tar', '-x', '-C', str(target)], input=archive, check=True)
     return target
-
-
-def newer_payload_stems():
-    """The payloads this tree has and the base commit lacks (`all` builds them, and their files are not the gate's): the stems of payloads/*.c."""
-    names = run(['git', 'ls-tree', '--name-only', BASE_COMMIT, 'payloads/']).stdout.split()
-    return {path.stem for path in (ROOT / 'payloads').glob('*.c')} - {Path(name).stem for name in names if name.endswith('.c')}
 
 
 class SmmumapNative(unittest.TestCase):
@@ -577,10 +572,7 @@ class SmmumapGateOff(unittest.TestCase):
     def test_only_the_gates_files_differ_from_the_base_commit_in_platform_and_payloads(self):
         if run(['git', 'cat-file', '-e', f'{BASE_COMMIT}^{{commit}}']).returncode != 0:
             self.skipTest(f'git cannot name {BASE_COMMIT}')
-        changed = set(run(['git', 'diff', '--name-only', BASE_COMMIT, '--', 'platform', 'payloads']).stdout.split())
-        changed |= set(run(['git', 'ls-files', '--others', '--exclude-standard', '--', 'platform', 'payloads']).stdout.split())
-        newer = newer_payload_stems()
-        changed = {name for name in changed if not (name.startswith('payloads/') and any(Path(name).name.split('.')[0] in (stem, f'{stem}-regs') for stem in newer))}
+        changed = lib.changed_since(BASE_COMMIT, 'platform', 'payloads')
         self.assertEqual(changed, {'platform/uefi/Makefile', 'platform/uefi/main.c', 'platform/uefi/sp11-payload-run.c', 'platform/uefi/sp11-payload.h',
                                    'platform/uefi/sp11-smmumap.c', 'platform/uefi/sp11-smmumap.h', 'platform/uefi/sp11-smmumap-el2.c',
                                    'platform/uefi/sp11-payload-load.c', 'platform/uefi/sp11-payload-plan.c'})   # the last two: BIGFILE
@@ -594,16 +586,10 @@ class SmmumapGateOff(unittest.TestCase):
         base = base_tree()
         if base is None:
             self.skipTest(f'git cannot name {BASE_COMMIT}')
-        newer = newer_payload_stems()
-        about_newer = re.compile(r'/(?:%s)(?:[./\s]|$)' % '|'.join(sorted(newer))) if newer else None
         for args in (['SP11=1', 'all'], ['SP11=1', 'PAYLOAD=1', 'payload-runner'], ['SP11=1', 'PAYLOAD=1', 'SMMUMAP=0', 'payload-runner'], ['SP11=1', 'PAYLOAD=1', 'all']):
             with self.subTest(args=args):
-                mine = self.make_lines(ROOT, *args)
-                theirs = self.make_lines(base, *[a for a in args if a != 'SMMUMAP=0'])
-                if about_newer:
-                    # `all` also creates the directory once for each newer payload's object, and those lines name no payload.
-                    mine = [line for line in mine if not about_newer.search(line) and not line.startswith('mkdir -p ')]
-                    theirs = [line for line in theirs if not line.startswith('mkdir -p ')]
+                mine = lib.without_newer_payloads(BASE_COMMIT, self.make_lines(ROOT, *args))
+                theirs = lib.without_newer_payloads(BASE_COMMIT, self.make_lines(base, *[a for a in args if a != 'SMMUMAP=0']))
                 self.assertGreater(len(mine), 10)
                 self.assertEqual(mine, theirs)
                 self.assertNotIn('smmumap', ' '.join(mine).lower())

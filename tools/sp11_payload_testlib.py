@@ -27,6 +27,31 @@ def run(cmd, cwd=ROOT, **kw):
     return subprocess.run(cmd, cwd=cwd, env=ENV, capture_output=True, text=True, **kw)
 
 
+def newer_payloads(base_commit, root=ROOT):
+    """The payloads in the tree that `base_commit` lacks (the stems of payloads/*.c). The gate-off tests compare the tree with the commit their gate was
+    built on, and `make all` builds every payload, so a payload added later is not a difference the gate made."""
+    listed = run(['git', 'ls-tree', '--name-only', base_commit, 'payloads/'], cwd=root).stdout.split()
+    return {path.stem for path in (Path(root) / 'payloads').glob('*.c')} - {Path(name).stem for name in listed if name.endswith('.c')}
+
+
+def changed_since(base_commit, *paths, root=ROOT):
+    """The tracked and untracked files below `paths` that differ from `base_commit`, without the files of the newer payloads."""
+    names = set(run(['git', 'diff', '--name-only', base_commit, '--', *paths], cwd=root).stdout.split())
+    names |= set(run(['git', 'ls-files', '--others', '--exclude-standard', '--', *paths], cwd=root).stdout.split())
+    own = {part for stem in newer_payloads(base_commit, root) for part in (stem, f'{stem}-regs')}
+    return {name for name in names if not (name.startswith('payloads/') and Path(name).name.split('.')[0] in own)}
+
+
+def without_newer_payloads(base_commit, lines, root=ROOT):
+    """`make -n` command lines without those that name a newer payload and without the directory creation they cause: `all` makes the directory
+    once for each of them, and those lines name no payload. Every other line stays, so a changed flag of an older payload is still a difference."""
+    newer = newer_payloads(base_commit, root)
+    if not newer:
+        return list(lines)
+    named = re.compile(r'/(?:%s)(?:[./\s]|$)' % '|'.join(sorted(newer)))
+    return [line for line in lines if not named.search(line) and not line.startswith('mkdir -p ')]
+
+
 def makefile_flags(variable, makefile=MAKEFILE):
     """The words of `VARIABLE := ...` (with backslash continuations) in the Makefile."""
     text = Path(makefile).read_text(encoding='utf-8')
