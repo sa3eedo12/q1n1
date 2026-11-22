@@ -304,6 +304,13 @@ OPS_RUNNER_MUTANTS = [
     ('the destination of ops.load32 is not checked against the stack (the check that was there before the table)',
      'if (stack_size < 4 || where < stack_base || where - stack_base > stack_size - 4) return Q1N1_PAYLOAD_LOAD_E_OUT;\n', '(void)stack_base;\n    (void)stack_size;\n',
      {'ops/load32_out_of_the_stack.is_still_refused'}),
+    ('ops.hex and ops.puts share one bit of "the first refusal of this op was printed"', 'refuse_pointer_op(2u, "PUTS", line, 0);', 'refuse_pointer_op(1u, "PUTS", line, 0);',
+     {'ops/hex_and_puts_both_refused.each_op_has_its_own_line'}),
+    ('ops.hex may write into the payload\'s image (the destination is the stack only); the check of the stack stays as it was',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n',
+     'static uint32_t op_hex(char *dst, uint32_t cap, uint64_t value)\n{\n#if Q1N1_SP11_WTAB\n'
+     '    if (q1n1_wtab_hex_ok(dst, cap, session.image_base, session.image_size)) return (uint32_t)q1n1_payload_fmt_hex(dst, cap, value);\n',
+     {'ops/hex_into_the_image.nothing_is_written'}),
 ]
 
 
