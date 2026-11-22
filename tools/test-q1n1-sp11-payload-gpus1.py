@@ -123,7 +123,15 @@ class Tables(unittest.TestCase):
     def test_the_generated_headers_are_what_the_tool_makes(self):
         for json_path, header in ((LIVE_JSON, 'gpus1-table.h'), (DRY_JSON, 'gpus1d-table.h')):
             _, table = load(json_path)
-            self.assertEqual((PAYLOADS / header).read_text(encoding='utf-8'), wtab.emit_c(table), f'{header} is stale: rerun tools/sp11_wtab.py emit-c')
+            text = (PAYLOADS / header).read_text(encoding='utf-8')
+            self.assertEqual(text, wtab.emit_c(table), f'{header} is stale: rerun tools/sp11_wtab.py emit-c')
+            head = text.split('#pragma once')[0]
+            if table.draft:
+                self.assertIn('is a DRAFT and is NOT to be approved', head)
+                self.assertNotIn('operator approves', head)
+            else:
+                self.assertIn('operator approves', head)
+                self.assertNotIn('DRAFT', head)
 
     def test_the_dry_table_decodes_from_its_own_bytes(self):
         _, table = load(DRY_JSON)

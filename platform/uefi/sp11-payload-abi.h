@@ -16,7 +16,7 @@
  * so it is freestanding (stdint and stddef only) and has no gate: it only declares the contract.
  * Everything here is EXPERIMENTAL: built and tested on a host and on QEMU's EDK2, hardware NOT RUN.
  *
- * The ops table holds no store of its own, but two ops act through a pointer the payload chooses: hex writes
+ * The ops table holds no store of its own, but three ops act through a pointer the payload chooses: hex writes
  * up to `cap` bytes through `dst`, puts reads a string through `line`, and load32 writes its answer through
  * `out`. load32 always refuses an `out` outside the payload's stack. A runner built with the write-table gate
  * (docs/SP11-PAYLOAD-WTAB.md) also refuses a hex `dst` outside the stack and a puts string outside the stack

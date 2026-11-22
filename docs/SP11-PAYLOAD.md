@@ -261,7 +261,7 @@ layout is pinned by `_Static_assert` and by a native test that compares it with 
 | 120 | 32 | `ops` | the ops table below |
 | 152 | 40 | `reserved[5]` | zero in version 1; room for more ops or fields without moving any offset |
 
-The ops table (offsets within `struct q1n1_payload_ops`; it stores only through `hex` and `load32`, [restricted to the stack](SP11-PAYLOAD-WTAB.md)):
+The ops table (offsets within `struct q1n1_payload_ops`; `load32` stores only to the stack, `hex` is held to it only by [WTAB=1](SP11-PAYLOAD-WTAB.md)):
 
 | Offset | Size | Op | Meaning |
 | --- | --- | --- | --- |
@@ -441,8 +441,8 @@ second hash passes), and payload lines reach the right-hand column, 58 of them a
   `\Snapintosh\q1n1-preload.bin` is never read.
 * Fail closed: every refusal before the bounce returns to the Shell; a payload that does not verify at EL2 is not
   called and ends the chain; an unsupported request is an error, never a made-up success.
-* Only `hex` and `load32` store. `load32` is a guarded load with a destination restricted to the payload stack and a
-  budget (`hex` too in a write-table runner). The glue in `main.c` forwards loads only (a source audit checks it).
+* Only `hex` and `load32` store. `load32` is a guarded load with a budget and a destination restricted to the payload stack (`hex` too, only under
+  WTAB=1). The glue in `main.c` forwards loads only (a source audit checks it).
 * The framebuffer is never declared. Nothing is allocated between the last GetMemoryMap and ExitBootServices.
 * Every payload's hash is verified twice, the second time right before its call. A payload is not sandboxed, and
   neither is a chain (see "The chain").
