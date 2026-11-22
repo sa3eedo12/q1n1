@@ -201,6 +201,11 @@ POLICIES['gpusnap'] = {'registers': {'currentel', 'cntfrq_el0'}, 'smc': 0, 'byte
 # which tools/sp11_payload_memcheck.py proves from the disassembly (the compiled-code audit, tools/sp11_payload_gpusnap2_audit.py, proves it again from the IR).
 POLICIES['gpusnap2'] = {'registers': {'currentel'}, 'smc': 0, 'bytes': 16384, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
                         'read_only': True}
+# inpsnap2 (docs/SP11-PAYLOAD-INPSNAP2.md) stores nothing outside its own stack and reads every word (the clock controller's and the QUP wrapper's) through the runner's guarded load:
+# MRS of CurrentEL only (it has no counter, does not wait and takes no second snapshot), no SMC, no barrier at all, and `read_only`, which tools/sp11_payload_memcheck.py checks from
+# the disassembly (the compiled-code audit, tools/sp11_payload_inpsnap2_audit.py, checks the base of every store again from the IR; neither checks an offset).
+POLICIES['inpsnap2'] = {'registers': {'currentel'}, 'smc': 0, 'bytes': 8192, 'forbid': {'isb', 'dsb', 'dmb', 'sb', 'sev', 'sevl'},
+                        'read_only': True}
 # dispsnap (docs/SP11-PAYLOAD-DISPSNAP.md) stores nothing outside its own stack and reads every device word through the runner's guarded load: MRS of
 # CurrentEL and CNTFRQ_EL0, no SMC, no barrier at all, and `read_only`, which tools/sp11_payload_memcheck.py proves from the disassembly (the compiled-code
 # audit, tools/sp11_payload_dispsnap_audit.py, proves it again from the IR). Its loads through the arguments are the GOP mode it prints.
